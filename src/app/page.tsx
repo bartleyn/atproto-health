@@ -7,6 +7,7 @@ import {
   getCloudflareBreakdown,
   getUserDistribution,
   getTopPdsByUsers,
+  getLatestFirehoseSample,
 } from "@/lib/db/queries";
 import { SimpleBarChart, DonutChart } from "@/components/charts";
 
@@ -43,6 +44,7 @@ export default function Home() {
   const cdnBreakdown = getCloudflareBreakdown();
   const userDist = getUserDistribution();
   const topPds = getTopPdsByUsers();
+  const firehose = getLatestFirehoseSample();
 
   const hasUserData = stats.activeUsers > 0;
 
@@ -166,6 +168,9 @@ export default function Home() {
         )}
       </div>
 
+      {/* Federation health */}
+      {firehose && <FederationSection sample={firehose} />}
+
       {/* Top PDSes by users */}
       {hasUserData && topPds.length > 0 && (
         <div className="mb-12">
@@ -260,13 +265,77 @@ export default function Home() {
   );
 }
 
+function FederationSection({ sample }: { sample: NonNullable<ReturnType<typeof getLatestFirehoseSample>> }) {
+  const fed = sample.federation;
+  const trueFed = (fed["bsky-to-third"] ?? 0) + (fed["third-to-bsky"] ?? 0) + (fed["third-to-third"] ?? 0);
+  const trueFedRate = sample.resolvedInteractions > 0
+    ? ((trueFed / sample.resolvedInteractions) * 100).toFixed(1)
+    : "0";
+  const rawCrossRate = sample.resolvedInteractions > 0
+    ? ((sample.crossPds / sample.resolvedInteractions) * 100).toFixed(1)
+    : "0";
+
+  const fedData = [
+    { name: "Bluesky internal", value: fed["bsky-internal"] ?? 0 },
+    { name: "Bluesky → 3rd party", value: fed["bsky-to-third"] ?? 0 },
+    { name: "3rd party → Bluesky", value: fed["third-to-bsky"] ?? 0 },
+    { name: "3rd party → 3rd party", value: fed["third-to-third"] ?? 0 },
+    { name: "Same PDS", value: fed["same-pds"] ?? 0 },
+  ];
+
+  const byTypeData = Object.entries(sample.byType).map(([type, stats]) => {
+    const resolved = stats.crossPds + stats.samePds;
+    return {
+      name: type,
+      value: resolved > 0 ? Math.round((stats.crossPds / resolved) * 100) : 0,
+    };
+  });
+
+  return (
+    <div className="mb-12">
+      <h2 className="text-lg font-semibold mb-1">Federation Health</h2>
+      <p className="text-sm text-gray-500 mb-4">
+        Sampled {sample.totalEvents.toLocaleString()} firehose events over{" "}
+        {(sample.durationMs / 1000).toFixed(0)}s ({sample.eventsPerSecond} evt/s)
+        {" \u00b7 "}
+        {new Date(sample.sampledAt + "Z").toLocaleString()}
+      </p>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+        <StatCard label="True Federation Rate" value={Number(trueFedRate)} suffix="%" accent="cyan" />
+        <StatCard label="Raw Cross-PDS Rate" value={Number(rawCrossRate)} suffix="%" />
+        <StatCard label="Interactions Sampled" value={sample.resolvedInteractions} />
+        <StatCard label="True Federated" value={trueFed} accent="green" />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        <ChartCard
+          title="Interaction Flow"
+          subtitle="Where interactions cross boundaries"
+        >
+          <DonutChart data={fedData} />
+        </ChartCard>
+
+        <ChartCard
+          title="Cross-PDS Rate by Type"
+          subtitle="% of resolved interactions that cross PDS boundaries"
+        >
+          <SimpleBarChart data={byTypeData} color="#10b981" layout="horizontal" />
+        </ChartCard>
+      </div>
+    </div>
+  );
+}
+
 function StatCard({
   label,
   value,
+  suffix,
   accent,
 }: {
   label: string;
   value: number;
+  suffix?: string;
   accent?: "green" | "red" | "blue" | "purple" | "cyan";
 }) {
   const accentMap: Record<string, string> = {
@@ -281,7 +350,7 @@ function StatCard({
   return (
     <div className="rounded-lg border border-gray-800 bg-gray-900 p-4">
       <div className={`text-2xl font-semibold tabular-nums ${accentColor}`}>
-        {value.toLocaleString()}
+        {value.toLocaleString()}{suffix && <span className="text-lg">{suffix}</span>}
       </div>
       <div className="text-xs text-gray-400 mt-1">{label}</div>
     </div>

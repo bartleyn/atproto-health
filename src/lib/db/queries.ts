@@ -303,3 +303,46 @@ export function getTopPdsByUsers(limit = 25): TopPds[] {
     )
     .all(limit) as TopPds[];
 }
+
+// ── Firehose / Federation queries ─────────────────────────────────────
+
+export interface FirehoseSample {
+  id: number;
+  sampledAt: string;
+  durationMs: number;
+  totalEvents: number;
+  totalInteractions: number;
+  resolvedInteractions: number;
+  crossPds: number;
+  samePds: number;
+  eventsPerSecond: number;
+  byType: Record<string, { total: number; crossPds: number; samePds: number }>;
+  federation: Record<string, number>;
+  topCrossPdsPairs: Array<{ from: string; to: string; count: number }>;
+}
+
+export function getLatestFirehoseSample(): FirehoseSample | null {
+  const db = getDb();
+  const row = db
+    .prepare(
+      `SELECT * FROM firehose_samples ORDER BY id DESC LIMIT 1`
+    )
+    .get() as Record<string, unknown> | undefined;
+
+  if (!row) return null;
+
+  return {
+    id: row.id as number,
+    sampledAt: row.sampled_at as string,
+    durationMs: row.duration_ms as number,
+    totalEvents: row.total_events as number,
+    totalInteractions: row.total_interactions as number,
+    resolvedInteractions: row.resolved_interactions as number,
+    crossPds: row.cross_pds as number,
+    samePds: row.same_pds as number,
+    eventsPerSecond: row.events_per_second as number,
+    byType: JSON.parse(row.by_type as string),
+    federation: JSON.parse(row.federation as string),
+    topCrossPdsPairs: JSON.parse(row.top_cross_pds_pairs as string),
+  };
+}

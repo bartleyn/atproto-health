@@ -9,7 +9,8 @@
     "lint": "next lint",
     "collect": "npx tsx src/lib/collectors/run.ts",
     "collect:geo": "npx tsx src/lib/collectors/run.ts --geo",
-    "collect:users": "npx tsx src/lib/collectors/run.ts --users"
+    "collect:users": "npx tsx src/lib/collectors/run.ts --users",
+    "sample": "npx tsx src/lib/collectors/run-jetstream.ts"
   },
   "keywords": [],
   "author": "",
@@ -18,13 +19,15 @@
     "next": "^16.1.6",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
-    "recharts": "^3.8.0"
+    "recharts": "^3.8.0",
+    "ws": "^8.19.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.2.1",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.3.5",
     "@types/react": "^19.2.14",
+    "@types/ws": "^8.18.1",
     "better-sqlite3": "^12.6.2",
     "eslint": "^9.39.4",
     "eslint-config-next": "^16.1.6",

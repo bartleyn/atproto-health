@@ -74,5 +74,20 @@ function migrate(db: Database.Database) {
       ON pds_snapshots(collected_at);
     CREATE INDEX IF NOT EXISTS idx_pds_snapshots_run_id
       ON pds_snapshots(run_id);
+
+    CREATE TABLE IF NOT EXISTS firehose_samples (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sampled_at TEXT NOT NULL DEFAULT (datetime('now')),
+      duration_ms INTEGER NOT NULL,
+      total_events INTEGER NOT NULL,
+      total_interactions INTEGER NOT NULL,
+      resolved_interactions INTEGER NOT NULL,
+      cross_pds INTEGER NOT NULL,
+      same_pds INTEGER NOT NULL,
+      events_per_second INTEGER NOT NULL,
+      by_type TEXT NOT NULL,              -- JSON: {like: {total, crossPds, samePds}, ...}
+      federation TEXT NOT NULL DEFAULT '{}', -- JSON: {bsky-internal, bsky-to-third, ...}
+      top_cross_pds_pairs TEXT NOT NULL   -- JSON array
+    );
   `);
 }

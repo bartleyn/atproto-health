@@ -304,6 +304,29 @@ export function getTopPdsByUsers(limit = 25): TopPds[] {
     .all(limit) as TopPds[];
 }
 
+// ── Geographic map query ───────────────────────────────────────────────
+
+export interface PdsLocation {
+  latitude: number;
+  longitude: number;
+  url: string;
+  userCountActive: number | null;
+  city: string | null;
+  country: string | null;
+}
+
+export function getPdsLocations(): PdsLocation[] {
+  const db = getDb();
+  ensureMergedView();
+  return db
+    .prepare(
+      `SELECT latitude, longitude, url, user_count_active as userCountActive, city, country
+       FROM pds_latest
+       WHERE latitude IS NOT NULL AND longitude IS NOT NULL`
+    )
+    .all() as PdsLocation[];
+}
+
 // ── Firehose / Federation queries ─────────────────────────────────────
 
 export interface FirehoseSample {

@@ -8,8 +8,10 @@ import {
   getUserDistribution,
   getTopPdsByUsers,
   getLatestFirehoseSample,
+  getPdsLocations,
 } from "@/lib/db/queries";
 import { SimpleBarChart, DonutChart } from "@/components/charts";
+import { WorldMap } from "@/components/world-map";
 
 export const dynamic = "force-dynamic";
 
@@ -45,6 +47,7 @@ export default function Home() {
   const userDist = getUserDistribution();
   const topPds = getTopPdsByUsers();
   const firehose = getLatestFirehoseSample();
+  const locations = getPdsLocations();
 
   const hasUserData = stats.activeUsers > 0;
 
@@ -95,6 +98,17 @@ export default function Home() {
           />
         )}
       </div>
+
+      {/* Geographic map */}
+      {locations.length > 0 && (
+        <div className="rounded-lg border border-gray-800 bg-gray-900 p-5 mb-12">
+          <h2 className="text-base font-semibold mb-0.5">PDS Geographic Distribution</h2>
+          <p className="text-xs text-gray-500 mb-3">
+            {locations.length.toLocaleString()} located instances · dot size scales with user count
+          </p>
+          <WorldMap locations={locations} />
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-12">
         {/* Geographic distribution */}

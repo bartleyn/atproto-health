@@ -1,9 +1,10 @@
 import {
-  getLatestRun,
+  getLatestRunInfo,
   getOverviewStats,
   getCountryDistribution,
   getVersionDistribution,
   getHostingProviders,
+  getCloudflareBreakdown,
   getUserDistribution,
   getTopPdsByUsers,
 } from "@/lib/db/queries";
@@ -12,9 +13,9 @@ import { SimpleBarChart, DonutChart } from "@/components/charts";
 export const dynamic = "force-dynamic";
 
 export default function Home() {
-  const run = getLatestRun();
+  const runInfo = getLatestRunInfo();
 
-  if (!run) {
+  if (!runInfo.dirRun) {
     return (
       <main className="max-w-6xl mx-auto px-6 py-12">
         <h1 className="text-3xl font-bold mb-2">ATProto Health</h1>
@@ -35,12 +36,13 @@ export default function Home() {
     );
   }
 
-  const stats = getOverviewStats(run.id);
-  const countries = getCountryDistribution(run.id);
-  const versions = getVersionDistribution(run.id);
-  const providers = getHostingProviders(run.id);
-  const userDist = getUserDistribution(run.id);
-  const topPds = getTopPdsByUsers(run.id);
+  const stats = getOverviewStats();
+  const countries = getCountryDistribution();
+  const versions = getVersionDistribution();
+  const providers = getHostingProviders();
+  const cdnBreakdown = getCloudflareBreakdown();
+  const userDist = getUserDistribution();
+  const topPds = getTopPdsByUsers();
 
   const hasUserData = stats.activeUsers > 0;
 
@@ -53,10 +55,26 @@ export default function Home() {
             AT Protocol ecosystem health dashboard
           </p>
         </div>
-        <p className="text-sm text-gray-500">
-          Last collected:{" "}
-          {new Date(run.completedAt + "Z").toLocaleString()}
-        </p>
+        <div className="text-right text-xs text-gray-500 space-y-0.5">
+          {runInfo.dirRun && (
+            <p>
+              Directory:{" "}
+              {new Date(runInfo.dirRun.completedAt + "Z").toLocaleString()}
+            </p>
+          )}
+          {runInfo.geoRun && (
+            <p>
+              Geo:{" "}
+              {new Date(runInfo.geoRun.completedAt + "Z").toLocaleString()}
+            </p>
+          )}
+          {runInfo.usrRun && (
+            <p>
+              Users:{" "}
+              {new Date(runInfo.usrRun.completedAt + "Z").toLocaleString()}
+            </p>
+          )}
+        </div>
       </div>
 
       {/* Overview stats */}
@@ -89,13 +107,23 @@ export default function Home() {
         </ChartCard>
 
         {/* Hosting providers */}
-        <ChartCard title="Hosting Providers" subtitle="Normalized">
+        <ChartCard
+          title="Infrastructure Providers"
+          subtitle={`${cdnBreakdown.behindCdn} behind CDN \u00b7 ${cdnBreakdown.directHosting} direct \u00b7 ${cdnBreakdown.unknown} unknown`}
+        >
           <DonutChart
-            data={providers.slice(0, 12).map((p) => ({
-              name: p.provider,
-              value: p.count,
-            }))}
+            data={providers
+              .filter((p) => !p.isCdn)
+              .slice(0, 11)
+              .map((p) => ({
+                name: p.provider,
+                value: p.count,
+              }))}
           />
+          <p className="text-xs text-gray-500 mt-2">
+            {cdnBreakdown.behindCdn} PDSes behind Cloudflare/CDN (origin
+            host unknown) are excluded above.
+          </p>
         </ChartCard>
 
         {/* Version distribution */}

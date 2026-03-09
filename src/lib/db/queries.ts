@@ -1,19 +1,107 @@
 import { getDb } from "./schema";
 
-export interface LatestRun {
-  id: number;
-  completedAt: string;
+/**
+ * All dashboard queries work against a merged view that pulls the latest
+ * non-null value for each field category across all completed runs.
+ * This means you can run `collect:geo` and `collect:users` separately
+ * and the dashboard composites the freshest data for each PDS.
+ */
+
+// Ensures the merged view exists. Called once per request cycle.
+function ensureMergedView() {
+  const db = getDb();
+  db.exec(`
+    CREATE TEMPORARY VIEW IF NOT EXISTS pds_latest AS
+    SELECT
+      p.id as pds_id,
+      p.url,
+
+      -- directory data: from the most recent run (always collected)
+      dir.version,
+      dir.invite_code_required,
+      dir.is_online,
+      dir.error_at,
+
+      -- user data: latest run that has it
+      usr.user_count_total,
+      usr.user_count_active,
+      usr.did,
+      usr.available_domains,
+      usr.contact,
+      usr.links,
+
+      -- geo data: latest run that has it
+      geo.ip_address,
+      geo.country,
+      geo.country_code,
+      geo.region,
+      geo.city,
+      geo.latitude,
+      geo.longitude,
+      geo.isp,
+      geo.org,
+      geo.as_number,
+      geo.hosting_provider,
+
+      dir.run_id as dir_run_id,
+      usr.run_id as usr_run_id,
+      geo.run_id as geo_run_id
+
+    FROM pds_instances p
+
+    -- Latest directory snapshot (every run has this)
+    LEFT JOIN pds_snapshots dir ON dir.id = (
+      SELECT s.id FROM pds_snapshots s
+      JOIN collection_runs r ON r.id = s.run_id AND r.status = 'completed'
+      WHERE s.pds_id = p.id
+      ORDER BY s.run_id DESC LIMIT 1
+    )
+
+    -- Latest snapshot with user data
+    LEFT JOIN pds_snapshots usr ON usr.id = (
+      SELECT s.id FROM pds_snapshots s
+      JOIN collection_runs r ON r.id = s.run_id AND r.status = 'completed'
+      WHERE s.pds_id = p.id AND s.user_count_total IS NOT NULL
+      ORDER BY s.run_id DESC LIMIT 1
+    )
+
+    -- Latest snapshot with geo data
+    LEFT JOIN pds_snapshots geo ON geo.id = (
+      SELECT s.id FROM pds_snapshots s
+      JOIN collection_runs r ON r.id = s.run_id AND r.status = 'completed'
+      WHERE s.pds_id = p.id AND s.country IS NOT NULL
+      ORDER BY s.run_id DESC LIMIT 1
+    )
+
+    WHERE dir.id IS NOT NULL
+  `);
 }
 
-export function getLatestRun(): LatestRun | null {
+export interface LatestRunInfo {
+  dirRun: { id: number; completedAt: string } | null;
+  geoRun: { id: number; completedAt: string } | null;
+  usrRun: { id: number; completedAt: string } | null;
+}
+
+export function getLatestRunInfo(): LatestRunInfo {
   const db = getDb();
-  const row = db
-    .prepare(
-      `SELECT id, completed_at as completedAt FROM collection_runs
-       WHERE status = 'completed' ORDER BY id DESC LIMIT 1`
-    )
-    .get() as LatestRun | undefined;
-  return row ?? null;
+
+  function latestBySource(pattern: string) {
+    const row = db
+      .prepare(
+        `SELECT id, completed_at as completedAt FROM collection_runs
+         WHERE status = 'completed' AND source LIKE ?
+         ORDER BY id DESC LIMIT 1`
+      )
+      .get(pattern) as { id: number; completedAt: string } | undefined;
+    return row ?? null;
+  }
+
+  return {
+    dirRun: latestBySource("%"),  // every run collects directory
+    geoRun: latestBySource("%geo%") ?? latestBySource("%full%"),
+    usrRun: latestBySource("%users%") ?? latestBySource("%full%"),
+  };
 }
 
 export interface OverviewStats {
@@ -27,8 +115,9 @@ export interface OverviewStats {
   activeUsers: number;
 }
 
-export function getOverviewStats(runId: number): OverviewStats {
+export function getOverviewStats(): OverviewStats {
   const db = getDb();
+  ensureMergedView();
   return db
     .prepare(
       `SELECT
@@ -40,9 +129,9 @@ export function getOverviewStats(runId: number): OverviewStats {
         COUNT(DISTINCT CASE WHEN country_code IS NOT NULL THEN country_code END) as countries,
         COALESCE(SUM(user_count_total), 0) as totalUsers,
         COALESCE(SUM(user_count_active), 0) as activeUsers
-      FROM pds_snapshots WHERE run_id = ?`
+      FROM pds_latest`
     )
-    .get(runId) as OverviewStats;
+    .get() as OverviewStats;
 }
 
 export interface CountryCount {
@@ -51,16 +140,17 @@ export interface CountryCount {
   count: number;
 }
 
-export function getCountryDistribution(runId: number): CountryCount[] {
+export function getCountryDistribution(): CountryCount[] {
   const db = getDb();
+  ensureMergedView();
   return db
     .prepare(
       `SELECT country, country_code as countryCode, COUNT(*) as count
-       FROM pds_snapshots
-       WHERE run_id = ? AND country IS NOT NULL
+       FROM pds_latest
+       WHERE country IS NOT NULL
        GROUP BY country_code ORDER BY count DESC`
     )
-    .all(runId) as CountryCount[];
+    .all() as CountryCount[];
 }
 
 export interface VersionCount {
@@ -68,51 +158,75 @@ export interface VersionCount {
   count: number;
 }
 
-export function getVersionDistribution(runId: number): VersionCount[] {
+export function getVersionDistribution(): VersionCount[] {
   const db = getDb();
+  ensureMergedView();
   return db
     .prepare(
       `SELECT COALESCE(version, 'unknown') as version, COUNT(*) as count
-       FROM pds_snapshots
-       WHERE run_id = ?
+       FROM pds_latest
        GROUP BY version ORDER BY count DESC`
     )
-    .all(runId) as VersionCount[];
+    .all() as VersionCount[];
 }
 
 export interface HostingProviderCount {
   provider: string;
   count: number;
+  isCdn: boolean;
 }
 
-export function getHostingProviders(runId: number): HostingProviderCount[] {
+const PROVIDER_NORMALIZE_SQL = `
+  CASE
+    WHEN org LIKE '%Cloudflare%' THEN 'Cloudflare (CDN)'
+    WHEN org LIKE '%DigitalOcean%' OR org LIKE '%Digital Ocean%' THEN 'DigitalOcean'
+    WHEN org LIKE '%Hetzner%' OR org LIKE '%HETZNER%' THEN 'Hetzner'
+    WHEN org LIKE '%OVH%' THEN 'OVH'
+    WHEN org LIKE '%AWS%' OR org LIKE '%Amazon%' THEN 'AWS'
+    WHEN org LIKE '%Google%' THEN 'Google Cloud'
+    WHEN org LIKE '%Microsoft%' OR org LIKE '%Azure%' THEN 'Azure'
+    WHEN org LIKE '%Linode%' OR org LIKE '%Akamai%' THEN 'Akamai/Linode'
+    WHEN org LIKE '%Vultr%' THEN 'Vultr'
+    WHEN org LIKE '%Scaleway%' THEN 'Scaleway'
+    WHEN org LIKE '%Oracle%' THEN 'Oracle Cloud'
+    WHEN org LIKE '%Contabo%' THEN 'Contabo'
+    WHEN org LIKE '%Fastly%' THEN 'Fastly (CDN)'
+    WHEN org IS NULL OR org = '' THEN 'Unknown'
+    ELSE org
+  END
+`;
+
+export function getHostingProviders(): HostingProviderCount[] {
   const db = getDb();
-  // Normalize common provider name variations
+  ensureMergedView();
   return db
     .prepare(
       `SELECT
-        CASE
-          WHEN org LIKE '%Cloudflare%' THEN 'Cloudflare'
-          WHEN org LIKE '%DigitalOcean%' OR org LIKE '%Digital Ocean%' THEN 'DigitalOcean'
-          WHEN org LIKE '%Hetzner%' OR org LIKE '%HETZNER%' THEN 'Hetzner'
-          WHEN org LIKE '%OVH%' THEN 'OVH'
-          WHEN org LIKE '%AWS%' OR org LIKE '%Amazon%' THEN 'AWS'
-          WHEN org LIKE '%Google%' THEN 'Google Cloud'
-          WHEN org LIKE '%Microsoft%' OR org LIKE '%Azure%' THEN 'Azure'
-          WHEN org LIKE '%Linode%' OR org LIKE '%Akamai%' THEN 'Akamai/Linode'
-          WHEN org LIKE '%Vultr%' THEN 'Vultr'
-          WHEN org LIKE '%Scaleway%' THEN 'Scaleway'
-          WHEN org LIKE '%Oracle%' THEN 'Oracle Cloud'
-          WHEN org LIKE '%Contabo%' THEN 'Contabo'
-          WHEN org IS NULL OR org = '' THEN 'Unknown'
-          ELSE org
-        END as provider,
-        COUNT(*) as count
-       FROM pds_snapshots
-       WHERE run_id = ?
+        ${PROVIDER_NORMALIZE_SQL} as provider,
+        COUNT(*) as count,
+        CASE WHEN org LIKE '%Cloudflare%' OR org LIKE '%Fastly%' THEN 1 ELSE 0 END as isCdn
+       FROM pds_latest
        GROUP BY provider ORDER BY count DESC`
     )
-    .all(runId) as HostingProviderCount[];
+    .all() as HostingProviderCount[];
+}
+
+export function getCloudflareBreakdown(): {
+  behindCdn: number;
+  directHosting: number;
+  unknown: number;
+} {
+  const db = getDb();
+  ensureMergedView();
+  return db
+    .prepare(
+      `SELECT
+        SUM(CASE WHEN org LIKE '%Cloudflare%' OR org LIKE '%Fastly%' THEN 1 ELSE 0 END) as behindCdn,
+        SUM(CASE WHEN org IS NOT NULL AND org != '' AND org NOT LIKE '%Cloudflare%' AND org NOT LIKE '%Fastly%' THEN 1 ELSE 0 END) as directHosting,
+        SUM(CASE WHEN org IS NULL OR org = '' THEN 1 ELSE 0 END) as unknown
+       FROM pds_latest`
+    )
+    .get() as { behindCdn: number; directHosting: number; unknown: number };
 }
 
 export interface UserDistBucket {
@@ -121,15 +235,16 @@ export interface UserDistBucket {
   sortKey: number;
 }
 
-export function getUserDistribution(runId: number): UserDistBucket[] {
+export function getUserDistribution(): UserDistBucket[] {
   const db = getDb();
+  ensureMergedView();
   const rows = db
     .prepare(
       `SELECT user_count_active as users
-       FROM pds_snapshots
-       WHERE run_id = ? AND user_count_active IS NOT NULL`
+       FROM pds_latest
+       WHERE user_count_active IS NOT NULL`
     )
-    .all(runId) as { users: number }[];
+    .all() as { users: number }[];
 
   const buckets: Record<string, { count: number; sortKey: number }> = {
     "0": { count: 0, sortKey: 0 },
@@ -170,21 +285,21 @@ export interface TopPds {
   org: string | null;
 }
 
-export function getTopPdsByUsers(runId: number, limit = 25): TopPds[] {
+export function getTopPdsByUsers(limit = 25): TopPds[] {
   const db = getDb();
+  ensureMergedView();
   return db
     .prepare(
       `SELECT
-        p.url,
-        s.user_count_active as userCountActive,
-        s.version,
-        s.country,
-        s.org
-       FROM pds_snapshots s
-       JOIN pds_instances p ON p.id = s.pds_id
-       WHERE s.run_id = ? AND s.user_count_active IS NOT NULL
-       ORDER BY s.user_count_active DESC
+        url,
+        user_count_active as userCountActive,
+        version,
+        country,
+        org
+       FROM pds_latest
+       WHERE user_count_active IS NOT NULL
+       ORDER BY user_count_active DESC
        LIMIT ?`
     )
-    .all(runId, limit) as TopPds[];
+    .all(limit) as TopPds[];
 }

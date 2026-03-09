@@ -44,6 +44,16 @@ async function fetchWithTimeout(
   }
 }
 
+async function safeJsonParse<T>(res: Response): Promise<T | null> {
+  const contentType = res.headers.get("content-type") ?? "";
+  if (!contentType.includes("json")) return null;
+  try {
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
 async function describeServer(
   pdsUrl: string
 ): Promise<DescribeServerResponse | null> {
@@ -51,7 +61,7 @@ async function describeServer(
     const url = `${pdsUrl.replace(/\/$/, "")}/xrpc/com.atproto.server.describeServer`;
     const res = await fetchWithTimeout(url, XRPC_TIMEOUT_MS);
     if (!res.ok) return null;
-    return res.json();
+    return safeJsonParse<DescribeServerResponse>(res);
   } catch {
     return null;
   }
@@ -75,7 +85,8 @@ async function countUsers(
       const res = await fetchWithTimeout(`${base}?${params}`, XRPC_TIMEOUT_MS);
       if (!res.ok) return null;
 
-      const data: ListReposResponse = await res.json();
+      const data = await safeJsonParse<ListReposResponse>(res);
+      if (!data?.repos) return null;
       total += data.repos.length;
       active += data.repos.filter((r) => r.active).length;
 

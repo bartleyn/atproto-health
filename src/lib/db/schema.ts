@@ -75,6 +75,14 @@ function migrate(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_pds_snapshots_run_id
       ON pds_snapshots(run_id);
 
+    CREATE TABLE IF NOT EXISTS github_stats (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      collected_at TEXT NOT NULL DEFAULT (datetime('now')),
+      query TEXT NOT NULL,
+      repo_count INTEGER NOT NULL,
+      top_repos TEXT NOT NULL  -- JSON: [{name, fullName, stars, url, description}]
+    );
+
     CREATE TABLE IF NOT EXISTS firehose_samples (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       sampled_at TEXT NOT NULL DEFAULT (datetime('now')),

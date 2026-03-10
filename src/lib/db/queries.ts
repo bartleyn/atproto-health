@@ -304,6 +304,45 @@ export function getTopPdsByUsers(limit = 25): TopPds[] {
     .all(limit) as TopPds[];
 }
 
+// ── Ecosystem queries ──────────────────────────────────────────────────
+
+export interface GithubTopicStats {
+  query: string;
+  repoCount: number;
+  collectedAt: string;
+  topRepos: Array<{
+    name: string;
+    fullName: string;
+    stars: number;
+    url: string;
+    description: string | null;
+  }>;
+}
+
+export function getLatestGithubStats(): GithubTopicStats[] {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT query, repo_count as repoCount, collected_at as collectedAt, top_repos as topRepos
+       FROM github_stats g1
+       WHERE collected_at = (
+         SELECT MAX(collected_at) FROM github_stats g2 WHERE g2.query = g1.query
+       )
+       ORDER BY query`
+    )
+    .all() as Array<{
+      query: string;
+      repoCount: number;
+      collectedAt: string;
+      topRepos: string;
+    }>;
+
+  return rows.map((r) => ({
+    ...r,
+    topRepos: JSON.parse(r.topRepos),
+  }));
+}
+
 // ── Geographic map query ───────────────────────────────────────────────
 
 export interface PdsLocation {

@@ -10,7 +10,8 @@
     "collect": "npx tsx src/lib/collectors/run.ts",
     "collect:geo": "npx tsx src/lib/collectors/run.ts --geo",
     "collect:users": "npx tsx src/lib/collectors/run.ts --users",
-    "sample": "npx tsx src/lib/collectors/run-jetstream.ts"
+    "sample": "npx tsx src/lib/collectors/run-jetstream.ts",
+    "collect:ecosystem": "npx tsx src/lib/collectors/run-ecosystem.ts"
   },
   "keywords": [],
   "author": "",

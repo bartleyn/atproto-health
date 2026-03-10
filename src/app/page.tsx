@@ -9,9 +9,11 @@ import {
   getTopPdsByUsers,
   getLatestFirehoseSample,
   getPdsLocations,
+  getLatestGithubStats,
 } from "@/lib/db/queries";
 import { SimpleBarChart, DonutChart } from "@/components/charts";
 import { WorldMap } from "@/components/world-map";
+import type { GithubTopicStats } from "@/lib/db/queries";
 
 export const dynamic = "force-dynamic";
 
@@ -48,8 +50,9 @@ export default function Home() {
   const topPds = getTopPdsByUsers();
   const firehose = getLatestFirehoseSample();
   const locations = getPdsLocations();
+  const githubStats = getLatestGithubStats();
 
-  const hasUserData = stats.activeUsers > 0;
+  const hasUserData = false; //stats.activeUsers > 0;
 
   return (
     <main className="max-w-6xl mx-auto px-6 py-12">
@@ -238,6 +241,11 @@ export default function Home() {
         </div>
       )}
 
+      {/* GitHub ecosystem stats */}
+      {githubStats.length > 0 && (
+        <GithubSection stats={githubStats} />
+      )}
+
       {/* Country breakdown table */}
       <div className="mb-12">
         <h2 className="text-lg font-semibold mb-1">All Countries</h2>
@@ -367,6 +375,85 @@ function StatCard({
         {value.toLocaleString()}{suffix && <span className="text-lg">{suffix}</span>}
       </div>
       <div className="text-xs text-gray-400 mt-1">{label}</div>
+    </div>
+  );
+}
+
+function GithubSection({ stats }: { stats: GithubTopicStats[] }) {
+  const collectedAt = stats[0]?.collectedAt;
+
+  // Deduplicate top repos across all queries by fullName, keep highest star count
+  const repoMap = new Map<string, GithubTopicStats["topRepos"][number]>();
+  for (const s of stats) {
+    for (const repo of s.topRepos) {
+      const existing = repoMap.get(repo.fullName);
+      if (!existing || repo.stars > existing.stars) {
+        repoMap.set(repo.fullName, repo);
+      }
+    }
+  }
+  const topRepos = [...repoMap.values()].sort((a, b) => b.stars - a.stars).slice(0, 15);
+
+  return (
+    <div className="mb-12">
+      <div className="flex items-baseline justify-between mb-1">
+        <h2 className="text-lg font-semibold">GitHub Ecosystem</h2>
+        {collectedAt && (
+          <span className="text-xs text-gray-500">
+            {new Date(collectedAt + "Z").toLocaleString()}
+          </span>
+        )}
+      </div>
+      <p className="text-sm text-gray-500 mb-4">
+        Public repositories tagged with ATProto-related topics
+      </p>
+
+      <div className="grid grid-cols-3 gap-3 mb-6">
+        {stats.map((s) => (
+          <div key={s.query} className="rounded-lg border border-gray-800 bg-gray-900 p-4">
+            <div className="text-2xl font-semibold tabular-nums text-gray-100">
+              {s.repoCount.toLocaleString()}
+            </div>
+            <div className="text-xs text-gray-400 mt-1 font-mono">{s.query}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="overflow-x-auto rounded-lg border border-gray-800">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-gray-800 text-gray-400 text-left">
+              <th className="px-4 py-3 font-medium">#</th>
+              <th className="px-4 py-3 font-medium">Repository</th>
+              <th className="px-4 py-3 font-medium">Description</th>
+              <th className="px-4 py-3 font-medium text-right">Stars</th>
+            </tr>
+          </thead>
+          <tbody>
+            {topRepos.map((repo, i) => (
+              <tr key={repo.fullName} className="border-b border-gray-800/50 hover:bg-gray-900/50">
+                <td className="px-4 py-2.5 text-gray-500 tabular-nums">{i + 1}</td>
+                <td className="px-4 py-2.5 font-mono text-xs">
+                  <a
+                    href={repo.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-blue-400 hover:text-blue-300"
+                  >
+                    {repo.fullName}
+                  </a>
+                </td>
+                <td className="px-4 py-2.5 text-gray-400 text-xs max-w-sm truncate">
+                  {repo.description ?? "—"}
+                </td>
+                <td className="px-4 py-2.5 text-right tabular-nums">
+                  ★ {repo.stars.toLocaleString()}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

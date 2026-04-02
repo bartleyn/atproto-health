@@ -77,8 +77,8 @@ async function countUsers(
     let active = 0;
 
     // Paginate through all repos to count users
-    // Safety limit: 100 pages (100k users) to avoid runaway loops
-    for (let page = 0; page < 100; page++) {
+    // Page limit: 1000 pages (1M users) to avoid runaway loops (could eventually undercount!)
+    for (let page = 0; page < 1000; page++) {
       const params = new URLSearchParams({ limit: "1000" });
       if (cursor) params.set("cursor", cursor);
 

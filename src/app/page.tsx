@@ -220,7 +220,10 @@ export default function Home() {
 
       {/* GitHub ecosystem stats */}
       {githubStats.length > 0 && (
-        <GithubSection stats={githubStats} />
+        <>
+          <h2 className="text-xl font-semibold mb-6 text-gray-400">Extra</h2>
+          <GithubSection stats={githubStats} />
+        </>
       )}
 
       {/* Country breakdown table */}

@@ -43,27 +43,33 @@ interface BarChartProps {
   data: { name: string; value: number }[];
   color?: string;
   layout?: "horizontal" | "vertical";
+  xLabel?: string;
+  yLabel?: string;
 }
 
 export function SimpleBarChart({
   data,
   color = "#3b82f6",
   layout = "vertical",
+  xLabel,
+  yLabel,
 }: BarChartProps) {
   if (layout === "horizontal") {
     return (
       <ResponsiveContainer width="100%" height={300}>
-        <BarChart data={data}>
+        <BarChart data={data} margin={{ bottom: xLabel ? 24 : 0 }}>
           <XAxis
             dataKey="name"
             tick={{ fill: "#9ca3af", fontSize: 12 }}
             axisLine={{ stroke: "#374151" }}
             tickLine={false}
+            label={xLabel ? { value: xLabel, position: "insideBottom", offset: -16, fill: "#6b7280", fontSize: 11 } : undefined}
           />
           <YAxis
             tick={{ fill: "#9ca3af", fontSize: 12 }}
             axisLine={{ stroke: "#374151" }}
             tickLine={false}
+            label={yLabel ? { value: yLabel, angle: -90, position: "insideLeft", offset: 10, fill: "#6b7280", fontSize: 11 } : undefined}
           />
           <Tooltip {...tooltipStyle} />
           <Bar dataKey="value" fill={color} radius={[4, 4, 0, 0]} />

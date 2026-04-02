@@ -7,6 +7,9 @@ import { getDb } from "./schema";
  * and the dashboard composites the freshest data for each PDS.
  */
 
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+let dashboardCache: { data: DashboardData; expires: number } | null = null;
+
 // Ensures the merged view exists. Called once per request cycle.
 function ensureMergedView() {
   const db = getDb();
@@ -74,6 +77,10 @@ function ensureMergedView() {
     )
 
     WHERE dir.id IS NOT NULL
+      AND dir.run_id = (
+        SELECT MAX(id) FROM collection_runs
+        WHERE status = 'completed' AND source = 'collect:full'
+      )
   `);
 }
 
@@ -178,7 +185,7 @@ export interface HostingProviderCount {
 
 const PROVIDER_NORMALIZE_SQL = `
   CASE
-    WHEN org LIKE '%Cloudflare%' THEN 'Cloudflare (CDN)'
+    WHEN org LIKE '%Cloudflare%' THEN 'Behind Cloudflare (host unknown)'
     WHEN org LIKE '%DigitalOcean%' OR org LIKE '%Digital Ocean%' THEN 'DigitalOcean'
     WHEN org LIKE '%Hetzner%' OR org LIKE '%HETZNER%' THEN 'Hetzner'
     WHEN org LIKE '%OVH%' THEN 'OVH'
@@ -191,6 +198,10 @@ const PROVIDER_NORMALIZE_SQL = `
     WHEN org LIKE '%Oracle%' THEN 'Oracle Cloud'
     WHEN org LIKE '%Contabo%' THEN 'Contabo'
     WHEN org LIKE '%Fastly%' THEN 'Fastly (CDN)'
+    WHEN org LIKE '%Fly.io%' OR org LIKE '%Fly IO%' THEN 'Fly.io'
+    WHEN org LIKE '%netcup%' OR org LIKE '%NETCUP%' THEN 'netcup'
+    WHEN org LIKE '%RackNerd%' THEN 'RackNerd'
+    WHEN org LIKE '%IONOS%' OR org LIKE '%Ionos%' THEN 'IONOS'
     WHEN org IS NULL OR org = '' THEN 'Unknown'
     ELSE org
   END
@@ -240,9 +251,9 @@ export function getUserDistribution(): UserDistBucket[] {
   ensureMergedView();
   const rows = db
     .prepare(
-      `SELECT user_count_active as users
+      `SELECT user_count_total as users
        FROM pds_latest
-       WHERE user_count_active IS NOT NULL`
+       WHERE user_count_total IS NOT NULL`
     )
     .all() as { users: number }[];
 
@@ -279,26 +290,36 @@ export function getUserDistribution(): UserDistBucket[] {
 
 export interface TopPds {
   url: string;
-  userCountActive: number;
+  repoCount: number;
   version: string | null;
   country: string | null;
   org: string | null;
 }
 
-export function getTopPdsByUsers(limit = 25): TopPds[] {
+export function getTopPdsByUsers(limit = 10): TopPds[] {
   const db = getDb();
   ensureMergedView();
   return db
     .prepare(
       `SELECT
-        url,
-        user_count_active as userCountActive,
-        version,
-        country,
-        org
+        CASE
+          WHEN url LIKE '%host.bsky.network%' OR url LIKE '%bsky.social%'
+          THEN 'https://bsky.social'
+          ELSE url
+        END as url,
+        SUM(user_count_total) as repoCount,
+        MAX(version) as version,
+        MAX(country) as country,
+        MAX(org) as org
        FROM pds_latest
-       WHERE user_count_active IS NOT NULL
-       ORDER BY user_count_active DESC
+       WHERE user_count_total IS NOT NULL
+       GROUP BY
+        CASE
+          WHEN url LIKE '%host.bsky.network%' OR url LIKE '%bsky.social%'
+          THEN 'https://bsky.social'
+          ELSE url
+        END
+       ORDER BY repoCount DESC
        LIMIT ?`
     )
     .all(limit) as TopPds[];
@@ -345,25 +366,31 @@ export function getLatestGithubStats(): GithubTopicStats[] {
 
 // ── Geographic map query ───────────────────────────────────────────────
 
-export interface PdsLocation {
+export interface CityCluster {
   latitude: number;
   longitude: number;
-  url: string;
-  userCountActive: number | null;
   city: string | null;
   country: string | null;
+  pdsCount: number;
 }
 
-export function getPdsLocations(): PdsLocation[] {
+export function getPdsLocations(): CityCluster[] {
   const db = getDb();
   ensureMergedView();
   return db
     .prepare(
-      `SELECT latitude, longitude, url, user_count_active as userCountActive, city, country
+      `SELECT
+        AVG(latitude) as latitude,
+        AVG(longitude) as longitude,
+        city,
+        country,
+        COUNT(*) as pdsCount
        FROM pds_latest
-       WHERE latitude IS NOT NULL AND longitude IS NOT NULL`
+       WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+       GROUP BY city, country
+       ORDER BY pdsCount DESC`
     )
-    .all() as PdsLocation[];
+    .all() as CityCluster[];
 }
 
 // ── Firehose / Federation queries ─────────────────────────────────────
@@ -407,4 +434,43 @@ export function getLatestFirehoseSample(): FirehoseSample | null {
     federation: JSON.parse(row.federation as string),
     topCrossPdsPairs: JSON.parse(row.top_cross_pds_pairs as string),
   };
+}
+
+// ── Cached dashboard bundle ────────────────────────────────────────────
+
+export interface DashboardData {
+  runInfo: LatestRunInfo;
+  stats: OverviewStats;
+  countries: CountryCount[];
+  versions: VersionCount[];
+  providers: HostingProviderCount[];
+  cdnBreakdown: { behindCdn: number; directHosting: number; unknown: number };
+  userDist: UserDistBucket[];
+  topPds: TopPds[];
+  firehose: FirehoseSample | null;
+  locations: CityCluster[];
+  githubStats: GithubTopicStats[];
+}
+
+export function getDashboardData(): DashboardData {
+  if (dashboardCache && Date.now() < dashboardCache.expires) {
+    return dashboardCache.data;
+  }
+
+  const data: DashboardData = {
+    runInfo: getLatestRunInfo(),
+    stats: getOverviewStats(),
+    countries: getCountryDistribution(),
+    versions: getVersionDistribution(),
+    providers: getHostingProviders(),
+    cdnBreakdown: getCloudflareBreakdown(),
+    userDist: getUserDistribution(),
+    topPds: getTopPdsByUsers(),
+    firehose: getLatestFirehoseSample(),
+    locations: getPdsLocations(),
+    githubStats: getLatestGithubStats(),
+  };
+
+  dashboardCache = { data, expires: Date.now() + CACHE_TTL_MS };
+  return data;
 }

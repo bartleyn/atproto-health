@@ -1,16 +1,4 @@
-import {
-  getLatestRunInfo,
-  getOverviewStats,
-  getCountryDistribution,
-  getVersionDistribution,
-  getHostingProviders,
-  getCloudflareBreakdown,
-  getUserDistribution,
-  getTopPdsByUsers,
-  getLatestFirehoseSample,
-  getPdsLocations,
-  getLatestGithubStats,
-} from "@/lib/db/queries";
+import { getDashboardData } from "@/lib/db/queries";
 import { SimpleBarChart, DonutChart } from "@/components/charts";
 import { WorldMap } from "@/components/world-map";
 import type { GithubTopicStats } from "@/lib/db/queries";
@@ -18,7 +6,19 @@ import type { GithubTopicStats } from "@/lib/db/queries";
 export const dynamic = "force-dynamic";
 
 export default function Home() {
-  const runInfo = getLatestRunInfo();
+  const {
+    runInfo,
+    stats,
+    countries,
+    versions,
+    providers,
+    cdnBreakdown,
+    userDist,
+    topPds,
+    firehose,
+    locations,
+    githubStats,
+  } = getDashboardData();
 
   if (!runInfo.dirRun) {
     return (
@@ -41,18 +41,7 @@ export default function Home() {
     );
   }
 
-  const stats = getOverviewStats();
-  const countries = getCountryDistribution();
-  const versions = getVersionDistribution();
-  const providers = getHostingProviders();
-  const cdnBreakdown = getCloudflareBreakdown();
-  const userDist = getUserDistribution();
-  const topPds = getTopPdsByUsers();
-  const firehose = getLatestFirehoseSample();
-  const locations = getPdsLocations();
-  const githubStats = getLatestGithubStats();
-
-  const hasUserData = false; //stats.activeUsers > 0;
+  const plotUserDist = true;
 
   return (
     <main className="max-w-6xl mx-auto px-6 py-12">
@@ -60,32 +49,39 @@ export default function Home() {
         <div>
           <h1 className="text-3xl font-bold">ATProto Health</h1>
           <p className="text-gray-400 mt-1">
-            AT Protocol ecosystem health dashboard
+            AT Protocol PDS ecosystem — distribution, infrastructure, and activity
           </p>
         </div>
         <div className="text-right text-xs text-gray-500 space-y-0.5">
           {runInfo.dirRun && (
             <p>
               Directory:{" "}
-              {new Date(runInfo.dirRun.completedAt + "Z").toLocaleString()}
+              {new Date(runInfo.dirRun.completedAt + "Z").toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
             </p>
           )}
           {runInfo.geoRun && (
             <p>
               Geo:{" "}
-              {new Date(runInfo.geoRun.completedAt + "Z").toLocaleString()}
+              {new Date(runInfo.geoRun.completedAt + "Z").toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
             </p>
           )}
           {runInfo.usrRun && (
             <p>
               Users:{" "}
-              {new Date(runInfo.usrRun.completedAt + "Z").toLocaleString()}
+              {new Date(runInfo.usrRun.completedAt + "Z").toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
             </p>
           )}
         </div>
       </div>
 
       {/* Overview stats */}
+      <p className="text-xs text-gray-500 mb-3">
+        PDS directory sourced from{" "}
+        <a href="https://github.com/mary-ext/atproto-scraping" target="_blank" rel="noopener noreferrer" className="underline hover:text-gray-300">
+          mary-ext/atproto-scraping
+        </a>
+        . Online/offline reflects that scraper&apos;s last health check. Open Reg indicates no invite code required to register.
+      </p>
       <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3 mb-12">
         <StatCard label="Total PDSes" value={stats.total} />
         <StatCard label="Online" value={stats.online} accent="green" />
@@ -93,13 +89,6 @@ export default function Home() {
         <StatCard label="Open Reg" value={stats.openReg} accent="blue" />
         <StatCard label="Invite Only" value={stats.inviteOnly} />
         <StatCard label="Countries" value={stats.countries} accent="purple" />
-        {hasUserData && (
-          <StatCard
-            label="Active Users"
-            value={stats.activeUsers}
-            accent="cyan"
-          />
-        )}
       </div>
 
       {/* Geographic map */}
@@ -107,7 +96,7 @@ export default function Home() {
         <div className="rounded-lg border border-gray-800 bg-gray-900 p-5 mb-12">
           <h2 className="text-base font-semibold mb-0.5">PDS Geographic Distribution</h2>
           <p className="text-xs text-gray-500 mb-3">
-            {locations.length.toLocaleString()} located instances · dot size scales with user count
+            {locations.length.toLocaleString()} cities · dot size scales with PDS count
           </p>
           <WorldMap locations={locations} />
         </div>
@@ -128,7 +117,7 @@ export default function Home() {
         {/* Hosting providers */}
         <ChartCard
           title="Infrastructure Providers"
-          subtitle={`${cdnBreakdown.behindCdn} behind CDN \u00b7 ${cdnBreakdown.directHosting} direct \u00b7 ${cdnBreakdown.unknown} unknown`}
+          subtitle={`Derived from IP org via WHOIS/ASN \u00b7 ${cdnBreakdown.behindCdn} behind CDN \u00b7 ${cdnBreakdown.directHosting} direct \u00b7 ${cdnBreakdown.unknown} unknown`}
         >
           <DonutChart
             data={providers
@@ -160,10 +149,10 @@ export default function Home() {
         </ChartCard>
 
         {/* User distribution */}
-        {hasUserData ? (
+        {plotUserDist ? (
           <ChartCard
             title="Users per PDS"
-            subtitle="Distribution of active users"
+            subtitle="Distribution of total accounts"
           >
             <SimpleBarChart
               data={userDist
@@ -171,6 +160,8 @@ export default function Home() {
                 .map((b) => ({ name: b.range, value: b.count }))}
               color="#06b6d4"
               layout="horizontal"
+              xLabel="Total accounts"
+              yLabel="PDSes"
             />
           </ChartCard>
         ) : (
@@ -185,15 +176,12 @@ export default function Home() {
         )}
       </div>
 
-      {/* Federation health */}
-      {firehose && <FederationSection sample={firehose} />}
-
       {/* Top PDSes by users */}
-      {hasUserData && topPds.length > 0 && (
+      {topPds.length > 0 && (
         <div className="mb-12">
-          <h2 className="text-lg font-semibold mb-1">Largest PDSes by Users</h2>
+          <h2 className="text-lg font-semibold mb-1">Largest PDSes</h2>
           <p className="text-sm text-gray-500 mb-4">
-            Third-party PDSes (excludes bsky.social)
+            Ranked by total repos · Bluesky shards aggregated by *.host.bsky.network pattern
           </p>
           <div className="overflow-x-auto rounded-lg border border-gray-800">
             <table className="w-full text-sm">
@@ -201,12 +189,7 @@ export default function Home() {
                 <tr className="border-b border-gray-800 text-gray-400 text-left">
                   <th className="px-4 py-3 font-medium">#</th>
                   <th className="px-4 py-3 font-medium">PDS</th>
-                  <th className="px-4 py-3 font-medium text-right">
-                    Active Users
-                  </th>
-                  <th className="px-4 py-3 font-medium">Version</th>
                   <th className="px-4 py-3 font-medium">Country</th>
-                  <th className="px-4 py-3 font-medium">Host</th>
                 </tr>
               </thead>
               <tbody>
@@ -221,17 +204,8 @@ export default function Home() {
                     <td className="px-4 py-2.5 font-mono text-xs">
                       {pds.url.replace(/^https?:\/\//, "").replace(/\/$/, "")}
                     </td>
-                    <td className="px-4 py-2.5 text-right tabular-nums">
-                      {pds.userCountActive.toLocaleString()}
-                    </td>
-                    <td className="px-4 py-2.5 text-gray-400">
-                      {pds.version ?? "—"}
-                    </td>
                     <td className="px-4 py-2.5 text-gray-400">
                       {pds.country ?? "—"}
-                    </td>
-                    <td className="px-4 py-2.5 text-gray-400 text-xs">
-                      {pds.org ?? "—"}
                     </td>
                   </tr>
                 ))}
@@ -240,6 +214,9 @@ export default function Home() {
           </div>
         </div>
       )}
+
+      {/* Federation health */}
+      {firehose && <FederationSection sample={firehose} />}
 
       {/* GitHub ecosystem stats */}
       {githubStats.length > 0 && (
@@ -305,29 +282,31 @@ function FederationSection({ sample }: { sample: NonNullable<ReturnType<typeof g
     { name: "Same PDS", value: fed["same-pds"] ?? 0 },
   ];
 
-  const byTypeData = Object.entries(sample.byType).map(([type, stats]) => {
-    const resolved = stats.crossPds + stats.samePds;
-    return {
-      name: type,
-      value: resolved > 0 ? Math.round((stats.crossPds / resolved) * 100) : 0,
-    };
-  });
+  const byTypeTotalData = Object.entries(sample.byType).map(([type, stats]) => ({
+    name: type,
+    value: stats.total,
+  }));
+
 
   return (
     <div className="mb-12">
-      <h2 className="text-lg font-semibold mb-1">Federation Health</h2>
+      <h2 className="text-lg font-semibold mb-1">Cross-PDS Interactions</h2>
       <p className="text-sm text-gray-500 mb-4">
-        Sampled {sample.totalEvents.toLocaleString()} firehose events over{" "}
-        {(sample.durationMs / 1000).toFixed(0)}s ({sample.eventsPerSecond} evt/s)
+        Measures how often interactions (likes, replies, reposts, follows) cross PDS boundaries.
+        Sampled from the AT Protocol firehose over a {(sample.durationMs / 1000).toFixed(0)}s window
+        ({sample.totalEvents.toLocaleString()} total firehose events incl. posts · {sample.eventsPerSecond} evt/s)
         {" \u00b7 "}
-        {new Date(sample.sampledAt + "Z").toLocaleString()}
+        {new Date(sample.sampledAt + "Z").toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
+      </p>
+      <p className="text-xs text-gray-600 mb-4">
+        Includes Fediverse bridge traffic (e.g. Bridgy Fed) as third-party.
       </p>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
-        <StatCard label="True Federation Rate" value={Number(trueFedRate)} suffix="%" accent="cyan" />
-        <StatCard label="Raw Cross-PDS Rate" value={Number(rawCrossRate)} suffix="%" />
+        <StatCard label="Cross-PDS Rate (excl. Bluesky internal)" value={Number(trueFedRate)} suffix="%" accent="cyan" />
+        <StatCard label="Cross-PDS Rate (all)" value={Number(rawCrossRate)} suffix="%" />
         <StatCard label="Interactions Sampled" value={sample.resolvedInteractions} />
-        <StatCard label="True Federated" value={trueFed} accent="green" />
+        <StatCard label="Cross-PDS (3rd-party involved)" value={trueFed} accent="green" />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
@@ -339,11 +318,12 @@ function FederationSection({ sample }: { sample: NonNullable<ReturnType<typeof g
         </ChartCard>
 
         <ChartCard
-          title="Cross-PDS Rate by Type"
-          subtitle="% of resolved interactions that cross PDS boundaries"
+          title="Interaction Distribution by Type"
+          subtitle="Total resolved interactions by type"
         >
-          <SimpleBarChart data={byTypeData} color="#10b981" layout="horizontal" />
+          <SimpleBarChart data={byTypeTotalData} color="#6366f1" layout="horizontal" />
         </ChartCard>
+
       </div>
     </div>
   );
@@ -400,7 +380,7 @@ function GithubSection({ stats }: { stats: GithubTopicStats[] }) {
         <h2 className="text-lg font-semibold">GitHub Ecosystem</h2>
         {collectedAt && (
           <span className="text-xs text-gray-500">
-            {new Date(collectedAt + "Z").toLocaleString()}
+            {new Date(collectedAt + "Z").toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
           </span>
         )}
       </div>

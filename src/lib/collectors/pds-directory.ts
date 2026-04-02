@@ -4,7 +4,7 @@
  */
 
 const STATE_JSON_URL =
-  "https://raw.githubusercontent.com/mary-ext/atproto-scraping/refs/heads/trunk/state.json";
+  "https://raw.githubusercontent.com/mary-ext/atproto-scraping/refs/heads/trunk/dist/instances.json";
 
 export interface PdsDirectoryEntry {
   url: string;
@@ -18,9 +18,9 @@ interface StateJson {
   pdses: Record<
     string,
     {
+      status?: "online" | "offline";
       version?: string | null;
       inviteCodeRequired?: boolean;
-      errorAt?: number;
     }
   >;
 }
@@ -29,7 +29,7 @@ export async function fetchPdsDirectory(): Promise<PdsDirectoryEntry[]> {
   const response = await fetch(STATE_JSON_URL);
   if (!response.ok) {
     throw new Error(
-      `Failed to fetch state.json: ${response.status} ${response.statusText}`
+      `Failed to fetch instances.json: ${response.status} ${response.statusText}`
     );
   }
 
@@ -41,8 +41,8 @@ export async function fetchPdsDirectory(): Promise<PdsDirectoryEntry[]> {
       url,
       version: info.version ?? null,
       inviteCodeRequired: info.inviteCodeRequired ?? false,
-      isOnline: !info.errorAt,
-      errorAt: info.errorAt ?? null,
+      isOnline: info.status === "online",
+      errorAt: null,
     });
   }
 

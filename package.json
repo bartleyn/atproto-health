@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "ATProto ecosystem health dashboard",
   "scripts": {
+    "postinstall": "xattr -w com.apple.fileprovider.ignore#P 1 node_modules 2>/dev/null || true",
     "dev": "next dev --turbopack",
     "build": "next build",
     "start": "next start",

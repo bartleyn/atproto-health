@@ -7,12 +7,12 @@ import {
   Geography,
   Marker,
 } from "react-simple-maps";
-import type { PdsLocation } from "@/lib/db/queries";
+import type { CityCluster } from "@/lib/db/queries";
 
 const GEO_URL =
   "https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json";
 
-export function WorldMap({ locations }: { locations: PdsLocation[] }) {
+export function WorldMap({ locations }: { locations: CityCluster[] }) {
   const [hovered, setHovered] = useState<string | null>(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
 
@@ -50,11 +50,15 @@ export function WorldMap({ locations }: { locations: PdsLocation[] }) {
 
         {locations.map((loc, i) => {
           const r =
-            loc.userCountActive && loc.userCountActive > 500
+            loc.pdsCount > 20
+              ? 7
+              : loc.pdsCount > 10
+              ? 6
+              : loc.pdsCount > 5
               ? 5
-              : loc.userCountActive && loc.userCountActive > 100
+              : loc.pdsCount > 2
               ? 4
-              : loc.userCountActive && loc.userCountActive > 10
+              : loc.pdsCount > 1
               ? 3
               : 2;
           return (
@@ -62,12 +66,10 @@ export function WorldMap({ locations }: { locations: PdsLocation[] }) {
               key={i}
               coordinates={[loc.longitude, loc.latitude]}
               onMouseEnter={() => {
-                const parts = [
-                  loc.url.replace(/^https?:\/\//, "").replace(/\/$/, ""),
-                ];
+                const parts: string[] = [];
                 if (loc.city && loc.country) parts.push(`${loc.city}, ${loc.country}`);
                 else if (loc.country) parts.push(loc.country);
-                if (loc.userCountActive) parts.push(`${loc.userCountActive.toLocaleString()} users`);
+                parts.push(`${loc.pdsCount} PDS${loc.pdsCount !== 1 ? "es" : ""}`);
                 setHovered(parts.join(" · "));
               }}
               onMouseLeave={() => setHovered(null)}

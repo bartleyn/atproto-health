@@ -83,10 +83,16 @@ async function countUsers(
       if (cursor) params.set("cursor", cursor);
 
       const res = await fetchWithTimeout(`${base}?${params}`, XRPC_TIMEOUT_MS);
-      if (!res.ok) return null;
+      if (!res.ok) {
+        console.warn(`[pds-details] ${pdsUrl} listRepos HTTP ${res.status} on page ${page}`);
+        return null;
+      }
 
       const data = await safeJsonParse<ListReposResponse>(res);
-      if (!data?.repos) return null;
+      if (!data?.repos) {
+        console.warn(`[pds-details] ${pdsUrl} listRepos bad response on page ${page}`);
+        return null;
+      }
       total += data.repos.length;
       active += data.repos.filter((r) => r.active).length;
 
@@ -95,7 +101,8 @@ async function countUsers(
     }
 
     return { total, active };
-  } catch {
+  } catch (err) {
+    console.warn(`[pds-details] ${pdsUrl} listRepos failed: ${err}`);
     return null;
   }
 }

@@ -52,10 +52,10 @@ function ensureMergedView() {
 
     FROM pds_instances p
 
-    -- Latest directory snapshot (every run has this)
+    -- Latest directory snapshot (from collect:full runs only)
     LEFT JOIN pds_snapshots dir ON dir.id = (
       SELECT s.id FROM pds_snapshots s
-      JOIN collection_runs r ON r.id = s.run_id AND r.status = 'completed'
+      JOIN collection_runs r ON r.id = s.run_id AND r.status = 'completed' AND r.source = 'collect:full'
       WHERE s.pds_id = p.id
       ORDER BY s.run_id DESC LIMIT 1
     )
@@ -77,10 +77,6 @@ function ensureMergedView() {
     )
 
     WHERE dir.id IS NOT NULL
-      AND dir.run_id = (
-        SELECT MAX(id) FROM collection_runs
-        WHERE status = 'completed' AND source = 'collect:full'
-      )
   `);
 }
 
@@ -158,6 +154,25 @@ export function getCountryDistribution(): CountryCount[] {
        GROUP BY country_code ORDER BY count DESC`
     )
     .all() as CountryCount[];
+}
+
+export interface CountryRepoCount {
+  country: string;
+  countryCode: string;
+  repoCount: number;
+}
+
+export function getReposByCountry(): CountryRepoCount[] {
+  const db = getDb();
+  ensureMergedView();
+  return db
+    .prepare(
+      `SELECT country, country_code as countryCode, SUM(user_count_total) as repoCount
+       FROM pds_latest
+       WHERE country IS NOT NULL AND user_count_total IS NOT NULL
+       GROUP BY country_code ORDER BY repoCount DESC`
+    )
+    .all() as CountryRepoCount[];
 }
 
 export interface VersionCount {
@@ -442,6 +457,7 @@ export interface DashboardData {
   runInfo: LatestRunInfo;
   stats: OverviewStats;
   countries: CountryCount[];
+  reposByCountry: CountryRepoCount[];
   versions: VersionCount[];
   providers: HostingProviderCount[];
   cdnBreakdown: { behindCdn: number; directHosting: number; unknown: number };
@@ -461,6 +477,7 @@ export function getDashboardData(): DashboardData {
     runInfo: getLatestRunInfo(),
     stats: getOverviewStats(),
     countries: getCountryDistribution(),
+    reposByCountry: getReposByCountry(),
     versions: getVersionDistribution(),
     providers: getHostingProviders(),
     cdnBreakdown: getCloudflareBreakdown(),

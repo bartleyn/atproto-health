@@ -10,6 +10,7 @@ export default function Home() {
     runInfo,
     stats,
     countries,
+    reposByCountry,
     versions,
     providers,
     cdnBreakdown,
@@ -174,6 +175,17 @@ export default function Home() {
             </div>
           </ChartCard>
         )}
+
+        {/* Repos by country */}
+        <ChartCard title="Repos by Country" subtitle="Share of total repos in each PDS geolocated to that country · may undercount total repos">
+          <SimpleBarChart
+            data={reposByCountry.slice(0, 15).map((c) => ({
+              name: c.countryCode,
+              value: c.repoCount,
+            }))}
+            color="#06b6d4"
+          />
+        </ChartCard>
       </div>
 
       {/* Top PDSes by users */}
@@ -355,7 +367,7 @@ function StatCard({
   return (
     <div className="rounded-lg border border-gray-800 bg-gray-900 p-4">
       <div className={`text-2xl font-semibold tabular-nums ${accentColor}`}>
-        {value.toLocaleString()}{suffix && <span className="text-lg">{suffix}</span>}
+        {value == null || isNaN(value) ? "—" : value.toLocaleString()}{suffix && <span className="text-lg">{suffix}</span>}
       </div>
       <div className="text-xs text-gray-400 mt-1">{label}</div>
     </div>

@@ -8,7 +8,9 @@ import { getDb } from "./schema";
  */
 
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
-let dashboardCache: { data: DashboardData; expires: number } | null = null;
+const dashboardCache = new Map<boolean, { data: DashboardData; expires: number }>();
+
+const BSKY_FILTER = `url NOT LIKE '%host.bsky.network%' AND url NOT LIKE '%bsky.social%'`;
 
 // Ensures the merged view exists. Called once per request cycle.
 function ensureMergedView() {
@@ -78,6 +80,10 @@ function ensureMergedView() {
 
     WHERE dir.id IS NOT NULL
   `);
+  db.exec(`
+    CREATE TEMPORARY VIEW IF NOT EXISTS pds_community AS
+    SELECT * FROM pds_latest WHERE ${BSKY_FILTER}
+  `);
 }
 
 export interface LatestRunInfo {
@@ -118,9 +124,10 @@ export interface OverviewStats {
   activeUsers: number;
 }
 
-export function getOverviewStats(): OverviewStats {
+export function getOverviewStats(hideBsky = false): OverviewStats {
   const db = getDb();
   ensureMergedView();
+  const view = hideBsky ? "pds_community" : "pds_latest";
   return db
     .prepare(
       `SELECT
@@ -132,7 +139,7 @@ export function getOverviewStats(): OverviewStats {
         COUNT(DISTINCT CASE WHEN country_code IS NOT NULL THEN country_code END) as countries,
         COALESCE(SUM(user_count_total), 0) as totalUsers,
         COALESCE(SUM(user_count_active), 0) as activeUsers
-      FROM pds_latest`
+      FROM ${view}`
     )
     .get() as OverviewStats;
 }
@@ -143,13 +150,14 @@ export interface CountryCount {
   count: number;
 }
 
-export function getCountryDistribution(): CountryCount[] {
+export function getCountryDistribution(hideBsky = false): CountryCount[] {
   const db = getDb();
   ensureMergedView();
+  const view = hideBsky ? "pds_community" : "pds_latest";
   return db
     .prepare(
       `SELECT country, country_code as countryCode, COUNT(*) as count
-       FROM pds_latest
+       FROM ${view}
        WHERE country IS NOT NULL
        GROUP BY country_code ORDER BY count DESC`
     )
@@ -162,13 +170,14 @@ export interface CountryRepoCount {
   repoCount: number;
 }
 
-export function getReposByCountry(): CountryRepoCount[] {
+export function getReposByCountry(hideBsky = false): CountryRepoCount[] {
   const db = getDb();
   ensureMergedView();
+  const view = hideBsky ? "pds_community" : "pds_latest";
   return db
     .prepare(
       `SELECT country, country_code as countryCode, SUM(user_count_total) as repoCount
-       FROM pds_latest
+       FROM ${view}
        WHERE country IS NOT NULL AND user_count_total IS NOT NULL
        GROUP BY country_code ORDER BY repoCount DESC`
     )
@@ -180,13 +189,14 @@ export interface VersionCount {
   count: number;
 }
 
-export function getVersionDistribution(): VersionCount[] {
+export function getVersionDistribution(hideBsky = false): VersionCount[] {
   const db = getDb();
   ensureMergedView();
+  const view = hideBsky ? "pds_community" : "pds_latest";
   return db
     .prepare(
       `SELECT COALESCE(version, 'unknown') as version, COUNT(*) as count
-       FROM pds_latest
+       FROM ${view}
        GROUP BY version ORDER BY count DESC`
     )
     .all() as VersionCount[];
@@ -222,35 +232,37 @@ const PROVIDER_NORMALIZE_SQL = `
   END
 `;
 
-export function getHostingProviders(): HostingProviderCount[] {
+export function getHostingProviders(hideBsky = false): HostingProviderCount[] {
   const db = getDb();
   ensureMergedView();
+  const view = hideBsky ? "pds_community" : "pds_latest";
   return db
     .prepare(
       `SELECT
         ${PROVIDER_NORMALIZE_SQL} as provider,
         COUNT(*) as count,
         CASE WHEN org LIKE '%Cloudflare%' OR org LIKE '%Fastly%' THEN 1 ELSE 0 END as isCdn
-       FROM pds_latest
+       FROM ${view}
        GROUP BY provider ORDER BY count DESC`
     )
     .all() as HostingProviderCount[];
 }
 
-export function getCloudflareBreakdown(): {
+export function getCloudflareBreakdown(hideBsky = false): {
   behindCdn: number;
   directHosting: number;
   unknown: number;
 } {
   const db = getDb();
   ensureMergedView();
+  const view = hideBsky ? "pds_community" : "pds_latest";
   return db
     .prepare(
       `SELECT
         SUM(CASE WHEN org LIKE '%Cloudflare%' OR org LIKE '%Fastly%' THEN 1 ELSE 0 END) as behindCdn,
         SUM(CASE WHEN org IS NOT NULL AND org != '' AND org NOT LIKE '%Cloudflare%' AND org NOT LIKE '%Fastly%' THEN 1 ELSE 0 END) as directHosting,
         SUM(CASE WHEN org IS NULL OR org = '' THEN 1 ELSE 0 END) as unknown
-       FROM pds_latest`
+       FROM ${view}`
     )
     .get() as { behindCdn: number; directHosting: number; unknown: number };
 }
@@ -261,13 +273,14 @@ export interface UserDistBucket {
   sortKey: number;
 }
 
-export function getUserDistribution(): UserDistBucket[] {
+export function getUserDistribution(hideBsky = false): UserDistBucket[] {
   const db = getDb();
   ensureMergedView();
+  const view = hideBsky ? "pds_community" : "pds_latest";
   const rows = db
     .prepare(
       `SELECT user_count_total as users
-       FROM pds_latest
+       FROM ${view}
        WHERE user_count_total IS NOT NULL`
     )
     .all() as { users: number }[];
@@ -311,9 +324,10 @@ export interface TopPds {
   org: string | null;
 }
 
-export function getTopPdsByUsers(limit = 10): TopPds[] {
+export function getTopPdsByUsers(limit = 10, hideBsky = false): TopPds[] {
   const db = getDb();
   ensureMergedView();
+  const view = hideBsky ? "pds_community" : "pds_latest";
   return db
     .prepare(
       `SELECT
@@ -326,7 +340,7 @@ export function getTopPdsByUsers(limit = 10): TopPds[] {
         MAX(version) as version,
         MAX(country) as country,
         MAX(org) as org
-       FROM pds_latest
+       FROM ${view}
        WHERE user_count_total IS NOT NULL
        GROUP BY
         CASE
@@ -389,9 +403,10 @@ export interface CityCluster {
   pdsCount: number;
 }
 
-export function getPdsLocations(): CityCluster[] {
+export function getPdsLocations(hideBsky = false): CityCluster[] {
   const db = getDb();
   ensureMergedView();
+  const view = hideBsky ? "pds_community" : "pds_latest";
   return db
     .prepare(
       `SELECT
@@ -400,7 +415,7 @@ export function getPdsLocations(): CityCluster[] {
         city,
         country,
         COUNT(*) as pdsCount
-       FROM pds_latest
+       FROM ${view}
        WHERE latitude IS NOT NULL AND longitude IS NOT NULL
        GROUP BY city, country
        ORDER BY pdsCount DESC`
@@ -468,26 +483,27 @@ export interface DashboardData {
   githubStats: GithubTopicStats[];
 }
 
-export function getDashboardData(): DashboardData {
-  if (dashboardCache && Date.now() < dashboardCache.expires) {
-    return dashboardCache.data;
+export function getDashboardData(hideBsky = false): DashboardData {
+  const cached = dashboardCache.get(hideBsky);
+  if (cached && Date.now() < cached.expires) {
+    return cached.data;
   }
 
   const data: DashboardData = {
     runInfo: getLatestRunInfo(),
-    stats: getOverviewStats(),
-    countries: getCountryDistribution(),
-    reposByCountry: getReposByCountry(),
-    versions: getVersionDistribution(),
-    providers: getHostingProviders(),
-    cdnBreakdown: getCloudflareBreakdown(),
-    userDist: getUserDistribution(),
-    topPds: getTopPdsByUsers(),
+    stats: getOverviewStats(hideBsky),
+    countries: getCountryDistribution(hideBsky),
+    reposByCountry: getReposByCountry(hideBsky),
+    versions: getVersionDistribution(hideBsky),
+    providers: getHostingProviders(hideBsky),
+    cdnBreakdown: getCloudflareBreakdown(hideBsky),
+    userDist: getUserDistribution(hideBsky),
+    topPds: getTopPdsByUsers(10, hideBsky),
     firehose: getLatestFirehoseSample(),
-    locations: getPdsLocations(),
+    locations: getPdsLocations(hideBsky),
     githubStats: getLatestGithubStats(),
   };
 
-  dashboardCache = { data, expires: Date.now() + CACHE_TTL_MS };
+  dashboardCache.set(hideBsky, { data, expires: Date.now() + CACHE_TTL_MS });
   return data;
 }

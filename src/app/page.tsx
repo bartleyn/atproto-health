@@ -1,11 +1,18 @@
-import { getDashboardData } from "@/lib/db/queries";
+import { getDashboardData, getLatestFirehoseSample } from "@/lib/db/queries";
 import { SimpleBarChart, DonutChart } from "@/components/charts";
 import { WorldMap } from "@/components/world-map";
 import type { GithubTopicStats } from "@/lib/db/queries";
 
 export const dynamic = "force-dynamic";
 
-export default function Home() {
+export default async function Home({
+  searchParams,
+}: {
+  searchParams: Promise<{ hideBsky?: string }>;
+}) {
+  const params = await searchParams;
+  const hideBsky = params.hideBsky === "1";
+
   const {
     runInfo,
     stats,
@@ -19,7 +26,7 @@ export default function Home() {
     firehose,
     locations,
     githubStats,
-  } = getDashboardData();
+  } = getDashboardData(hideBsky);
 
   if (!runInfo.dirRun) {
     return (
@@ -52,6 +59,19 @@ export default function Home() {
           <p className="text-gray-400 mt-1">
             AT Protocol PDS ecosystem — distribution, infrastructure, and activity
           </p>
+          <div className="mt-3">
+            <a
+              href={hideBsky ? "/" : "/?hideBsky=1"}
+              className={`inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border transition-colors ${
+                hideBsky
+                  ? "bg-blue-900/40 border-blue-700 text-blue-300 hover:bg-blue-900/60"
+                  : "bg-gray-800 border-gray-700 text-gray-400 hover:bg-gray-700"
+              }`}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${hideBsky ? "bg-blue-400" : "bg-gray-600"}`} />
+              {hideBsky ? "Hiding Bluesky PBC infrastructure" : "Showing all PDSes"}
+            </a>
+          </div>
         </div>
         <div className="text-right text-xs text-gray-500 space-y-0.5">
           {runInfo.dirRun && (
@@ -291,9 +311,9 @@ function FederationSection({ sample }: { sample: NonNullable<ReturnType<typeof g
 
   const fedData = [
     { name: "Bluesky internal", value: fed["bsky-internal"] ?? 0 },
-    { name: "Bluesky → 3rd party", value: fed["bsky-to-third"] ?? 0 },
-    { name: "3rd party → Bluesky", value: fed["third-to-bsky"] ?? 0 },
-    { name: "3rd party → 3rd party", value: fed["third-to-third"] ?? 0 },
+    { name: "Bluesky → Independent", value: fed["bsky-to-third"] ?? 0 },
+    { name: "Independent → Bluesky", value: fed["third-to-bsky"] ?? 0 },
+    { name: "Independent → Independent", value: fed["third-to-third"] ?? 0 },
     { name: "Same PDS", value: fed["same-pds"] ?? 0 },
   ];
 
@@ -314,14 +334,14 @@ function FederationSection({ sample }: { sample: NonNullable<ReturnType<typeof g
         {new Date(sample.sampledAt + "Z").toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
       </p>
       <p className="text-xs text-gray-600 mb-4">
-        Includes Fediverse bridge traffic (e.g. Bridgy Fed) as third-party.
+        Includes Fediverse bridge traffic (e.g. Bridgy Fed) as independent traffic.
       </p>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
         <StatCard label="Cross-PDS Rate (excl. Bluesky internal)" value={Number(trueFedRate)} suffix="%" accent="cyan" />
         <StatCard label="Cross-PDS Rate (all)" value={Number(rawCrossRate)} suffix="%" />
         <StatCard label="Interactions Sampled" value={sample.resolvedInteractions} />
-        <StatCard label="Cross-PDS (3rd-party involved)" value={trueFed} accent="green" />
+        <StatCard label="Cross-PDS (independent PDS involved)" value={trueFed} accent="green" />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">

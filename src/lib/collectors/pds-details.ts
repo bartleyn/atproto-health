@@ -29,7 +29,7 @@ interface ListReposResponse {
   }>;
 }
 
-const XRPC_TIMEOUT_MS = 8000;
+const XRPC_TIMEOUT_MS = 30000;
 
 async function fetchWithTimeout(
   url: string,
@@ -70,41 +70,59 @@ async function describeServer(
 async function countUsers(
   pdsUrl: string
 ): Promise<{ total: number; active: number } | null> {
-  try {
-    const base = `${pdsUrl.replace(/\/$/, "")}/xrpc/com.atproto.sync.listRepos`;
-    let cursor: string | undefined;
-    let total = 0;
-    let active = 0;
+  const base = `${pdsUrl.replace(/\/$/, "")}/xrpc/com.atproto.sync.listRepos`;
+  let cursor: string | undefined;
+  let total = 0;
+  let active = 0;
 
-    // Paginate through all repos to count users
-    // Page limit: 1000 pages (1M users) to avoid runaway loops (could eventually undercount!)
-    for (let page = 0; page < 1000; page++) {
-      const params = new URLSearchParams({ limit: "1000" });
-      if (cursor) params.set("cursor", cursor);
+  // Paginate through all repos to count users
+  // Page limit: 1000 pages (1M users) to avoid runaway loops (could eventually undercount!)
+  for (let page = 0; page < 1000; page++) {
+    const params = new URLSearchParams({ limit: "1000" });
+    if (cursor) params.set("cursor", cursor);
 
-      const res = await fetchWithTimeout(`${base}?${params}`, XRPC_TIMEOUT_MS);
-      if (!res.ok) {
-        console.warn(`[pds-details] ${pdsUrl} listRepos HTTP ${res.status} on page ${page}`);
+    let res: Response;
+    try {
+      // Use timeout only on page 0 to quickly skip dead PDSes.
+      // Subsequent pages have three minute timeout, to make sure we keep the connection alive after successfully getting the first page
+      const timeout = page === 0 ? XRPC_TIMEOUT_MS : 180_000;
+      res = await fetchWithTimeout(`${base}?${params}`, timeout);
+    } catch (err) {
+      if (page === 0) {
+        console.warn(`[pds-details] ${pdsUrl} listRepos failed on page 0: ${err}`);
         return null;
       }
-
-      const data = await safeJsonParse<ListReposResponse>(res);
-      if (!data?.repos) {
-        console.warn(`[pds-details] ${pdsUrl} listRepos bad response on page ${page}`);
-        return null;
-      }
-      total += data.repos.length;
-      active += data.repos.filter((r) => r.active).length;
-
-      if (!data.cursor || data.repos.length === 0) break;
-      cursor = data.cursor;
+      console.warn(`[pds-details] ${pdsUrl} listRepos failed on page ${page}, returning partial count of ${total}: ${err}`);
+      return { total, active };
     }
 
-    return { total, active };
-  } catch (err) {
-    console.warn(`[pds-details] ${pdsUrl} listRepos failed: ${err}`);
-    return null;
+    if (!res.ok) {
+      if (page === 0) {
+        console.warn(`[pds-details] ${pdsUrl} listRepos HTTP ${res.status} on page 0`);
+        return null;
+      }
+      console.warn(`[pds-details] ${pdsUrl} listRepos HTTP ${res.status} on page ${page}, returning partial count of ${total}`);
+      return { total, active };
+    }
+
+    const data = await safeJsonParse<ListReposResponse>(res);
+    if (!data?.repos) {
+      if (page === 0) {
+        console.warn(`[pds-details] ${pdsUrl} listRepos bad response on page 0`);
+        return null;
+      }
+      console.warn(`[pds-details] ${pdsUrl} listRepos bad response on page ${page}, returning partial count of ${total}`);
+      return { total, active };
+    }
+
+    total += data.repos.length;
+    active += data.repos.filter((r) => r.active).length;
+
+    if (!data.cursor || data.repos.length === 0) break;
+    cursor = data.cursor;
   }
+
+  return { total, active };
 }
 
 export async function fetchPdsDetails(

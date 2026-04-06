@@ -342,10 +342,10 @@ function FederationSection({ sample }: { sample: NonNullable<ReturnType<typeof g
       <h2 className="text-lg font-semibold mb-1">Cross-PDS Interactions</h2>
       <p className="text-sm text-gray-500 mb-4">
         Measures how often interactions (likes, replies, reposts, follows) cross PDS boundaries.
-        Sampled from the AT Protocol firehose over a {(sample.durationMs / 1000).toFixed(0)}s window
-        ({sample.totalEvents.toLocaleString()} total firehose events incl. posts · {sample.eventsPerSecond} evt/s)
+        Aggregated from {sample.sampleCount} firehose sample{sample.sampleCount !== 1 ? "s" : ""} over the last {sample.windowDays} days
+        ({sample.totalEvents.toLocaleString()} total events · {sample.eventsPerSecond} evt/s avg · {Math.round(sample.durationMs / 1000 / 60)} min total sampled)
         {" \u00b7 "}
-        {new Date(sample.sampledAt + "Z").toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
+        last sampled {new Date(sample.sampledAt + "Z").toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
       </p>
       <p className="text-xs text-gray-600 mb-4">
         Includes Fediverse bridge traffic (e.g. Bridgy Fed) as independent traffic.

@@ -428,6 +428,8 @@ export function getPdsLocations(hideBsky = false): CityCluster[] {
 export interface FirehoseSample {
   id: number;
   sampledAt: string;
+  sampleCount: number;
+  windowDays: number;
   durationMs: number;
   totalEvents: number;
   totalInteractions: number;
@@ -442,27 +444,86 @@ export interface FirehoseSample {
 
 export function getLatestFirehoseSample(): FirehoseSample | null {
   const db = getDb();
-  const row = db
-    .prepare(
-      `SELECT * FROM firehose_samples ORDER BY id DESC LIMIT 1`
-    )
-    .get() as Record<string, unknown> | undefined;
 
-  if (!row) return null;
+  const rows = db
+    .prepare(
+      `SELECT * FROM firehose_samples
+       WHERE sampled_at >= datetime('now', '-7 days')
+       ORDER BY id ASC`
+    )
+    .all() as Record<string, unknown>[];
+
+  if (rows.length === 0) return null;
+
+  // Aggregate counts across all samples in the window
+  let totalEvents = 0;
+  let totalInteractions = 0;
+  let resolvedInteractions = 0;
+  let crossPds = 0;
+  let samePds = 0;
+  let totalDurationMs = 0;
+  const byType: Record<string, { total: number; crossPds: number; samePds: number }> = {};
+  const federation: Record<string, number> = {};
+  const pairCounts = new Map<string, { from: string; to: string; count: number }>();
+
+  for (const row of rows) {
+    totalEvents += row.total_events as number;
+    totalInteractions += row.total_interactions as number;
+    resolvedInteractions += row.resolved_interactions as number;
+    crossPds += row.cross_pds as number;
+    samePds += row.same_pds as number;
+    totalDurationMs += row.duration_ms as number;
+
+    const bt = JSON.parse(row.by_type as string) as Record<string, { total: number; crossPds: number; samePds: number }>;
+    for (const [type, counts] of Object.entries(bt)) {
+      if (!byType[type]) byType[type] = { total: 0, crossPds: 0, samePds: 0 };
+      byType[type].total += counts.total;
+      byType[type].crossPds += counts.crossPds;
+      byType[type].samePds += counts.samePds;
+    }
+
+    const fed = JSON.parse(row.federation as string) as Record<string, number>;
+    for (const [key, count] of Object.entries(fed)) {
+      federation[key] = (federation[key] ?? 0) + count;
+    }
+
+    const pairs = JSON.parse(row.top_cross_pds_pairs as string) as Array<{ from: string; to: string; count: number }>;
+    for (const pair of pairs) {
+      const key = `${pair.from}|${pair.to}`;
+      const existing = pairCounts.get(key);
+      if (existing) {
+        existing.count += pair.count;
+      } else {
+        pairCounts.set(key, { ...pair });
+      }
+    }
+  }
+
+  const topCrossPdsPairs = [...pairCounts.values()]
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 10);
+
+  const eventsPerSecond = totalDurationMs > 0
+    ? Math.round((totalEvents / totalDurationMs) * 1000)
+    : 0;
+
+  const latest = rows[rows.length - 1];
 
   return {
-    id: row.id as number,
-    sampledAt: row.sampled_at as string,
-    durationMs: row.duration_ms as number,
-    totalEvents: row.total_events as number,
-    totalInteractions: row.total_interactions as number,
-    resolvedInteractions: row.resolved_interactions as number,
-    crossPds: row.cross_pds as number,
-    samePds: row.same_pds as number,
-    eventsPerSecond: row.events_per_second as number,
-    byType: JSON.parse(row.by_type as string),
-    federation: JSON.parse(row.federation as string),
-    topCrossPdsPairs: JSON.parse(row.top_cross_pds_pairs as string),
+    id: latest.id as number,
+    sampledAt: latest.sampled_at as string,
+    sampleCount: rows.length,
+    windowDays: 7,
+    durationMs: totalDurationMs,
+    totalEvents,
+    totalInteractions,
+    resolvedInteractions,
+    crossPds,
+    samePds,
+    eventsPerSecond,
+    byType,
+    federation,
+    topCrossPdsPairs,
   };
 }
 

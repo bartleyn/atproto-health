@@ -59,5 +59,27 @@ function migrate(db: Database.Database) {
       after TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS plc_creation_monthly (
+      month TEXT NOT NULL,
+      pds_url TEXT NOT NULL,
+      count INTEGER NOT NULL,
+      PRIMARY KEY (month, pds_url)
+    );
+
+    CREATE TABLE IF NOT EXISTS plc_migration_monthly (
+      month TEXT NOT NULL,
+      from_pds TEXT NOT NULL,
+      to_pds TEXT NOT NULL,
+      count INTEGER NOT NULL,
+      PRIMARY KEY (month, from_pds, to_pds)
+    );
+
+    CREATE TABLE IF NOT EXISTS plc_aggregation_cursor (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      creations_through TEXT NOT NULL,
+      migrations_through TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
 }

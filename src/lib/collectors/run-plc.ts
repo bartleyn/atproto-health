@@ -6,6 +6,7 @@
  */
 
 import { collectPlcMigrations } from "./plc-migrations";
+import { aggregatePlc } from "./aggregate-plc";
 
 async function main() {
   console.log("\n=== PLC Migration Collector ===\n");
@@ -19,6 +20,12 @@ async function main() {
   console.log(`  Ops processed:    ${opsProcessed.toLocaleString()}`);
   console.log(`  Creations found:  ${creationsFound.toLocaleString()}`);
   console.log(`  Migrations found: ${migrationsFound.toLocaleString()}`);
+
+  console.log("\nBuilding monthly aggregations...");
+  const aggStart = Date.now();
+  const { creationMonths, migrationMonths } = aggregatePlc();
+  const aggElapsed = ((Date.now() - aggStart) / 1000).toFixed(1);
+  console.log(`  Done in ${aggElapsed}s — ${creationMonths} creation months, ${migrationMonths} migration months`);
 }
 
 main().catch((err) => {

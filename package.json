@@ -14,7 +14,8 @@
     "sample": "npx tsx src/lib/collectors/run-jetstream.ts",
     "collect:ecosystem": "npx tsx src/lib/collectors/run-ecosystem.ts",
     "collect:plc": "npx tsx src/lib/collectors/run-plc.ts",
-    "collect:plc:creations": "npx tsx src/lib/collectors/run-plc-creations.ts"
+    "collect:plc:creations": "npx tsx src/lib/collectors/run-plc-creations.ts",
+    "aggregate:plc": "npx tsx src/lib/collectors/run-aggregate-plc.ts"
   },
   "keywords": [],
   "author": "",

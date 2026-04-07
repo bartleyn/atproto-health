@@ -74,7 +74,13 @@ export default async function Home({
           </div>
         </div>
         <div className="text-right text-xs text-gray-500 space-y-0.5">
-          <div className="flex justify-end mb-2">
+          <div className="flex justify-end gap-3 mb-2">
+            <a
+              href="/migrations"
+              className="inline-flex items-center gap-1 text-gray-400 hover:text-gray-200 transition-colors"
+            >
+              Migrations
+            </a>
             <a
               href="https://github.com/bartleyn/atproto-health"
               target="_blank"

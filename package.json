@@ -15,7 +15,8 @@
     "collect:ecosystem": "npx tsx src/lib/collectors/run-ecosystem.ts",
     "collect:plc": "npx tsx src/lib/collectors/run-plc.ts",
     "collect:plc:creations": "npx tsx src/lib/collectors/run-plc-creations.ts",
-    "aggregate:plc": "npx tsx src/lib/collectors/run-aggregate-plc.ts"
+    "aggregate:plc": "npx tsx src/lib/collectors/run-aggregate-plc.ts",
+    "scan:pds-status": "npx tsx src/lib/collectors/scan-pds-status.ts"
   },
   "keywords": [],
   "author": "",

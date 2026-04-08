@@ -80,6 +80,57 @@ function migrate(db: Database.Database) {
       creations_cursor TEXT NOT NULL, -- last created_At aggregated
       migrations_cursor TEXT NOT NULL, -- last migrated_at aggregated
       updated_at TEXT NOT NULL
-      );
+    );
+
+    CREATE TABLE IF NOT EXISTS plc_creation_weekly (
+      pds_url TEXT NOT NULL,
+      week    TEXT NOT NULL, -- Monday of ISO week, YYYY-MM-DD
+      count   INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (pds_url, week)
+    );
+
+    CREATE TABLE IF NOT EXISTS plc_migration_weekly (
+      from_pds TEXT NOT NULL,
+      to_pds   TEXT NOT NULL,
+      week     TEXT NOT NULL,
+      count    INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (from_pds, to_pds, week)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_plc_creation_weekly_week
+      ON plc_creation_weekly(week);
+    CREATE INDEX IF NOT EXISTS idx_plc_migration_weekly_week
+      ON plc_migration_weekly(week);
+    CREATE INDEX IF NOT EXISTS idx_plc_migration_weekly_to_pds
+      ON plc_migration_weekly(to_pds);
+
+    CREATE TABLE IF NOT EXISTS plc_aggregation_weekly_cursor (
+      id               INTEGER PRIMARY KEY CHECK (id = 1),
+      creations_cursor TEXT NOT NULL,
+      migrations_cursor TEXT NOT NULL,
+      updated_at       TEXT NOT NULL
+    );
+
+    -- Point-in-time snapshots of repo status per PDS.
+    -- Run the scanner periodically to build up the timeseries.
+    CREATE TABLE IF NOT EXISTS pds_repo_status_snapshots (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      pds_url       TEXT    NOT NULL,
+      snapshot_date TEXT    NOT NULL, -- YYYY-MM-DD
+      active        INTEGER NOT NULL DEFAULT 0,
+      deactivated   INTEGER NOT NULL DEFAULT 0,
+      deleted       INTEGER NOT NULL DEFAULT 0,
+      takendown     INTEGER NOT NULL DEFAULT 0,
+      suspended     INTEGER NOT NULL DEFAULT 0,
+      other         INTEGER NOT NULL DEFAULT 0,
+      total_scanned INTEGER NOT NULL DEFAULT 0,
+      is_sampled    INTEGER NOT NULL DEFAULT 0, -- 1 if sampled, 0 if full scan
+      UNIQUE(pds_url, snapshot_date)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pds_repo_status_snapshots_date
+      ON pds_repo_status_snapshots(snapshot_date);
+    CREATE INDEX IF NOT EXISTS idx_pds_repo_status_snapshots_pds
+      ON pds_repo_status_snapshots(pds_url);
   `);
 }

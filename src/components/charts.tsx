@@ -1,5 +1,10 @@
 "use client";
 
+import { sankey, sankeyLinkHorizontal, sankeyJustify } from "d3-sankey";
+import type { SankeyNode, SankeyLink } from "d3-sankey";
+import { useState, useRef } from "react";
+import type { MigrationFlow } from "@/lib/db/plc-queries";
+
 import {
   BarChart,
   Bar,
@@ -322,5 +327,189 @@ export function DonutChart({ data, maxSlices = 10 }: DonutChartProps) {
         />
       </PieChart>
     </ResponsiveContainer>
+  );
+}
+
+// ── Sankey Chart ───────────────────────────────────────────────────────────────
+
+type N = { name: string };
+type L = Record<string, never>;
+type SankeyNodeDatum = SankeyNode<N, L>;
+type SankeyLinkDatum = SankeyLink<N, L>;
+
+interface SankeyTooltip {
+  x: number;
+  y: number;
+  content: React.ReactNode;
+}
+
+interface SankeyChartProps {
+  data: MigrationFlow[];
+  width?: number;
+  height?: number;
+}
+
+export function SankeyChart({ data, width = 900, height = 520 }: SankeyChartProps) {
+  const [tooltip, setTooltip] = useState<SankeyTooltip | null>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
+
+  if (!data.length) return <p className="text-gray-500">No migration data yet.</p>;
+
+  // Treat sources and targets as distinct nodes to avoid cycles (same PDS can be
+  // both a source and destination). Suffix internally; strip for display.
+  const SRC_SUFFIX = "\u200b";  // zero-width space
+  const srcNames  = [...new Set(data.map(d => d.source + SRC_SUFFIX))];
+  const tgtNames  = [...new Set(data.map(d => d.target))];
+  const nodeNames = [...srcNames, ...tgtNames];
+  const nodeIndex = new Map(nodeNames.map((name, i) => [name, i]));
+
+  const margin = { top: 10, right: 160, bottom: 10, left: 10 };
+  const innerW = width - margin.left - margin.right;
+  const innerH = height - margin.top - margin.bottom;
+
+  const sankeyLayout = sankey<N, L>()
+    .nodeAlign(sankeyJustify)
+    .nodeWidth(14)
+    .nodePadding(12)
+    .extent([[0, 0], [innerW, innerH]]);
+
+  const { nodes, links } = sankeyLayout({
+    nodes: nodeNames.map(name => ({ name })),
+    links: data.map(d => ({
+      source: nodeIndex.get(d.source + SRC_SUFFIX)!,
+      target: nodeIndex.get(d.target)!,
+      value: d.value,
+    })) as any,
+  });
+
+  const totalFlow = (nodes as SankeyNodeDatum[]).reduce((s, n) => s + (n.value ?? 0), 0) / 2;
+
+  const linkPath = sankeyLinkHorizontal();
+
+  const handleNodeHover = (e: React.MouseEvent, node: SankeyNodeDatum) => {
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const inflow  = (node.targetLinks as SankeyLinkDatum[]).reduce((s, l) => s + l.value, 0);
+    const outflow = (node.sourceLinks as SankeyLinkDatum[]).reduce((s, l) => s + l.value, 0);
+    setTooltip({
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top,
+      content: (
+        <div>
+          <p className="font-medium mb-1" style={{ color: "#e5e7eb" }}>{node.name.replace(/\u200b$/, "")}</p>
+          {inflow  > 0 && <p style={{ color: "#10b981", fontSize: "0.8rem" }}>Inbound: {inflow.toLocaleString()}</p>}
+          {outflow > 0 && <p style={{ color: "#f59e0b", fontSize: "0.8rem" }}>Outbound: {outflow.toLocaleString()}</p>}
+        </div>
+      ),
+    });
+  };
+
+  const handleLinkHover = (e: React.MouseEvent, link: SankeyLinkDatum) => {
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const src = (link.source as SankeyNodeDatum);
+    const tgt = (link.target as SankeyNodeDatum);
+    const srcTotal = (src.sourceLinks as SankeyLinkDatum[]).reduce((s, l) => s + l.value, 0);
+    const pct = srcTotal > 0 ? ((link.value / srcTotal) * 100).toFixed(1) : "0.0";
+    setTooltip({
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top,
+      content: (
+        <div>
+          <p className="font-medium mb-1" style={{ color: "#e5e7eb" }}>
+            {src.name.replace(/\u200b$/, "")} → {tgt.name}
+          </p>
+          <p style={{ color: "#f3f4f6", fontSize: "0.8rem" }}>
+            {link.value.toLocaleString()} migrations ({pct}% of source outflow)
+          </p>
+        </div>
+      ),
+    });
+  };
+
+  return (
+    <div className="relative" style={{ width: "100%", overflowX: "auto" }}>
+      <svg
+        ref={svgRef}
+        width={width}
+        height={height}
+        style={{ maxWidth: "100%" }}
+        onMouseLeave={() => setTooltip(null)}
+      >
+        <g transform={`translate(${margin.left},${margin.top})`}>
+          {/* Links */}
+          {(links as SankeyLinkDatum[]).map((link, i) => {
+            const srcIdx = nodeIndex.get((link.source as SankeyNodeDatum).name) ?? 0;
+            const color = COLORS[srcIdx % COLORS.length];
+            return (
+              <path
+                key={i}
+                d={linkPath(link as any) ?? ""}
+                fill="none"
+                stroke={color}
+                strokeOpacity={0.35}
+                strokeWidth={Math.max(1, link.width ?? 1)}
+                onMouseEnter={(e) => handleLinkHover(e, link)}
+                onMouseMove={(e) => handleLinkHover(e, link)}
+                style={{ cursor: "default" }}
+              />
+            );
+          })}
+
+          {/* Nodes */}
+          {(nodes as SankeyNodeDatum[]).map((node, i) => {
+            const color = COLORS[i % COLORS.length];
+            const x0 = node.x0 ?? 0, x1 = node.x1 ?? 0;
+            const y0 = node.y0 ?? 0, y1 = node.y1 ?? 0;
+            const labelRight = x1 > innerW / 2;
+            return (
+              <g
+                key={i}
+                onMouseEnter={(e) => handleNodeHover(e, node)}
+                onMouseMove={(e) => handleNodeHover(e, node)}
+                style={{ cursor: "default" }}
+              >
+                <rect
+                  x={x0} y={y0}
+                  width={x1 - x0} height={Math.max(1, y1 - y0)}
+                  fill={color}
+                  rx={2}
+                />
+                <text
+                  x={labelRight ? x1 + 6 : x0 - 6}
+                  y={(y0 + y1) / 2}
+                  textAnchor={labelRight ? "start" : "end"}
+                  dominantBaseline="middle"
+                  fill="#d1d5db"
+                  fontSize={11}
+                >
+                  {node.name.replace(/\u200b$/, "").replace(/^https?:\/\//, "")}
+                </text>
+              </g>
+            );
+          })}
+        </g>
+      </svg>
+
+      {/* Tooltip */}
+      {tooltip && (
+        <div
+          style={{
+            ...tooltipStyle.contentStyle,
+            position: "absolute",
+            left: tooltip.x + 12,
+            top: tooltip.y - 12,
+            pointerEvents: "none",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {tooltip.content}
+        </div>
+      )}
+
+      <p style={{ color: "#6b7280", fontSize: "0.7rem", marginTop: 4 }}>
+        Total recorded: {totalFlow.toLocaleString()} migrations · Top 10 sources &amp; destinations shown
+      </p>
+    </div>
   );
 }

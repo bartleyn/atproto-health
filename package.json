@@ -22,6 +22,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "d3-sankey": "^0.12.3",
     "next": "^16.1.6",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
@@ -32,6 +33,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4.2.1",
     "@types/better-sqlite3": "^7.6.13",
+    "@types/d3-sankey": "^0.12.5",
     "@types/node": "^25.3.5",
     "@types/react": "^19.2.14",
     "@types/react-simple-maps": "^3.0.6",

@@ -161,6 +161,45 @@ export function getMigrationTimeseries(): MonthlyRow[] {
   `).all() as MonthlyRow[];
 }
 
+export interface MigrationFlow {
+  source: string;
+  target: string;
+  value: number;
+}
+
+export function getMigrationFlows(topN = 10): MigrationFlow[] {
+  const db = getPlcDb();
+  return db.prepare(`
+    WITH
+      collapsed AS (
+        SELECT
+          CASE WHEN from_pds LIKE '%bsky.network' THEN '${BSKY_NETWORK_LABEL}' ELSE from_pds END AS source,
+          to_pds AS target,
+          SUM(count) AS value
+        FROM plc_migration_monthly
+        WHERE to_pds NOT LIKE '%bsky.network'
+        GROUP BY 1, 2
+      ),
+      top_sources AS (
+        SELECT source FROM collapsed GROUP BY source ORDER BY SUM(value) DESC LIMIT ${topN}
+      ),
+      top_targets AS (
+        SELECT target FROM collapsed GROUP BY target ORDER BY SUM(value) DESC LIMIT ${topN}
+      ),
+      labeled AS (
+        SELECT
+          CASE WHEN source IN (SELECT source FROM top_sources) THEN source ELSE 'Other sources' END AS source,
+          CASE WHEN target IN (SELECT target FROM top_targets) THEN target ELSE 'Other destinations' END AS target,
+          value
+        FROM collapsed
+      )
+    SELECT source, target, SUM(value) AS value
+    FROM labeled
+    GROUP BY source, target
+    ORDER BY value DESC
+  `).all() as MigrationFlow[];
+}
+
 export function getLatestPdsStatusSnapshot(): PdsStatusRow[] {
   const db = getPlcDb();
   return db.prepare(`

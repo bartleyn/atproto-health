@@ -3,11 +3,11 @@ export const dynamic = "force-dynamic";
 import Link from "next/link";
 import {
   getCreationTimeseriesWeekly,
-  getMigrationTimeseriesWeekly,
+  getMigrationFlows,
   getLatestPdsStatusSnapshot,
   getEcosystemStats,
 } from "@/lib/db/plc-queries";
-import { StackedAreaChart, PdsStatusChart } from "@/components/charts";
+import { StackedAreaChart, SankeyChart, PdsStatusChart } from "@/components/charts";
 
 function StatCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
@@ -28,18 +28,15 @@ export default async function MigrationsPage({
   const includeTrump = trump === "1";
 
   const creations = getCreationTimeseriesWeekly(includeTrump);
-  const migrations = getMigrationTimeseriesWeekly();
+  const flows = getMigrationFlows();
   const statusSnapshot = getLatestPdsStatusSnapshot();
   const stats = getEcosystemStats();
 
   const fmt = (n: number) => n.toLocaleString();
   const snapshotDate = statusSnapshot[0]?.snapshot_date ?? null;
 
-  // Shared x-axis: union of all periods from both charts, sorted
-  const allPeriods = [...new Set([
-    ...creations.map(r => r.period),
-    ...migrations.map(r => r.period),
-  ])].sort();
+  // Shared x-axis for the creations chart
+  const allPeriods = creations.map(r => r.period).filter((v, i, a) => a.indexOf(v) === i).sort();
 
   // PDSes seen in the scanner (active/reachable), not the PLC historical count
   const scannedPdsCount = statusSnapshot.length;
@@ -115,19 +112,16 @@ export default async function MigrationsPage({
           )}
         </section>
 
-        {/* Inbound Migrations */}
+        {/* Migration Flows Sankey */}
         <section>
           <h2 className="text-xl font-semibold text-gray-200 mb-1">
-            Inbound Migrations by PDS
+            Migration Flows
           </h2>
           <p className="text-xs text-gray-500 mb-4">
-            Excludes bsky.network destinations. Normalized to 100% — hover for actual counts.
+            All-time account migrations between PDSes. Excludes bsky.network destinations.
+            Top 10 sources and destinations shown. Hover nodes and links for details.
           </p>
-          {migrations.length === 0 ? (
-            <p className="text-gray-500">No data yet.</p>
-          ) : (
-            <StackedAreaChart data={migrations} allPeriods={allPeriods} />
-          )}
+          <SankeyChart data={flows} />
         </section>
 
         {/* Active Account Health */}

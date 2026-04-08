@@ -39,6 +39,45 @@ const BSKY_NETWORK_LABEL = "bsky.network";
 const TRUMP_PDS = "https://pds.trump.com";
 const TOP_N = 10;
 
+// Exclude localhost/loopback dev artifacts, reserved TLDs, private IPs, and malformed URLs.
+// .dev is a real IANA TLD (Google) — do NOT filter it.
+// Pass a table alias (e.g. "w") to avoid ambiguity in joined queries.
+function junkPdsFilter(col = "pds_url") {
+  return `
+    ${col} NOT LIKE '%localhost%'
+    AND ${col} NOT LIKE '%127.0.0.1%'
+    AND ${col} NOT LIKE '%0.0.0.0%'
+    AND ${col} NOT LIKE '%192.168.%'
+    AND ${col} NOT LIKE '%10.0.%'
+    AND ${col} NOT LIKE '%172.16.%'
+    AND (${col} LIKE 'http://%' OR ${col} LIKE 'https://%')
+    AND ${col} NOT LIKE '%.uwu%'
+    AND ${col} NOT LIKE '%uwu.%'
+    AND ${col} NOT LIKE '%.test'
+    AND ${col} NOT LIKE '%.test/%'
+    AND ${col} NOT LIKE '%.test:%'
+    AND ${col} NOT LIKE '%.example'
+    AND ${col} NOT LIKE '%.example/%'
+    AND ${col} NOT LIKE '%.example:%'
+    AND ${col} NOT LIKE '%.invalid'
+    AND ${col} NOT LIKE '%.invalid/%'
+    AND ${col} NOT LIKE '%.local'
+    AND ${col} NOT LIKE '%.local/%'
+    AND ${col} NOT LIKE '%.local:%'
+    AND ${col} NOT LIKE '%.internal'
+    AND ${col} NOT LIKE '%.internal/%'
+    AND ${col} NOT LIKE '%.internal:%'
+    AND ${col} NOT LIKE '%.lan'
+    AND ${col} NOT LIKE '%.lan/%'
+    AND ${col} NOT LIKE '%.lan:%'
+    AND ${col} NOT LIKE '%.home'
+    AND ${col} NOT LIKE '%.home/%'
+    AND ${col} NOT LIKE '%.home:%'
+    AND length(${col}) <= 200
+  `;
+}
+const JUNK_PDS_FILTER = junkPdsFilter();
+
 export function getCreationTimeseries(): MonthlyRow[] {
   const db = getPlcDb();
   return db.prepare(`
@@ -71,17 +110,24 @@ export function getCreationTimeseries(): MonthlyRow[] {
   `).all() as MonthlyRow[];
 }
 
-export function getCreationTimeseriesWeekly(includeTrump = false): TimeseriesRow[] {
+export function getCreationTimeseriesWeekly(includeTrump = false, hideBsky = false): TimeseriesRow[] {
   const db = getPlcDb();
-  const trumpFilter = includeTrump ? "" : `AND pds_url != '${TRUMP_PDS}'`;
+  const trumpFilter = includeTrump ? "" : `AND w.pds_url != '${TRUMP_PDS}'`;
+  const bskyFilter  = hideBsky ? `AND w.pds_url NOT LIKE '%bsky.network'` : "";
+  const verifiedFilter = includeTrump
+    ? `AND (v.pds_url IS NOT NULL OR w.pds_url = '${TRUMP_PDS}')`
+    : `AND v.pds_url IS NOT NULL`;
   return db.prepare(`
-    WITH collapsed AS (
+    WITH
+    verified AS (SELECT pds_url FROM pds_repo_status_snapshots),
+    collapsed AS (
       SELECT
-        CASE WHEN pds_url LIKE '%bsky.network' THEN '${BSKY_NETWORK_LABEL}' ELSE pds_url END AS pds_url,
+        CASE WHEN w.pds_url LIKE '%bsky.network' THEN '${BSKY_NETWORK_LABEL}' ELSE w.pds_url END AS pds_url,
         week AS period,
-        SUM(count) AS count
-      FROM plc_creation_weekly
-      WHERE 1=1 ${trumpFilter}
+        SUM(w.count) AS count
+      FROM plc_creation_weekly w
+      LEFT JOIN verified v ON w.pds_url = v.pds_url
+      WHERE ${junkPdsFilter("w.pds_url")} ${trumpFilter} ${bskyFilter} ${verifiedFilter}
       GROUP BY 1, 2
     ),
     top_pds AS (
@@ -171,6 +217,7 @@ export function getMigrationFlows(topN = 10): MigrationFlow[] {
   const db = getPlcDb();
   return db.prepare(`
     WITH
+      verified AS (SELECT pds_url FROM pds_repo_status_snapshots),
       collapsed AS (
         SELECT
           CASE WHEN from_pds LIKE '%bsky.network' THEN '${BSKY_NETWORK_LABEL}' ELSE from_pds END AS source,
@@ -178,6 +225,8 @@ export function getMigrationFlows(topN = 10): MigrationFlow[] {
           SUM(count) AS value
         FROM plc_migration_monthly
         WHERE to_pds NOT LIKE '%bsky.network'
+          AND (from_pds LIKE '%bsky.network' OR from_pds IN (SELECT pds_url FROM verified))
+          AND to_pds IN (SELECT pds_url FROM verified)
         GROUP BY 1, 2
       ),
       top_sources AS (
@@ -216,37 +265,54 @@ export function getLatestPdsStatusSnapshot(): PdsStatusRow[] {
   `).all() as PdsStatusRow[];
 }
 
-export function getEcosystemStats(): EcosystemStats {
+export function getEcosystemStats(hideBsky = false): EcosystemStats {
   const db = getPlcDb();
+  const bskyFilter = hideBsky ? `AND m.pds_url NOT LIKE '%bsky.network'` : "";
 
-  // Use aggregated tables — much faster than scanning 83M raw rows.
-  // plc_creation_monthly is small and already grouped by pds_url.
+  // Use scanner total_scanned for bsky.network (avoids morel stale PLC inflation of ~15.5M),
+  // and PLC creation counts for independent PDSes (scanner counts small PDSes accurately too).
+  // For simplicity: just sum scanner total_scanned across all verified PDSes.
+  // trump.com is unscanned so it naturally falls out; hideBsky filters bsky shards.
   const totals = db.prepare(`
     SELECT
-      SUM(count) AS total_dids,
-      SUM(CASE WHEN pds_url != '${TRUMP_PDS}' THEN count ELSE 0 END) AS total_dids_ex_trump
-    FROM plc_creation_monthly
+      SUM(total_scanned) AS total_dids,
+      SUM(total_scanned) AS total_dids_ex_trump
+    FROM pds_repo_status_snapshots
+    WHERE 1=1 ${bskyFilter.replace(/m\.pds_url/g, "pds_url")}
   `).get() as { total_dids: number; total_dids_ex_trump: number };
 
+  // Match the Sankey filter: verified PDSes only, no bsky destinations.
+  // When hideBsky, also exclude migrations originating from bsky.network.
+  const bskySourceFilter = hideBsky ? "" : `OR from_pds LIKE '%bsky.network'`;
   const migrations = db.prepare(`
     SELECT SUM(count) AS total_migrations FROM plc_migration_monthly
+    WHERE to_pds NOT LIKE '%bsky.network'
+      AND (from_pds IN (SELECT pds_url FROM pds_repo_status_snapshots) ${bskySourceFilter})
+      AND to_pds IN (SELECT pds_url FROM pds_repo_status_snapshots)
   `).get() as { total_migrations: number };
 
   const indep = db.prepare(`
-    WITH ex_trump_total AS (
-      SELECT SUM(count) AS n FROM plc_creation_monthly
-      WHERE pds_url != '${TRUMP_PDS}'
+    WITH verified AS (
+      -- Only PDSes that responded to our scanner
+      SELECT pds_url FROM pds_repo_status_snapshots
+    ),
+    verified_total AS (
+      SELECT SUM(m.count) AS n
+      FROM plc_creation_monthly m
+      JOIN verified v ON m.pds_url = v.pds_url
+      WHERE m.pds_url != '${TRUMP_PDS}'
     ),
     indep AS (
-      SELECT COUNT(DISTINCT pds_url) AS cnt, SUM(count) AS n
-      FROM plc_creation_monthly
-      WHERE pds_url != '${TRUMP_PDS}'
-        AND pds_url NOT LIKE '%bsky.network'
+      SELECT COUNT(DISTINCT m.pds_url) AS cnt, SUM(m.count) AS n
+      FROM plc_creation_monthly m
+      JOIN verified v ON m.pds_url = v.pds_url
+      WHERE m.pds_url != '${TRUMP_PDS}'
+        AND m.pds_url NOT LIKE '%bsky.network'
     )
     SELECT
       indep.cnt AS independent_pds_count,
-      ROUND(100.0 * indep.n / ex_trump_total.n, 2) AS independent_pds_account_pct
-    FROM indep, ex_trump_total
+      ROUND(100.0 * indep.n / verified_total.n, 2) AS independent_pds_account_pct
+    FROM indep, verified_total
   `).get() as { independent_pds_count: number; independent_pds_account_pct: number };
 
   const dates = db.prepare(`

@@ -2,7 +2,7 @@
 
 import { sankey, sankeyLinkHorizontal, sankeyJustify } from "d3-sankey";
 import type { SankeyNode, SankeyLink } from "d3-sankey";
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import type { MigrationFlow } from "@/lib/db/plc-queries";
 
 import {
@@ -345,13 +345,25 @@ interface SankeyTooltip {
 
 interface SankeyChartProps {
   data: MigrationFlow[];
-  width?: number;
   height?: number;
 }
 
-export function SankeyChart({ data, width = 900, height = 520 }: SankeyChartProps) {
+export function SankeyChart({ data, height = 400 }: SankeyChartProps) {
   const [tooltip, setTooltip] = useState<SankeyTooltip | null>(null);
+  const [width, setWidth] = useState(900);
   const svgRef = useRef<SVGSVGElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect.width;
+      if (w && w > 0) setWidth(w);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   if (!data.length) return <p className="text-gray-500">No migration data yet.</p>;
 
@@ -428,12 +440,11 @@ export function SankeyChart({ data, width = 900, height = 520 }: SankeyChartProp
   };
 
   return (
-    <div className="relative" style={{ width: "100%", overflowX: "auto" }}>
+    <div ref={containerRef} className="relative" style={{ width: "100%" }}>
       <svg
         ref={svgRef}
         width={width}
         height={height}
-        style={{ maxWidth: "100%" }}
         onMouseLeave={() => setTooltip(null)}
       >
         <g transform={`translate(${margin.left},${margin.top})`}>

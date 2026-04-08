@@ -33,7 +33,7 @@ function isCreationOp(op: PlcOp): boolean {
   // Legacy format: type === 'create'
   if (op.operation.type === "create") return true;
   // Modern format: prev is null (first op in chain)
-  if (op.operation.prev === null || op.operation.prev === undefined) return true;
+  if (op.operation.prev === null) return true;
   return false;
 }
 

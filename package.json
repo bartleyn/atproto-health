@@ -14,12 +14,15 @@
     "sample": "npx tsx src/lib/collectors/run-jetstream.ts",
     "collect:ecosystem": "npx tsx src/lib/collectors/run-ecosystem.ts",
     "collect:plc": "npx tsx src/lib/collectors/run-plc.ts",
-    "collect:plc:creations": "npx tsx src/lib/collectors/run-plc-creations.ts"
+    "collect:plc:creations": "npx tsx src/lib/collectors/run-plc-creations.ts",
+    "aggregate:plc": "npx tsx src/lib/collectors/run-aggregate-plc.ts",
+    "scan:pds-status": "npx tsx src/lib/collectors/scan-pds-status.ts"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "d3-sankey": "^0.12.3",
     "next": "^16.1.6",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
@@ -30,6 +33,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4.2.1",
     "@types/better-sqlite3": "^7.6.13",
+    "@types/d3-sankey": "^0.12.5",
     "@types/node": "^25.3.5",
     "@types/react": "^19.2.14",
     "@types/react-simple-maps": "^3.0.6",

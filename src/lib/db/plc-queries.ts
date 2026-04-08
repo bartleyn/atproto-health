@@ -249,6 +249,48 @@ export function getMigrationFlows(topN = 10): MigrationFlow[] {
   `).all() as MigrationFlow[];
 }
 
+export interface WeeklyMigrationRow {
+  week: string;
+  to_pds: string;
+  count: number;
+}
+
+// Returns per-week migration counts for the last 18 months, broken down by the same
+// top-10 destinations used in the Sankey (so sink names match for cross-highlighting).
+export function getMigrationWeeklyBreakdown(topN = 10): WeeklyMigrationRow[] {
+  const db = getPlcDb();
+  return db.prepare(`
+    WITH
+      verified AS (SELECT pds_url FROM pds_repo_status_snapshots),
+      top_targets AS (
+        SELECT to_pds AS target
+        FROM plc_migration_monthly
+        WHERE to_pds NOT LIKE '%bsky.network'
+          AND to_pds IN (SELECT pds_url FROM verified)
+          AND (from_pds LIKE '%bsky.network' OR from_pds IN (SELECT pds_url FROM verified))
+        GROUP BY to_pds
+        ORDER BY SUM(count) DESC
+        LIMIT ${topN}
+      ),
+      labeled AS (
+        SELECT
+          w.week,
+          CASE WHEN w.to_pds IN (SELECT target FROM top_targets)
+               THEN w.to_pds ELSE 'Other destinations' END AS to_pds,
+          w.count
+        FROM plc_migration_weekly w
+        WHERE w.to_pds NOT LIKE '%bsky.network'
+          AND w.to_pds IN (SELECT pds_url FROM verified)
+          AND (w.from_pds LIKE '%bsky.network' OR w.from_pds IN (SELECT pds_url FROM verified))
+          AND w.week >= date('now', '-18 months')
+      )
+    SELECT week, to_pds, SUM(count) AS count
+    FROM labeled
+    GROUP BY week, to_pds
+    ORDER BY week, to_pds
+  `).all() as WeeklyMigrationRow[];
+}
+
 export function getLatestPdsStatusSnapshot(): PdsStatusRow[] {
   const db = getPlcDb();
   return db.prepare(`

@@ -3,7 +3,7 @@
 import { sankey, sankeyLinkHorizontal, sankeyJustify } from "d3-sankey";
 import type { SankeyNode, SankeyLink } from "d3-sankey";
 import { useState, useRef, useEffect } from "react";
-import type { MigrationFlow } from "@/lib/db/plc-queries";
+import type { MigrationFlow, WeeklyMigrationRow } from "@/lib/db/plc-queries";
 
 import {
   BarChart,
@@ -346,9 +346,11 @@ interface SankeyTooltip {
 interface SankeyChartProps {
   data: MigrationFlow[];
   height?: number;
+  selectedSink?: string | null;
+  onSinkClick?: (sink: string | null) => void;
 }
 
-export function SankeyChart({ data, height = 400 }: SankeyChartProps) {
+export function SankeyChart({ data, height = 400, selectedSink, onSinkClick }: SankeyChartProps) {
   const [tooltip, setTooltip] = useState<SankeyTooltip | null>(null);
   const [width, setWidth] = useState(900);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -452,13 +454,15 @@ export function SankeyChart({ data, height = 400 }: SankeyChartProps) {
           {(links as SankeyLinkDatum[]).map((link, i) => {
             const srcIdx = nodeIndex.get((link.source as SankeyNodeDatum).name) ?? 0;
             const color = COLORS[srcIdx % COLORS.length];
+            const tgtName = (link.target as SankeyNodeDatum).name;
+            const isHighlighted = !selectedSink || tgtName === selectedSink;
             return (
               <path
                 key={i}
                 d={linkPath(link as any) ?? ""}
                 fill="none"
                 stroke={color}
-                strokeOpacity={0.35}
+                strokeOpacity={isHighlighted ? 0.5 : 0.1}
                 strokeWidth={Math.max(1, link.width ?? 1)}
                 onMouseEnter={(e) => handleLinkHover(e, link)}
                 onMouseMove={(e) => handleLinkHover(e, link)}
@@ -473,25 +477,31 @@ export function SankeyChart({ data, height = 400 }: SankeyChartProps) {
             const x0 = node.x0 ?? 0, x1 = node.x1 ?? 0;
             const y0 = node.y0 ?? 0, y1 = node.y1 ?? 0;
             const labelRight = x1 > innerW / 2;
+            const isTarget = !node.name.endsWith(SRC_SUFFIX);
+            const isSelected = selectedSink && node.name === selectedSink;
+            const isDimmed = selectedSink && isTarget && node.name !== selectedSink;
             return (
               <g
                 key={i}
                 onMouseEnter={(e) => handleNodeHover(e, node)}
                 onMouseMove={(e) => handleNodeHover(e, node)}
-                style={{ cursor: "default" }}
+                onClick={() => isTarget && onSinkClick?.(isSelected ? null : node.name)}
+                style={{ cursor: isTarget ? "pointer" : "default", opacity: isDimmed ? 0.3 : 1 }}
               >
                 <rect
                   x={x0} y={y0}
                   width={x1 - x0} height={Math.max(1, y1 - y0)}
                   fill={color}
                   rx={2}
+                  stroke={isSelected ? "#fff" : "none"}
+                  strokeWidth={isSelected ? 1.5 : 0}
                 />
                 <text
                   x={labelRight ? x1 + 6 : x0 - 6}
                   y={(y0 + y1) / 2}
                   textAnchor={labelRight ? "start" : "end"}
                   dominantBaseline="middle"
-                  fill="#d1d5db"
+                  fill={isDimmed ? "#6b7280" : "#d1d5db"}
                   fontSize={11}
                 >
                   {node.name.replace(/\u200b$/, "").replace(/^https?:\/\//, "")}
@@ -520,7 +530,111 @@ export function SankeyChart({ data, height = 400 }: SankeyChartProps) {
 
       <p style={{ color: "#6b7280", fontSize: "0.7rem", marginTop: 4 }}>
         Total recorded: {totalFlow.toLocaleString()} migrations · Top 10 sources &amp; destinations shown
+        {selectedSink && (
+          <> · <span style={{ color: "#d1d5db" }}>
+            Click highlighted node to deselect
+          </span></>
+        )}
       </p>
+    </div>
+  );
+}
+
+// ── Migration weekly bar chart ────────────────────────────────────────────────
+
+interface MigrationWeeklyBarChartProps {
+  data: WeeklyMigrationRow[];
+  selectedSink: string | null;
+}
+
+function MigrationWeeklyBarChart({ data, selectedSink }: MigrationWeeklyBarChartProps) {
+  const weeks = [...new Set(data.map(r => r.week))].sort();
+
+  const chartData = weeks.map(week => {
+    const rows = data.filter(r => r.week === week);
+    const total = rows.reduce((s, r) => s + r.count, 0);
+    const selected = selectedSink
+      ? rows.filter(r => r.to_pds === selectedSink).reduce((s, r) => s + r.count, 0)
+      : 0;
+    return { week, total, selected, other: total - selected };
+  });
+
+  const CustomTooltip = ({ active, payload, label }: any) => {
+    if (!active || !payload?.length) return null;
+    const total = payload.find((p: any) => p.dataKey === "total" || p.dataKey === "other" || p.dataKey === "selected");
+    const realTotal = chartData.find(d => d.week === label)?.total ?? 0;
+    return (
+      <div style={{ ...tooltipStyle.contentStyle, whiteSpace: "nowrap" }}>
+        <p style={{ color: "#9ca3af", fontSize: "0.75rem", marginBottom: 4 }}>{label}</p>
+        <p style={{ color: "#e5e7eb", fontSize: "0.85rem" }}>{realTotal.toLocaleString()} migrations</p>
+        {selectedSink && (
+          <p style={{ color: COLORS[0], fontSize: "0.8rem" }}>
+            {selectedSink.replace(/^https?:\/\//, "")}: {chartData.find(d => d.week === label)?.selected.toLocaleString() ?? 0}
+          </p>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <ResponsiveContainer width="100%" height={180}>
+      <BarChart data={chartData} margin={{ top: 4, right: 16, bottom: 0, left: 16 }} barCategoryGap="10%">
+        <XAxis
+          dataKey="week"
+          tick={{ fill: "#6b7280", fontSize: 10 }}
+          tickLine={false}
+          axisLine={{ stroke: "#374151" }}
+          tickFormatter={(v: string) => v.slice(0, 7)}
+          interval="preserveStartEnd"
+        />
+        <YAxis
+          tick={{ fill: "#6b7280", fontSize: 10 }}
+          tickLine={false}
+          axisLine={false}
+          width={36}
+        />
+        <Tooltip content={<CustomTooltip />} cursor={{ fill: "rgba(255,255,255,0.04)" }} />
+        {selectedSink ? (
+          <>
+            <Bar dataKey="other" stackId="a" fill="#374151" isAnimationActive={false} />
+            <Bar dataKey="selected" stackId="a" fill={COLORS[0]} isAnimationActive={false} />
+          </>
+        ) : (
+          <Bar dataKey="total" fill="#4b5563" isAnimationActive={false} />
+        )}
+      </BarChart>
+    </ResponsiveContainer>
+  );
+}
+
+// ── Migration charts section (Sankey + weekly bar, shared selection state) ───
+
+interface MigrationChartsSectionProps {
+  sankeyData: MigrationFlow[];
+  weeklyData: WeeklyMigrationRow[];
+}
+
+export function MigrationChartsSection({ sankeyData, weeklyData }: MigrationChartsSectionProps) {
+  const [selectedSink, setSelectedSink] = useState<string | null>(null);
+
+  return (
+    <div className="space-y-6">
+      <SankeyChart
+        data={sankeyData}
+        selectedSink={selectedSink}
+        onSinkClick={setSelectedSink}
+      />
+      <div>
+        <p className="text-xs text-gray-500 mb-2">
+          Weekly migrations — last 18 months
+          {selectedSink && (
+            <span className="ml-2 text-blue-400">
+              Highlighting: {selectedSink.replace(/^https?:\/\//, "")}
+            </span>
+          )}
+        </p>
+        <MigrationWeeklyBarChart data={weeklyData} selectedSink={selectedSink} />
+      </div>
     </div>
   );
 }

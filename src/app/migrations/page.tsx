@@ -4,9 +4,10 @@ import Link from "next/link";
 import {
   getCreationTimeseriesWeekly,
   getMigrationFlows,
+  getMigrationWeeklyBreakdown,
   getEcosystemStats,
 } from "@/lib/db/plc-queries";
-import { StackedAreaChart, SankeyChart } from "@/components/charts";
+import { StackedAreaChart, MigrationChartsSection } from "@/components/charts";
 
 function StatCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
@@ -29,6 +30,7 @@ export default async function MigrationsPage({
 
   const creations = getCreationTimeseriesWeekly(includeTrump, hideBsky);
   const flows = getMigrationFlows();
+  const weeklyMigrations = getMigrationWeeklyBreakdown();
   const stats = getEcosystemStats(hideBsky);
 
   const fmt = (n: number) => n.toLocaleString();
@@ -70,7 +72,7 @@ export default async function MigrationsPage({
 
         
 
-        {/* Migration Flows Sankey */}
+        {/* Migration Flows Sankey + weekly bar */}
         <section>
           <h2 className="text-xl font-semibold text-gray-200 mb-1">
             Migration Flows
@@ -78,8 +80,9 @@ export default async function MigrationsPage({
           <p className="text-xs text-gray-500 mb-4">
             All-time account migrations between PDSes. Excludes bsky.network destinations.
             Top 10 sources and destinations shown. Hover nodes and links for details.
+            Click a destination node to highlight its weekly trend below.
           </p>
-          <SankeyChart data={flows} />
+          <MigrationChartsSection sankeyData={flows} weeklyData={weeklyMigrations} />
         </section>
 
         {/* Account Creations */}

@@ -44,7 +44,7 @@ export default async function MigrationsPage({
         <div>
           <h1 className="text-3xl font-bold text-white">PDS Migrations</h1>
           <p className="text-gray-400 mt-2">
-            DID creations and migrations across the AT Protocol ecosystem.
+            DID creations and migrations recorded in plc.directory
           </p>
         </div>
 

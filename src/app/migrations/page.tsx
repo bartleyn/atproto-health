@@ -60,7 +60,7 @@ export default async function MigrationsPage({
             <StatCard
               label="Total Migrations"
               value={fmt(stats.total_migrations)}
-              sub="PDS-to-PDS transfers recorded, not internal bsky.network migrations"
+              sub="PDS-to-PDS transfers, excluding internal bsky.network resharding"
             />
             <StatCard
               label="Independent PDSes"

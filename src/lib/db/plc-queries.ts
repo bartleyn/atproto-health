@@ -221,12 +221,12 @@ export function getMigrationFlows(topN = 10): MigrationFlow[] {
       collapsed AS (
         SELECT
           CASE WHEN from_pds LIKE '%bsky.network' THEN '${BSKY_NETWORK_LABEL}' ELSE from_pds END AS source,
-          to_pds AS target,
+          CASE WHEN to_pds LIKE '%bsky.network' THEN '${BSKY_NETWORK_LABEL}' ELSE to_pds END AS target,
           SUM(count) AS value
         FROM plc_migration_monthly
-        WHERE to_pds NOT LIKE '%bsky.network'
+        WHERE NOT (from_pds LIKE '%bsky.network' AND to_pds LIKE '%bsky.network')
           AND (from_pds LIKE '%bsky.network' OR from_pds IN (SELECT pds_url FROM verified))
-          AND to_pds IN (SELECT pds_url FROM verified)
+          AND (to_pds LIKE '%bsky.network' OR to_pds IN (SELECT pds_url FROM verified))
         GROUP BY 1, 2
       ),
       top_sources AS (
@@ -263,24 +263,27 @@ export function getMigrationWeeklyBreakdown(topN = 10): WeeklyMigrationRow[] {
     WITH
       verified AS (SELECT pds_url FROM pds_repo_status_snapshots),
       top_targets AS (
-        SELECT to_pds AS target
+        SELECT CASE WHEN to_pds LIKE '%bsky.network' THEN '${BSKY_NETWORK_LABEL}' ELSE to_pds END AS target
         FROM plc_migration_monthly
-        WHERE to_pds NOT LIKE '%bsky.network'
-          AND to_pds IN (SELECT pds_url FROM verified)
+        WHERE NOT (from_pds LIKE '%bsky.network' AND to_pds LIKE '%bsky.network')
+          AND (to_pds LIKE '%bsky.network' OR to_pds IN (SELECT pds_url FROM verified))
           AND (from_pds LIKE '%bsky.network' OR from_pds IN (SELECT pds_url FROM verified))
-        GROUP BY to_pds
+        GROUP BY target
         ORDER BY SUM(count) DESC
         LIMIT ${topN}
       ),
       labeled AS (
         SELECT
           w.week,
-          CASE WHEN w.to_pds IN (SELECT target FROM top_targets)
-               THEN w.to_pds ELSE 'Other destinations' END AS to_pds,
+          CASE
+            WHEN w.to_pds LIKE '%bsky.network' THEN '${BSKY_NETWORK_LABEL}'
+            WHEN w.to_pds IN (SELECT target FROM top_targets) THEN w.to_pds
+            ELSE 'Other destinations'
+          END AS to_pds,
           w.count
         FROM plc_migration_weekly w
-        WHERE w.to_pds NOT LIKE '%bsky.network'
-          AND w.to_pds IN (SELECT pds_url FROM verified)
+        WHERE NOT (w.from_pds LIKE '%bsky.network' AND w.to_pds LIKE '%bsky.network')
+          AND (w.to_pds LIKE '%bsky.network' OR w.to_pds IN (SELECT pds_url FROM verified))
           AND (w.from_pds LIKE '%bsky.network' OR w.from_pds IN (SELECT pds_url FROM verified))
           AND w.week >= date('now', '-18 months')
       )
@@ -323,14 +326,16 @@ export function getEcosystemStats(hideBsky = false): EcosystemStats {
     WHERE 1=1 ${bskyFilter.replace(/m\.pds_url/g, "pds_url")}
   `).get() as { total_dids: number; total_dids_ex_trump: number };
 
-  // Match the Sankey filter: verified PDSes only, no bsky destinations.
-  // When hideBsky, also exclude migrations originating from bsky.network.
-  const bskySourceFilter = hideBsky ? "" : `OR from_pds LIKE '%bsky.network'`;
+  // Match the Sankey filter: verified PDSes only, exclude internal bsky resharding.
+  // Includes returns to bsky.network. When hideBsky, also exclude bsky as source or destination.
+  const bskyMigrationFilter = hideBsky
+    ? `AND from_pds NOT LIKE '%bsky.network' AND to_pds NOT LIKE '%bsky.network'`
+    : `AND NOT (from_pds LIKE '%bsky.network' AND to_pds LIKE '%bsky.network')`;
   const migrations = db.prepare(`
     SELECT SUM(count) AS total_migrations FROM plc_migration_monthly
-    WHERE to_pds NOT LIKE '%bsky.network'
-      AND (from_pds IN (SELECT pds_url FROM pds_repo_status_snapshots) ${bskySourceFilter})
-      AND to_pds IN (SELECT pds_url FROM pds_repo_status_snapshots)
+    WHERE (from_pds IN (SELECT pds_url FROM pds_repo_status_snapshots) OR from_pds LIKE '%bsky.network')
+      AND (to_pds IN (SELECT pds_url FROM pds_repo_status_snapshots) OR to_pds LIKE '%bsky.network')
+      ${bskyMigrationFilter}
   `).get() as { total_migrations: number };
 
   const indep = db.prepare(`

@@ -59,5 +59,143 @@ function migrate(db: Database.Database) {
       after TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS plc_creation_monthly (
+      pds_url TEXT NOT NULL,
+      month TEXT NOT NULL, -- 'should be YYYY-MM format'
+      count INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY( pds_url, month)
+    );
+
+    CREATE TABLE IF NOT EXISTS plc_migration_monthly (
+      from_pds TEXT NOT NULL,
+      to_pds TEXT NOT NULL,
+      month TEXT NOT NULL,
+      count INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (from_pds, to_pds, month)
+    );
+
+    CREATE TABLE IF NOT EXISTS plc_aggregation_cursor (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      creations_cursor TEXT NOT NULL, -- last created_At aggregated
+      migrations_cursor TEXT NOT NULL, -- last migrated_at aggregated
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS plc_creation_weekly (
+      pds_url TEXT NOT NULL,
+      week    TEXT NOT NULL, -- Monday of ISO week, YYYY-MM-DD
+      count   INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (pds_url, week)
+    );
+
+    CREATE TABLE IF NOT EXISTS plc_migration_weekly (
+      from_pds TEXT NOT NULL,
+      to_pds   TEXT NOT NULL,
+      week     TEXT NOT NULL,
+      count    INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (from_pds, to_pds, week)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_plc_creation_weekly_week
+      ON plc_creation_weekly(week);
+    CREATE INDEX IF NOT EXISTS idx_plc_migration_weekly_week
+      ON plc_migration_weekly(week);
+    CREATE INDEX IF NOT EXISTS idx_plc_migration_weekly_to_pds
+      ON plc_migration_weekly(to_pds);
+
+    CREATE TABLE IF NOT EXISTS plc_aggregation_weekly_cursor (
+      id               INTEGER PRIMARY KEY CHECK (id = 1),
+      creations_cursor TEXT NOT NULL,
+      migrations_cursor TEXT NOT NULL,
+      updated_at       TEXT NOT NULL
+    );
+
+    -- Weekly active-account creation counts per PDS.
+    -- Derived from did_in_repo JOIN plc_account_creations, excluding non-active DIDs.
+    -- Run aggregate-active-plc.ts after a full did_in_repo scan to populate.
+    CREATE TABLE IF NOT EXISTS active_creation_weekly (
+      pds_url TEXT NOT NULL,
+      week    TEXT NOT NULL, -- Monday of ISO week, YYYY-MM-DD
+      count   INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (pds_url, week)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_active_creation_weekly_week
+      ON active_creation_weekly(week);
+
+    -- Every DID observed in a listRepos scan, with its current PDS.
+    -- Updated on each scan so it reflects the latest known location.
+    CREATE TABLE IF NOT EXISTS did_in_repo (
+      did        TEXT PRIMARY KEY,
+      pds_url    TEXT NOT NULL,
+      scanned_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_did_in_repo_pds
+      ON did_in_repo(pds_url);
+
+    -- Non-active individual DID statuses from listRepos scans.
+    -- Only non-active repos are stored (takendown, deactivated, deleted, suspended).
+    CREATE TABLE IF NOT EXISTS did_repo_status (
+      did        TEXT PRIMARY KEY,
+      status     TEXT NOT NULL,
+      pds_url    TEXT NOT NULL,
+      scanned_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_did_repo_status_pds
+      ON did_repo_status(pds_url);
+    CREATE INDEX IF NOT EXISTS idx_did_repo_status_status
+      ON did_repo_status(status);
+
+    -- Point-in-time snapshots of repo status per PDS.
+    -- Run the scanner periodically to build up the timeseries.
+    CREATE TABLE IF NOT EXISTS pds_repo_status_snapshots (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      pds_url       TEXT    NOT NULL,
+      snapshot_date TEXT    NOT NULL, -- YYYY-MM-DD
+      active        INTEGER NOT NULL DEFAULT 0,
+      deactivated   INTEGER NOT NULL DEFAULT 0,
+      deleted       INTEGER NOT NULL DEFAULT 0,
+      takendown     INTEGER NOT NULL DEFAULT 0,
+      suspended     INTEGER NOT NULL DEFAULT 0,
+      other         INTEGER NOT NULL DEFAULT 0,
+      total_scanned INTEGER NOT NULL DEFAULT 0,
+      is_sampled    INTEGER NOT NULL DEFAULT 0, -- 1 if sampled, 0 if full scan
+      did_plc_count INTEGER NOT NULL DEFAULT 0,
+      did_web_count INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(pds_url, snapshot_date)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pds_repo_status_snapshots_date
+      ON pds_repo_status_snapshots(snapshot_date);
+    CREATE INDEX IF NOT EXISTS idx_pds_repo_status_snapshots_pds
+      ON pds_repo_status_snapshots(pds_url);
+
+    CREATE TABLE IF NOT EXISTS skywatch_labels (
+      did        TEXT NOT NULL,
+      label      TEXT NOT NULL,
+      labeled_at TEXT NOT NULL,
+      PRIMARY KEY (did, label)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_skywatch_labels_label
+      ON skywatch_labels(label);
+
+    CREATE TABLE IF NOT EXISTS skywatch_labels_cursor (
+      id         INTEGER PRIMARY KEY CHECK (id = 1),
+      cursor     TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
+
+  // Additive migrations for existing databases
+  for (const col of ["did_plc_count", "did_web_count"]) {
+    try {
+      db.exec(`ALTER TABLE pds_repo_status_snapshots ADD COLUMN ${col} INTEGER NOT NULL DEFAULT 0`);
+    } catch {
+      // Column already exists — ignore
+    }
+  }
 }

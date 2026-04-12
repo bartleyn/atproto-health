@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "ATProto ecosystem health dashboard",
   "scripts": {
-    "postinstall": "xattr -w com.apple.fileprovider.ignore#P 1 node_modules 2>/dev/null || true",
+    "postinstall": "xattr -w com.apple.fileprovider.ignore#P 1 node_modules 2>/dev/null || true && xattr -w com.apple.fileprovider.ignore#P 1 *.db *.db-shm *.db-wal 2>/dev/null || true",
     "dev": "next dev --turbopack",
     "build": "next build",
     "start": "next start",
@@ -14,12 +14,17 @@
     "sample": "npx tsx src/lib/collectors/run-jetstream.ts",
     "collect:ecosystem": "npx tsx src/lib/collectors/run-ecosystem.ts",
     "collect:plc": "npx tsx src/lib/collectors/run-plc.ts",
-    "collect:plc:creations": "npx tsx src/lib/collectors/run-plc-creations.ts"
+    "collect:plc:creations": "npx tsx src/lib/collectors/run-plc-creations.ts",
+    "aggregate:plc": "npx tsx src/lib/collectors/run-aggregate-plc.ts",
+    "aggregate:active-plc": "npx tsx src/lib/collectors/aggregate-active-plc.ts",
+    "scan:pds-status": "npx tsx src/lib/collectors/scan-pds-status.ts"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "d3-sankey": "^0.12.3",
+    "d3-shape": "^3.2.0",
     "next": "^16.1.6",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",

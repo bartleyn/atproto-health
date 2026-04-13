@@ -120,7 +120,7 @@ export function getCreationTimeseriesWeekly(includeTrump = false, hideBsky = fal
     : `AND v.pds_url IS NOT NULL`;
   return db.prepare(`
     WITH
-    verified AS (SELECT pds_url FROM pds_repo_status_snapshots),
+    verified AS (SELECT DISTINCT pds_url FROM pds_repo_status_snapshots),
     collapsed AS (
       SELECT
         CASE WHEN w.pds_url LIKE '%bsky.network' THEN '${BSKY_NETWORK_LABEL}' ELSE w.pds_url END AS pds_url,
@@ -129,6 +129,36 @@ export function getCreationTimeseriesWeekly(includeTrump = false, hideBsky = fal
       FROM plc_creation_weekly w
       LEFT JOIN verified v ON w.pds_url = v.pds_url
       WHERE ${junkPdsFilter("w.pds_url")} ${trumpFilter} ${bskyFilter} ${verifiedFilter}
+      GROUP BY 1, 2
+    ),
+    top_pds AS (
+      SELECT pds_url FROM collapsed GROUP BY pds_url ORDER BY SUM(count) DESC LIMIT ${TOP_N}
+    ),
+    labeled AS (
+      SELECT period,
+        CASE WHEN c.pds_url IN (SELECT pds_url FROM top_pds) THEN c.pds_url ELSE 'Other' END AS pds_url,
+        count
+      FROM collapsed c
+    )
+    SELECT period, pds_url, SUM(count) AS count
+    FROM labeled
+    GROUP BY period, pds_url
+    ORDER BY period, pds_url
+  `).all() as TimeseriesRow[];
+}
+
+export function getActiveCreationTimeseriesWeekly(hideBsky = false): TimeseriesRow[] {
+  const db = getPlcDb();
+  const bskyFilter = hideBsky ? `AND w.pds_url NOT LIKE '%bsky.network'` : "";
+  return db.prepare(`
+    WITH
+    collapsed AS (
+      SELECT
+        CASE WHEN w.pds_url LIKE '%bsky.network' THEN '${BSKY_NETWORK_LABEL}' ELSE w.pds_url END AS pds_url,
+        week AS period,
+        SUM(w.count) AS count
+      FROM active_creation_weekly w
+      WHERE ${junkPdsFilter("w.pds_url")} ${bskyFilter}
       GROUP BY 1, 2
     ),
     top_pds AS (
@@ -218,7 +248,7 @@ export function getMigrationFlows(topN = 10): MigrationFlow[] {
   const db = getPlcDb();
   return db.prepare(`
     WITH
-      verified AS (SELECT pds_url FROM pds_repo_status_snapshots),
+      verified AS (SELECT DISTINCT pds_url FROM pds_repo_status_snapshots),
       collapsed AS (
         SELECT
           CASE WHEN from_pds LIKE '%bsky.network' THEN '${BSKY_NETWORK_LABEL}' ELSE from_pds END AS source,
@@ -262,7 +292,7 @@ export function getMigrationWeeklyBreakdown(topN = 10): WeeklyMigrationRow[] {
   const db = getPlcDb();
   return db.prepare(`
     WITH
-      verified AS (SELECT pds_url FROM pds_repo_status_snapshots),
+      verified AS (SELECT DISTINCT pds_url FROM pds_repo_status_snapshots),
       top_targets AS (
         SELECT CASE WHEN to_pds LIKE '%bsky.network' THEN '${BSKY_NETWORK_LABEL}' ELSE to_pds END AS target
         FROM plc_migration_monthly

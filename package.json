@@ -17,6 +17,8 @@
     "collect:plc:creations": "npx tsx src/lib/collectors/run-plc-creations.ts",
     "aggregate:plc": "npx tsx src/lib/collectors/run-aggregate-plc.ts",
     "aggregate:active-plc": "npx tsx src/lib/collectors/aggregate-active-plc.ts",
+    "collect:skywatch": "npx tsx src/lib/collectors/skywatch-labels.ts",
+    "collect:activity": "npx tsx src/lib/collectors/jetstream-activity.ts",
     "scan:pds-status": "npx tsx src/lib/collectors/scan-pds-status.ts"
   },
   "keywords": [],

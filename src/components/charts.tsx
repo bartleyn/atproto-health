@@ -738,31 +738,44 @@ function CreationWeeklyBarChart({ data, selectedPds, onPdsClick }: CreationWeekl
 // ── Creation charts section (area chart + weekly bar, shared selection state) ─
 
 interface CreationChartsSectionProps {
-  data: TimeseriesRow[];
+  plcData: TimeseriesRow[];
+  repoData: TimeseriesRow[];
   allPeriods: string[];
 }
 
-export function CreationChartsSection({ data, allPeriods }: CreationChartsSectionProps) {
+export function CreationChartsSection({ plcData, repoData, allPeriods }: CreationChartsSectionProps) {
   const [selectedPds, setSelectedPds] = useState<string | null>(null);
 
   return (
-    <div className="space-y-4">
-      <StackedAreaChart
-        data={data}
-        allPeriods={allPeriods}
-        selectedPds={selectedPds}
-        onPdsClick={setSelectedPds}
-      />
+    <div className="space-y-8">
+      <div>
+        <p className="text-xs text-gray-500 mb-2">PLC directory registrations — all DIDs including unverified and ghost accounts</p>
+        <StackedAreaChart
+          data={plcData}
+          allPeriods={allPeriods}
+          selectedPds={selectedPds}
+          onPdsClick={setSelectedPds}
+        />
+      </div>
+      <div>
+        <p className="text-xs text-gray-500 mb-2">Repo-backed accounts — DIDs with an actual repository (excludes ghosts, morel provisioning artifacts)</p>
+        <StackedAreaChart
+          data={repoData}
+          allPeriods={allPeriods}
+          selectedPds={selectedPds}
+          onPdsClick={setSelectedPds}
+        />
+      </div>
       <div>
         <p className="text-xs text-gray-500 mb-2">
-          Raw weekly counts
+          Raw weekly repo-backed account counts
           {selectedPds && (
             <span className="ml-2 text-blue-400">
               Highlighting: {selectedPds.replace(/^https?:\/\//, "")}
             </span>
           )}
         </p>
-        <CreationWeeklyBarChart data={data} selectedPds={selectedPds} onPdsClick={setSelectedPds} />
+        <CreationWeeklyBarChart data={repoData} selectedPds={selectedPds} onPdsClick={setSelectedPds} />
       </div>
     </div>
   );

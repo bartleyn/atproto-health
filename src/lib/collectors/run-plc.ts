@@ -6,6 +6,7 @@
  */
 
 import { collectPlcMigrations } from "./plc-migrations";
+import { aggregatePlc } from "./aggregate-plc";
 
 async function main() {
   console.log("\n=== PLC Migration Collector ===\n");
@@ -19,6 +20,9 @@ async function main() {
   console.log(`  Ops processed:    ${opsProcessed.toLocaleString()}`);
   console.log(`  Creations found:  ${creationsFound.toLocaleString()}`);
   console.log(`  Migrations found: ${migrationsFound.toLocaleString()}`);
+
+  console.log("\nAggregating monthly buckets...");
+  aggregatePlc();
 }
 
 main().catch((err) => {

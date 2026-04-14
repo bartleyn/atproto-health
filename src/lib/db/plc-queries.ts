@@ -356,22 +356,15 @@ export function getEcosystemStats(hideBsky = false): EcosystemStats {
   const db = getPlcDb();
   const bskyFilter = hideBsky ? `AND m.pds_url NOT LIKE '%bsky.network'` : "";
 
-  // Use scanner total_scanned for bsky.network (avoids morel stale PLC inflation of ~15.5M),
-  // and PLC creation counts for independent PDSes (scanner counts small PDSes accurately too).
-  // For simplicity: just sum scanner total_scanned across all verified PDSes.
-  // trump.com is unscanned so it naturally falls out; hideBsky filters bsky shards.
+  // Use did_in_repo for the total — it has a unique constraint on did so it's
+  // deduplicated across PDSes (migrated accounts counted only once, at their current PDS).
+  // trump.com is excluded from scanning so it naturally falls out.
+  // hideBsky filters bsky shards via the pds_url on the did_in_repo row.
+  const bskyTotalFilter = hideBsky ? `AND dir.pds_url NOT LIKE '%bsky.network'` : "";
   const totals = db.prepare(`
-    WITH latest AS (
-      SELECT pds_url, MAX(snapshot_date) AS snapshot_date
-      FROM pds_repo_status_snapshots
-      GROUP BY pds_url
-    )
-    SELECT
-      SUM(s.total_scanned) AS total_dids,
-      SUM(s.total_scanned) AS total_dids_ex_trump
-    FROM pds_repo_status_snapshots s
-    JOIN latest l ON s.pds_url = l.pds_url AND s.snapshot_date = l.snapshot_date
-    WHERE 1=1 ${bskyFilter.replace(/m\.pds_url/g, "s.pds_url")}
+    SELECT COUNT(*) AS total_dids, COUNT(*) AS total_dids_ex_trump
+    FROM did_in_repo dir
+    WHERE 1=1 ${bskyTotalFilter}
   `).get() as { total_dids: number; total_dids_ex_trump: number };
 
   // Match the Sankey filter: verified PDSes only, exclude internal bsky resharding.

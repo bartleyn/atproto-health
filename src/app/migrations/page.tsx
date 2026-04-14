@@ -66,9 +66,9 @@ export default async function MigrationsPage({
           <h2 className="text-xl font-semibold text-gray-200 mb-4">Ecosystem Summary</h2>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <StatCard
-              label="Total did:plc accounts (approx.)"
+              label="Total accounts (scanned PDSes)"
               value={fmt(stats.total_dids_ex_trump)}
-              sub="Scanned PDSes only, excludes pds.trump.com"
+              sub="Deduplicated by DID across all scanned PDSes, excludes pds.trump.com"
             />
             <StatCard
               label="did:plc accounts that migrated"

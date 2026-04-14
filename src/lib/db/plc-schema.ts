@@ -188,6 +188,22 @@ function migrate(db: Database.Database) {
       cursor     TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS bsky_mod_labels (
+      did        TEXT NOT NULL,
+      label      TEXT NOT NULL,
+      labeled_at TEXT NOT NULL,
+      PRIMARY KEY (did, label)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_bsky_mod_labels_label
+      ON bsky_mod_labels(label);
+
+    CREATE TABLE IF NOT EXISTS bsky_mod_labels_cursor (
+      id         INTEGER PRIMARY KEY CHECK (id = 1),
+      cursor     TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
 
   // Additive migrations for existing databases

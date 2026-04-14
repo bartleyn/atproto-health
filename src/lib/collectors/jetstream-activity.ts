@@ -45,7 +45,8 @@ const JETSTREAM_URL = "wss://jetstream2.us-east.bsky.network/subscribe"
   + "&wantedCollections=app.bsky.graph.list"
   + "&wantedCollections=app.bsky.feed.threadgate"
   + "&wantedCollections=app.bsky.feed.generator"
-  + "&wantedCollections=app.bsky.graph.starterpack";
+  + "&wantedCollections=app.bsky.graph.starterpack"
+  + "&wantedCollections=app.bsky.actor.profile";
 
 const FLUSH_INTERVAL_MS  = 5 * 60 * 1000;
 const RECONNECT_DELAY_MS = 5_000;
@@ -53,6 +54,8 @@ const RECONNECT_DELAY_MS = 5_000;
 const args = process.argv.slice(2);
 const retentionIdx = args.indexOf("--retention-days");
 const RETENTION_DAYS = retentionIdx >= 0 ? parseInt(args[retentionIdx + 1], 10) : 90;
+const backfillIdx = args.indexOf("--backfill-hours");
+const BACKFILL_HOURS = backfillIdx >= 0 ? parseInt(args[backfillIdx + 1], 10) : null;
 
 // Activity buffer: "did|date" → bitmask of activity_types seen
 const activityBuffer = new Map<string, number>();
@@ -60,13 +63,17 @@ const activityBuffer = new Map<string, number>();
 // Delete buffer: "date|event_type" → count
 const deleteBuffer = new Map<string, number>();
 
+// Starter pack join buffer: "starterpack_uri|date" → count
+const starterpackBuffer = new Map<string, number>();
+
 let lastCursor = 0;
 let totalActivityFlushed = 0;
 let totalDeletesFlushed = 0;
+let totalStarterpackFlushed = 0;
 let totalEvents = 0;
 
 function flush() {
-  if (activityBuffer.size === 0 && deleteBuffer.size === 0) return;
+  if (activityBuffer.size === 0 && deleteBuffer.size === 0 && starterpackBuffer.size === 0) return;
 
   const db = getActivityDb();
 
@@ -78,16 +85,22 @@ function flush() {
     INSERT INTO delete_events_daily (date, event_type, count) VALUES (?, ?, ?)
     ON CONFLICT (date, event_type) DO UPDATE SET count = count + excluded.count
   `);
+  const upsertStarterpack = db.prepare(`
+    INSERT INTO starterpack_joins_daily (starterpack_uri, date, count) VALUES (?, ?, ?)
+    ON CONFLICT (starterpack_uri, date) DO UPDATE SET count = count + excluded.count
+  `);
   const saveCursor = db.prepare(`
     INSERT INTO jetstream_cursor (id, cursor, updated_at)
     VALUES (1, ?, datetime('now'))
     ON CONFLICT (id) DO UPDATE SET cursor = excluded.cursor, updated_at = excluded.updated_at
   `);
 
-  const activityRows = [...activityBuffer.entries()];
-  const deleteRows   = [...deleteBuffer.entries()];
+  const activityRows     = [...activityBuffer.entries()];
+  const deleteRows       = [...deleteBuffer.entries()];
+  const starterpackRows  = [...starterpackBuffer.entries()];
   activityBuffer.clear();
   deleteBuffer.clear();
+  starterpackBuffer.clear();
 
   db.transaction(() => {
     for (const [entry, bits] of activityRows) {
@@ -98,14 +111,19 @@ function flush() {
       const pipe = key.indexOf("|");
       upsertDelete.run(key.slice(0, pipe), key.slice(pipe + 1), count);
     }
+    for (const [key, count] of starterpackRows) {
+      const pipe = key.indexOf("|");
+      upsertStarterpack.run(key.slice(0, pipe), key.slice(pipe + 1), count);
+    }
     if (lastCursor > 0) saveCursor.run(lastCursor);
   })();
 
-  totalActivityFlushed += activityRows.length;  // unique (did, date) pairs
-  totalDeletesFlushed  += deleteRows.reduce((s, [, c]) => s + c, 0);
+  totalActivityFlushed    += activityRows.length;
+  totalDeletesFlushed     += deleteRows.reduce((s, [, c]) => s + c, 0);
+  totalStarterpackFlushed += starterpackRows.reduce((s, [, c]) => s + c, 0);
   console.log(
-    `[activity] Flushed activity=${activityRows.length.toLocaleString()} deletes=${deleteRows.length} types | ` +
-    `totals: activity=${totalActivityFlushed.toLocaleString()} deletes=${totalDeletesFlushed.toLocaleString()} | ` +
+    `[activity] Flushed activity=${activityRows.length.toLocaleString()} deletes=${deleteRows.length} types starterpack=${starterpackRows.length} uris | ` +
+    `totals: activity=${totalActivityFlushed.toLocaleString()} deletes=${totalDeletesFlushed.toLocaleString()} starterpack_joins=${totalStarterpackFlushed.toLocaleString()} | ` +
     `events=${totalEvents.toLocaleString()} | cursor=${lastCursor}`
   );
 }
@@ -128,7 +146,12 @@ function recordDelete(key: string) {
 function connect() {
   const db = getActivityDb();
   const cursorRow = db.prepare(`SELECT cursor FROM jetstream_cursor WHERE id = 1`).get() as { cursor: number } | undefined;
-  const cursor = cursorRow?.cursor;
+
+  let cursor = cursorRow?.cursor;
+  if (BACKFILL_HOURS !== null) {
+    cursor = (Date.now() - BACKFILL_HOURS * 60 * 60 * 1000) * 1000;
+    console.log(`[activity] Backfill mode: overriding cursor to ${BACKFILL_HOURS}h ago (${new Date(cursor / 1000).toISOString()})`);
+  }
 
   const url = cursor ? `${JETSTREAM_URL}&cursor=${cursor}` : JETSTREAM_URL;
   console.log(`[activity] Connecting${cursor ? ` from cursor ${cursor}` : " live"}...`);
@@ -149,9 +172,19 @@ function connect() {
       if (evt.kind === "commit") {
         if (evt.commit.operation === "create") {
           // Activity: track which collection types were seen per (did, date)
+          const collection = evt.commit.collection;
           const key = `${evt.did}|${date}`;
-          const bit = ACTIVITY_BITS[evt.commit.collection] ?? 0;
-          activityBuffer.set(key, (activityBuffer.get(key) ?? 0) | bit);
+          const bit = ACTIVITY_BITS[collection] ?? 0;
+          if (bit) activityBuffer.set(key, (activityBuffer.get(key) ?? 0) | bit);
+
+          // Starter pack joins: profile creates that reference a joinedViaStarterPack
+          if (collection === "app.bsky.actor.profile") {
+            const uri = evt.commit.record?.joinedViaStarterPack?.uri;
+            if (typeof uri === "string" && uri.startsWith("at://")) {
+              const spKey = `${uri}|${date}`;
+              starterpackBuffer.set(spKey, (starterpackBuffer.get(spKey) ?? 0) + 1);
+            }
+          }
         } else if (evt.commit.operation === "delete") {
           // Record-level delete by collection
           recordDelete(`${date}|record:${evt.commit.collection}`);

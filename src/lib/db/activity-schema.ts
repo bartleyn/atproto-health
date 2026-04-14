@@ -39,6 +39,16 @@ function migrate(db: Database.Database) {
       cursor     INTEGER NOT NULL,   -- Unix microseconds (Jetstream time_us)
       updated_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS starterpack_joins_daily (
+      starterpack_uri TEXT NOT NULL,
+      date            TEXT NOT NULL,  -- YYYY-MM-DD
+      count           INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (starterpack_uri, date)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_starterpack_joins_daily_date
+      ON starterpack_joins_daily(date);
   `);
 
   // Add activity_types column to existing DBs that predate this migration

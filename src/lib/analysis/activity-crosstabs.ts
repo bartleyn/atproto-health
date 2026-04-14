@@ -18,6 +18,17 @@ const plcDb = new Database(path.join(process.cwd(), "plc-migrations.db"), { read
 
 activityDb.exec(`ATTACH DATABASE '${plcDb.name}' as plc`);
 
+const AGE_BUCKET = `CASE
+  WHEN p.created_at >= date('now', '-7 days') THEN '0. last 7 days'
+  WHEN p.created_at < '2023-01-01'            THEN '1. pre-2023'
+  WHEN p.created_at < '2024-01-01'            THEN '2. 2023'
+  WHEN p.created_at < '2024-11-01'            THEN '3. 2024 pre-Nov'
+  WHEN p.created_at < '2025-01-01'            THEN '4. 2024 Nov-Dec (exodus)'
+  WHEN p.created_at < '2025-07-01'            THEN '5. 2025 H1'
+  WHEN p.created_at < '2026-01-01'            THEN '6. 2025 H2'
+  ELSE                                             '7. 2026'
+END`;
+
 const result = activityDb.prepare(`
   WITH active AS (
     SELECT DISTINCT did, activity_types
@@ -116,4 +127,97 @@ printTable("Activity by Skywatch Label", labelResult);
   `).get(daysBack, daysBack);                                                                                                         
                                                                                                                                       
   printTable("Stickiness (avg daily uniques / unique users in window)", [stickiness as Record<string, unknown>]);
+
+// ── Stickiness by age bucket ──────────────────────────────────────────────────
+const stickinessByBucket = activityDb.prepare(`
+  WITH daily_by_bucket AS (
+    SELECT
+      d.date,
+      ${AGE_BUCKET} AS age_bucket,
+      COUNT(DISTINCT d.did) AS daily_uniques
+    FROM did_activity_daily d
+    JOIN plc.plc_account_creations p ON d.did = p.did
+    WHERE d.date >= date('now', '-' || ? || ' days')
+    GROUP BY d.date, age_bucket
+  ),
+  totals AS (
+    SELECT
+      ${AGE_BUCKET} AS age_bucket,
+      COUNT(DISTINCT d.did) AS total_uniques
+    FROM did_activity_daily d
+    JOIN plc.plc_account_creations p ON d.did = p.did
+    WHERE d.date >= date('now', '-' || ? || ' days')
+    GROUP BY age_bucket
+  )
+  SELECT
+    d.age_bucket,
+    ROUND(AVG(d.daily_uniques), 0) AS avg_daily_uniques,
+    t.total_uniques,
+    ROUND(1.0 * AVG(d.daily_uniques) / t.total_uniques, 3) AS ratio
+  FROM daily_by_bucket d
+  JOIN totals t ON d.age_bucket = t.age_bucket
+  GROUP BY d.age_bucket
+  ORDER BY d.age_bucket
+`).all(daysBack, daysBack);
+
+printTable("Stickiness by Age Bucket", stickinessByBucket as Record<string, unknown>[]);
+
+// ── Active days distribution × age bucket ────────────────────────────────────
+const activeDaysDist = activityDb.prepare(`
+  WITH user_days AS (
+    SELECT
+      d.did,
+      ${AGE_BUCKET} AS age_bucket,
+      COUNT(DISTINCT d.date) AS active_days
+    FROM did_activity_daily d
+    JOIN plc.plc_account_creations p ON d.did = p.did
+    WHERE d.date >= date('now', '-' || ? || ' days')
+    GROUP BY d.did, age_bucket
+  )
+  SELECT
+    age_bucket,
+    COUNT(*)                                                            AS users,
+    ROUND(AVG(active_days), 2)                                         AS avg_active_days,
+    SUM(CASE WHEN active_days = 1                    THEN 1 ELSE 0 END) AS days_1,
+    SUM(CASE WHEN active_days = 2                    THEN 1 ELSE 0 END) AS days_2,
+    SUM(CASE WHEN active_days BETWEEN 3 AND 5        THEN 1 ELSE 0 END) AS days_3_5,
+    SUM(CASE WHEN active_days BETWEEN 6 AND 14       THEN 1 ELSE 0 END) AS days_6_14,
+    SUM(CASE WHEN active_days >= 15                  THEN 1 ELSE 0 END) AS days_15plus
+  FROM user_days
+  GROUP BY age_bucket
+  ORDER BY age_bucket
+`).all(daysBack);
+
+printTable(`Active Days Distribution x Age Bucket (window: ${daysBack}d)`, activeDaysDist as Record<string, unknown>[]);
+
+// ── % active per cohort relative to total recorded repos ─────────────────────
+const cohortActivationRate = activityDb.prepare(`
+  WITH total_by_bucket AS (
+    SELECT
+      ${AGE_BUCKET} AS age_bucket,
+      COUNT(*) AS total_repos
+    FROM plc.did_in_repo dir
+    JOIN plc.plc_account_creations p ON dir.did = p.did
+    GROUP BY age_bucket
+  ),
+  active_by_bucket AS (
+    SELECT
+      ${AGE_BUCKET} AS age_bucket,
+      COUNT(DISTINCT d.did) AS active_users
+    FROM did_activity_daily d
+    JOIN plc.plc_account_creations p ON d.did = p.did
+    WHERE d.date >= date('now', '-' || ? || ' days')
+    GROUP BY age_bucket
+  )
+  SELECT
+    t.age_bucket,
+    t.total_repos,
+    COALESCE(a.active_users, 0) AS active_users,
+    ROUND(100.0 * COALESCE(a.active_users, 0) / t.total_repos, 2) AS pct_active
+  FROM total_by_bucket t
+  LEFT JOIN active_by_bucket a USING (age_bucket)
+  ORDER BY t.age_bucket
+`).all(daysBack);
+
+printTable(`Cohort Activation Rate (window: ${daysBack}d)`, cohortActivationRate as Record<string, unknown>[]);
                                                                                                                     

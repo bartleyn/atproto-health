@@ -1,24 +1,53 @@
 /**
- * Fetches all account labels from the Skywatch labeler and stores them in the DB.
+ * Fetches account labels from a labeler and stores them in the DB.
  *
- * Filters to did: URIs only (skips post labels).
+ * Filters to did: URIs only (skips post/record labels).
  * Skips negated labels (val starting with "!") — stores current positive labels only.
  * Resumable: stores cursor so re-runs continue from where they left off.
  * Idempotent: upserts on (did, label) primary key.
  *
  * Usage:
- *   npm run collect:skywatch          # Resume from stored cursor
- *   npm run collect:skywatch -- --reset  # Start over from the beginning
+ *   npm run collect:skywatch              # Skywatch labeler (default)
+ *   npm run collect:skywatch -- --reset
+ *   npm run collect:bsky-mod             # Bluesky moderation labeler
+ *   npm run collect:bsky-mod -- --reset
  */
 
 import { getPlcDb } from "../db/plc-schema";
 
-const LABELER_ENDPOINT = "https://ozone.skywatch.blue";
-const LABELER_DID = "did:plc:e4elbtctnfqocyfcml6h2lf7";
+const LABELERS: Record<string, { endpoint: string; did: string; table: string; cursorTable: string; labelFilter?: string[] }> = {
+  skywatch: {
+    endpoint:    "https://ozone.skywatch.blue",
+    did:         "did:plc:e4elbtctnfqocyfcml6h2lf7",
+    table:       "skywatch_labels",
+    cursorTable: "skywatch_labels_cursor",
+  },
+  "bsky-mod": {
+    endpoint:    "https://mod.bsky.app",
+    did:         "did:plc:ar7c4by46qjdydhdevvrndac",
+    table:       "bsky_mod_labels",
+    cursorTable: "bsky_mod_labels_cursor",
+    // Only collect account-level action labels — post content labels (porn, sexual, etc.)
+    // are not useful for ecosystem analysis and dominate the feed
+    labelFilter: ["spam", "impersonation"],
+  },
+};
+
 const PAGE_SIZE = 50;
 const REQUEST_TIMEOUT_MS = 30_000;
 const COURTESY_DELAY_MS = 100;
 const LOG_INTERVAL = 10_000;
+
+const args = process.argv.slice(2);
+const labelerName = args.includes("--labeler")
+  ? args[args.indexOf("--labeler") + 1]
+  : args.find(a => LABELERS[a]) ?? "skywatch";
+
+const config = LABELERS[labelerName];
+if (!config) {
+  console.error(`Unknown labeler: ${labelerName}. Available: ${Object.keys(LABELERS).join(", ")}`);
+  process.exit(1);
+}
 
 interface RawLabel {
   src: string;
@@ -36,7 +65,7 @@ interface QueryLabelsResponse {
 async function fetchPage(cursor?: string): Promise<QueryLabelsResponse> {
   const params = new URLSearchParams({ uriPatterns: "*", limit: String(PAGE_SIZE) });
   if (cursor) params.set("cursor", cursor);
-  const url = `${LABELER_ENDPOINT}/xrpc/com.atproto.label.queryLabels?${params}`;
+  const url = `${config.endpoint}/xrpc/com.atproto.label.queryLabels?${params}`;
   const res = await fetch(url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
   if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}`);
   return res.json() as Promise<QueryLabelsResponse>;
@@ -44,27 +73,30 @@ async function fetchPage(cursor?: string): Promise<QueryLabelsResponse> {
 
 async function main() {
   const db = getPlcDb();
-  const reset = process.argv.includes("--reset");
+  const reset = args.includes("--reset");
 
-  console.log(`\n=== Skywatch Label Collector ===`);
-  console.log(`Labeler: ${LABELER_DID}`);
+  console.log(`\n=== Label Collector: ${labelerName} ===`);
+  console.log(`Endpoint: ${config.endpoint}`);
+  console.log(`DID:      ${config.did}`);
+  console.log(`Table:    ${config.table}`);
+  if (config.labelFilter) console.log(`Filter:   ${config.labelFilter.join(", ")}`);
 
   if (reset) {
-    db.exec(`DELETE FROM skywatch_labels; DELETE FROM skywatch_labels_cursor;`);
+    db.exec(`DELETE FROM ${config.table}; DELETE FROM ${config.cursorTable};`);
     console.log(`Reset: cleared existing labels and cursor.\n`);
   }
 
-  const cursorRow = db.prepare(`SELECT cursor FROM skywatch_labels_cursor WHERE id = 1`).get() as { cursor: string } | undefined;
+  const cursorRow = db.prepare(`SELECT cursor FROM ${config.cursorTable} WHERE id = 1`).get() as { cursor: string } | undefined;
   let cursor: string | undefined = cursorRow?.cursor;
   console.log(cursor ? `Resuming from cursor: ${cursor}` : `Starting from beginning`);
 
   const upsert = db.prepare(`
-    INSERT INTO skywatch_labels (did, label, labeled_at)
+    INSERT INTO ${config.table} (did, label, labeled_at)
     VALUES (?, ?, ?)
     ON CONFLICT (did, label) DO UPDATE SET labeled_at = excluded.labeled_at
   `);
   const saveCursor = db.prepare(`
-    INSERT INTO skywatch_labels_cursor (id, cursor, updated_at)
+    INSERT INTO ${config.cursorTable} (id, cursor, updated_at)
     VALUES (1, ?, datetime('now'))
     ON CONFLICT (id) DO UPDATE SET cursor = excluded.cursor, updated_at = excluded.updated_at
   `);
@@ -84,11 +116,10 @@ async function main() {
     const batch: { did: string; label: string; labeledAt: string }[] = [];
     for (const label of page.labels) {
       totalFetched++;
-      // Only account labels, no negations
       if (!label.uri.startsWith("did:")) continue;
       if (label.val.startsWith("!") || label.neg) continue;
-      // Only from Skywatch itself
-      if (label.src !== LABELER_DID) continue;
+      if (label.src !== config.did) continue;
+      if (config.labelFilter && !config.labelFilter.includes(label.val)) continue;
       batch.push({ did: label.uri, label: label.val, labeledAt: label.cts });
     }
 
@@ -115,9 +146,8 @@ async function main() {
   console.log(`  Total fetched:  ${totalFetched.toLocaleString()}`);
   console.log(`  Total inserted: ${totalInserted.toLocaleString()}`);
 
-  // Label distribution
   const dist = db.prepare(`
-    SELECT label, COUNT(*) as count FROM skywatch_labels GROUP BY label ORDER BY count DESC
+    SELECT label, COUNT(*) as count FROM ${config.table} GROUP BY label ORDER BY count DESC
   `).all() as { label: string; count: number }[];
   console.log(`\nLabel distribution:`);
   for (const row of dist) {

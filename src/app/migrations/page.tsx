@@ -81,9 +81,9 @@ export default async function MigrationsPage({
               sub="PDS-to-PDS transfers, excluding internal bsky.network resharding"
             />
             <StatCard
-              label="Independent PDSes"
+              label="Scanned PDSes"
               value={fmt(stats.independent_pds_count)}
-              sub="Excluding bsky.network shards"
+              sub="PDSes that responded to the repo scanner"
             />
           </div>
         </section>

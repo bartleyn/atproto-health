@@ -384,28 +384,9 @@ export function getEcosystemStats(hideBsky = false): EcosystemStats {
   `).get() as { total_migrations: number };
 
   const indep = db.prepare(`
-    WITH verified AS (
-      -- Only PDSes that responded to our scanner
-      SELECT pds_url FROM pds_repo_status_snapshots
-    ),
-    verified_total AS (
-      SELECT SUM(m.count) AS n
-      FROM plc_creation_monthly m
-      JOIN verified v ON m.pds_url = v.pds_url
-      WHERE m.pds_url != '${TRUMP_PDS}'
-    ),
-    indep AS (
-      SELECT COUNT(DISTINCT m.pds_url) AS cnt, SUM(m.count) AS n
-      FROM plc_creation_monthly m
-      JOIN verified v ON m.pds_url = v.pds_url
-      WHERE m.pds_url != '${TRUMP_PDS}'
-        AND m.pds_url NOT LIKE '%bsky.network'
-    )
-    SELECT
-      indep.cnt AS independent_pds_count,
-      ROUND(100.0 * indep.n / verified_total.n, 2) AS independent_pds_account_pct
-    FROM indep, verified_total
-  `).get() as { independent_pds_count: number; independent_pds_account_pct: number };
+    SELECT COUNT(DISTINCT pds_url) AS independent_pds_count
+    FROM pds_repo_status_snapshots
+  `).get() as { independent_pds_count: number };
 
   const dates = db.prepare(`
     SELECT MIN(month) || '-01' AS earliest_creation, MAX(month) || '-01' AS latest_creation
@@ -425,7 +406,7 @@ export function getEcosystemStats(hideBsky = false): EcosystemStats {
     total_migrations: migrations.total_migrations ?? 0,
     unique_migrating_dids: uniqueMigrators?.unique_migrating_dids ?? 0,
     independent_pds_count: indep?.independent_pds_count ?? 0,
-    independent_pds_account_pct: indep?.independent_pds_account_pct ?? 0,
+    independent_pds_account_pct: 0,
     earliest_creation: dates?.earliest_creation ?? "",
     latest_creation: dates?.latest_creation ?? "",
   };

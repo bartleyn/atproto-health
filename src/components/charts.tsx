@@ -16,8 +16,9 @@ import {
   PieChart,
   Pie,
   Legend,
-  AreaChart,
+  ComposedChart,
   Area,
+  Line,
 } from "recharts";
 import type { PdsStatusRow } from "@/lib/db/plc-queries";
 
@@ -136,11 +137,13 @@ export function StackedAreaChart({ data, allPeriods, selectedPds, onPdsClick }: 
     (byPeriod.get(row.period)! as Record<string, number>)[row.pds_url] = row.count;
   }
 
+  let runningCumulative = 0;
   const chartData = [...byPeriod.values()]
     .sort((a, b) => (a.period as string).localeCompare(b.period as string))
     .map(row => {
       const total = pdsKeys.reduce((s, k) => s + ((row[k] as number) ?? 0), 0);
-      const out: Record<string, number | string> = { period: row.period };
+      runningCumulative += total;
+      const out: Record<string, number | string> = { period: row.period, __cumulative: runningCumulative };
       for (const k of pdsKeys) {
         const raw = (row[k] as number) ?? 0;
         out[k] = raw;                                                   // raw, for tooltip
@@ -149,14 +152,22 @@ export function StackedAreaChart({ data, allPeriods, selectedPds, onPdsClick }: 
       return out;
     });
 
+  const fmtCumulative = (v: number) => {
+    if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+    if (v >= 1_000) return `${(v / 1_000).toFixed(0)}K`;
+    return `${v}`;
+  };
+
   // Tooltip: show raw counts even though display is percentage
   const CustomTooltip = ({ active, payload, label }: any) => {
     if (!active || !payload?.length) return null;
-    const total = payload.reduce((s: number, p: any) => s + (p.payload[p.dataKey.replace("__pct", "")] ?? 0), 0);
+    const areaPayload = payload.filter((p: any) => p.dataKey !== "__cumulative");
+    const total = areaPayload.reduce((s: number, p: any) => s + (p.payload[p.dataKey.replace("__pct", "")] ?? 0), 0);
+    const cumulative = payload[0]?.payload.__cumulative ?? 0;
     return (
       <div style={tooltipStyle.contentStyle}>
         <p className="font-medium mb-1" style={{ color: "#e5e7eb" }}>{label}</p>
-        {[...payload].reverse().map((p: any) => {
+        {[...areaPayload].reverse().map((p: any) => {
           const rawKey = p.dataKey.replace("__pct", "");
           const raw = p.payload[rawKey] ?? 0;
           const pct = total > 0 ? ((raw / total) * 100).toFixed(1) : "0.0";
@@ -167,7 +178,10 @@ export function StackedAreaChart({ data, allPeriods, selectedPds, onPdsClick }: 
           );
         })}
         <p style={{ color: "#6b7280", fontSize: "0.75rem", marginTop: 4 }}>
-          Total: {total.toLocaleString()}
+          Weekly total: {total.toLocaleString()}
+        </p>
+        <p style={{ color: "#e5e7eb", fontSize: "0.75rem" }}>
+          Cumulative: {cumulative.toLocaleString()}
         </p>
       </div>
     );
@@ -175,7 +189,7 @@ export function StackedAreaChart({ data, allPeriods, selectedPds, onPdsClick }: 
 
   return (
     <ResponsiveContainer width="100%" height={400}>
-      <AreaChart data={chartData} margin={{ top: 8, right: 16, bottom: 0, left: 16 }}>
+      <ComposedChart data={chartData} margin={{ top: 8, right: 56, bottom: 0, left: 16 }}>
         <XAxis
           dataKey="period"
           tick={{ fill: "#9ca3af", fontSize: 11 }}
@@ -183,6 +197,7 @@ export function StackedAreaChart({ data, allPeriods, selectedPds, onPdsClick }: 
           tickLine={false}
         />
         <YAxis
+          yAxisId="left"
           tick={{ fill: "#9ca3af", fontSize: 11 }}
           axisLine={{ stroke: "#374151" }}
           tickLine={false}
@@ -190,12 +205,22 @@ export function StackedAreaChart({ data, allPeriods, selectedPds, onPdsClick }: 
           tickFormatter={(v) => `${Math.round(v)}%`}
           domain={[0, 100]}
         />
+        <YAxis
+          yAxisId="right"
+          orientation="right"
+          tick={{ fill: "#6b7280", fontSize: 10 }}
+          axisLine={false}
+          tickLine={false}
+          width={52}
+          tickFormatter={fmtCumulative}
+        />
         <Tooltip content={<CustomTooltip />} />
         <Legend
           wrapperStyle={{ fontSize: "0.75rem", color: "#9ca3af", cursor: onPdsClick ? "pointer" : "default" }}
-          formatter={(value: string) => value.replace("__pct", "")}
+          formatter={(value: string) => value === "__cumulative" ? "cumulative" : value.replace("__pct", "")}
           onClick={onPdsClick ? (e: any) => {
             const name = e.value?.replace("__pct", "") ?? e.value;
+            if (name === "__cumulative") return;
             onPdsClick(selectedPds === name ? null : name);
           } : undefined}
         />
@@ -205,6 +230,7 @@ export function StackedAreaChart({ data, allPeriods, selectedPds, onPdsClick }: 
           return (
             <Area
               key={key}
+              yAxisId="left"
               type="monotone"
               dataKey={`${key}__pct`}
               name={key}
@@ -218,7 +244,18 @@ export function StackedAreaChart({ data, allPeriods, selectedPds, onPdsClick }: 
             />
           );
         })}
-      </AreaChart>
+        <Line
+          yAxisId="right"
+          type="monotone"
+          dataKey="__cumulative"
+          name="__cumulative"
+          stroke="#ffffff"
+          strokeWidth={1.5}
+          dot={false}
+          strokeOpacity={0.5}
+          legendType="none"
+        />
+      </ComposedChart>
     </ResponsiveContainer>
   );
 }

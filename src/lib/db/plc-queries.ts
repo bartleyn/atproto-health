@@ -114,16 +114,19 @@ export function getCreationTimeseries(): MonthlyRow[] {
 export function getCreationTimeseriesWeekly(includeTrump = false, hideBsky = false): TimeseriesRow[] {
   const db = getPlcDb();
   const trumpFilter = includeTrump ? "" : `AND w.pds_url != '${TRUMP_PDS}'`;
-  const bskyFilter  = hideBsky ? `AND w.pds_url NOT LIKE '%bsky.network'` : "";
+  const bskyFilter  = hideBsky
+    ? `AND w.pds_url NOT LIKE '%bsky.network' AND w.pds_url != 'https://bsky.social'`
+    : "";
+  const bskyVerifiedExempt = `OR w.pds_url LIKE '%bsky.network' OR w.pds_url = 'https://bsky.social'`;
   const verifiedFilter = includeTrump
-    ? `AND (v.pds_url IS NOT NULL OR w.pds_url = '${TRUMP_PDS}')`
-    : `AND v.pds_url IS NOT NULL`;
+    ? `AND (v.pds_url IS NOT NULL OR w.pds_url = '${TRUMP_PDS}' ${bskyVerifiedExempt})`
+    : `AND (v.pds_url IS NOT NULL ${bskyVerifiedExempt})`;
   return db.prepare(`
     WITH
     verified AS (SELECT DISTINCT pds_url FROM pds_repo_status_snapshots),
     collapsed AS (
       SELECT
-        CASE WHEN w.pds_url LIKE '%bsky.network' THEN '${BSKY_NETWORK_LABEL}' ELSE w.pds_url END AS pds_url,
+        CASE WHEN w.pds_url LIKE '%bsky.network' OR w.pds_url = 'https://bsky.social' THEN '${BSKY_NETWORK_LABEL}' ELSE w.pds_url END AS pds_url,
         week AS period,
         SUM(w.count) AS count
       FROM plc_creation_weekly w

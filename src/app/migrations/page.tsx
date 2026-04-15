@@ -88,7 +88,6 @@ export default async function MigrationsPage({
           </div>
         </section>
 
-        
 
         {/* Migration Flows Sankey + weekly bar */}
         <section>

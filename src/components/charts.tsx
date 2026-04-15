@@ -4,6 +4,8 @@ import { sankey, sankeyLinkHorizontal, sankeyJustify } from "d3-sankey";
 import type { SankeyNode, SankeyLink } from "d3-sankey";
 import { useState, useRef, useEffect } from "react";
 import type { MigrationFlow, WeeklyMigrationRow, TimeseriesRow } from "@/lib/db/plc-queries";
+import type { CityCluster, PdsProviderLocation, HostingProviderCount } from "@/lib/db/queries";
+import { WorldMap } from "@/components/world-map";
 
 import {
   BarChart,
@@ -344,9 +346,11 @@ export function PdsStatusChart({ data, topN = 20 }: PdsStatusChartProps) {
 interface DonutChartProps {
   data: { name: string; value: number }[];
   maxSlices?: number;
+  selectedName?: string | null;
+  onSliceClick?: (name: string | null) => void;
 }
 
-export function DonutChart({ data, maxSlices = 10 }: DonutChartProps) {
+export function DonutChart({ data, maxSlices = 10, selectedName, onSliceClick }: DonutChartProps) {
   let chartData = data;
   if (data.length > maxSlices) {
     const top = data.slice(0, maxSlices - 1);
@@ -367,17 +371,103 @@ export function DonutChart({ data, maxSlices = 10 }: DonutChartProps) {
           nameKey="name"
           stroke="#111827"
           strokeWidth={2}
+          style={onSliceClick ? { cursor: "pointer" } : undefined}
+          onClick={onSliceClick ? (entry) => {
+            const name = (entry.name as string | null | undefined) ?? null;
+            onSliceClick(selectedName === name ? null : name);
+          } : undefined}
         >
-          {chartData.map((_, i) => (
-            <Cell key={i} fill={COLORS[i % COLORS.length]} />
-          ))}
+          {chartData.map((entry, i) => {
+            const dimmed = selectedName && selectedName !== entry.name;
+            return (
+              <Cell
+                key={i}
+                fill={dimmed ? "#374151" : COLORS[i % COLORS.length]}
+                fillOpacity={dimmed ? 0.4 : 1}
+                stroke={selectedName === entry.name ? "#fff" : "#111827"}
+                strokeWidth={selectedName === entry.name ? 2 : 2}
+              />
+            );
+          })}
         </Pie>
         <Tooltip {...tooltipStyle} />
         <Legend
-          wrapperStyle={{ fontSize: "0.75rem", color: "#9ca3af" }}
+          wrapperStyle={{ fontSize: "0.75rem", color: "#9ca3af", cursor: onSliceClick ? "pointer" : "default" }}
+          onClick={onSliceClick ? (e: any) => {
+            onSliceClick(selectedName === e.value ? null : e.value);
+          } : undefined}
         />
       </PieChart>
     </ResponsiveContainer>
+  );
+}
+
+// ── Infrastructure + Map Section ───────────────────────────────────────────────
+
+interface InfraSectionProps {
+  providers: HostingProviderCount[];
+  cdnBreakdown: { behindCdn: number; directHosting: number; unknown: number };
+  locations: CityCluster[];
+  providerLocations: PdsProviderLocation[];
+}
+
+export function InfraSection({ providers, cdnBreakdown, locations, providerLocations }: InfraSectionProps) {
+  const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
+
+  const donutData = providers
+    .filter((p) => !p.isCdn)
+    .slice(0, 11)
+    .map((p) => ({ name: p.provider, value: p.count }));
+
+  const highlightCount = selectedProvider
+    ? providerLocations.filter(p => p.provider === selectedProvider).length
+    : 0;
+
+  return (
+    <div className="space-y-4">
+      {/* Map */}
+      <div className="rounded-lg border border-gray-800 bg-gray-900 p-5">
+        <div className="flex items-baseline justify-between mb-0.5">
+          <h2 className="text-base font-semibold">PDS Geographic Distribution</h2>
+          {selectedProvider && (
+            <button
+              onClick={() => setSelectedProvider(null)}
+              className="text-xs text-amber-400 hover:text-amber-300 transition-colors"
+            >
+              {highlightCount} {selectedProvider} PDS{highlightCount !== 1 ? "es" : ""} · click to clear
+            </button>
+          )}
+        </div>
+        <p className="text-xs text-gray-500 mb-3">
+          {locations.length.toLocaleString()} cities · dot size scales with PDS count
+          {selectedProvider
+            ? ` · amber dots = ${selectedProvider}`
+            : " · select a provider below to highlight"}
+        </p>
+        <WorldMap
+          locations={locations}
+          providerLocations={providerLocations}
+          selectedProvider={selectedProvider}
+        />
+      </div>
+
+      {/* Donut */}
+      <div className="rounded-lg border border-gray-800 bg-gray-900 p-5">
+        <h2 className="text-base font-semibold mb-0.5">Infrastructure Providers</h2>
+        <p className="text-xs text-gray-500 mb-4">
+          {`Derived from IP org via WHOIS/ASN · ${cdnBreakdown.behindCdn} behind CDN · ${cdnBreakdown.directHosting} direct · ${cdnBreakdown.unknown} unknown`}
+          {" · click a slice to highlight on map"}
+        </p>
+        <DonutChart
+          data={donutData}
+          selectedName={selectedProvider}
+          onSliceClick={setSelectedProvider}
+        />
+        <p className="text-xs text-gray-500 mt-2">
+          {cdnBreakdown.behindCdn} PDSes behind Cloudflare/CDN (origin host unknown) are excluded above.
+        </p>
+      </div>
+    </div>
   );
 }
 

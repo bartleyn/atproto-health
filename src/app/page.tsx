@@ -1,6 +1,5 @@
 import { getDashboardData, getLatestFirehoseSample } from "@/lib/db/queries";
-import { SimpleBarChart, DonutChart } from "@/components/charts";
-import { WorldMap } from "@/components/world-map";
+import { SimpleBarChart, DonutChart, InfraSection } from "@/components/charts";
 import type { GithubTopicStats } from "@/lib/db/queries";
 
 export const dynamic = "force-dynamic";
@@ -25,6 +24,7 @@ export default async function Home({
     topPds,
     firehose,
     locations,
+    providerLocations,
     githubStats,
   } = getDashboardData(hideBsky);
 
@@ -126,14 +126,15 @@ export default async function Home({
         <StatCard label="Countries" value={stats.countries} accent="purple" />
       </div>
 
-      {/* Geographic map */}
+      {/* Infrastructure map + provider donut (linked) */}
       {locations.length > 0 && (
-        <div className="rounded-lg border border-gray-800 bg-gray-900 p-5 mb-12">
-          <h2 className="text-base font-semibold mb-0.5">PDS Geographic Distribution</h2>
-          <p className="text-xs text-gray-500 mb-3">
-            {locations.length.toLocaleString()} cities · dot size scales with PDS count
-          </p>
-          <WorldMap locations={locations} />
+        <div className="mb-12">
+          <InfraSection
+            providers={providers}
+            cdnBreakdown={cdnBreakdown}
+            locations={locations}
+            providerLocations={providerLocations}
+          />
         </div>
       )}
 
@@ -147,26 +148,6 @@ export default async function Home({
             }))}
             color="#3b82f6"
           />
-        </ChartCard>
-
-        {/* Hosting providers */}
-        <ChartCard
-          title="Infrastructure Providers"
-          subtitle={`Derived from IP org via WHOIS/ASN \u00b7 ${cdnBreakdown.behindCdn} behind CDN \u00b7 ${cdnBreakdown.directHosting} direct \u00b7 ${cdnBreakdown.unknown} unknown`}
-        >
-          <DonutChart
-            data={providers
-              .filter((p) => !p.isCdn)
-              .slice(0, 11)
-              .map((p) => ({
-                name: p.provider,
-                value: p.count,
-              }))}
-          />
-          <p className="text-xs text-gray-500 mt-2">
-            {cdnBreakdown.behindCdn} PDSes behind Cloudflare/CDN (origin
-            host unknown) are excluded above.
-          </p>
         </ChartCard>
 
         {/* Version distribution */}

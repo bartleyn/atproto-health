@@ -7,14 +7,25 @@ import {
   Geography,
   Marker,
 } from "react-simple-maps";
-import type { CityCluster } from "@/lib/db/queries";
+import type { CityCluster, PdsProviderLocation } from "@/lib/db/queries";
 
 const GEO_URL =
   "https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json";
 
-export function WorldMap({ locations }: { locations: CityCluster[] }) {
+interface WorldMapProps {
+  locations: CityCluster[];
+  providerLocations?: PdsProviderLocation[];
+  selectedProvider?: string | null;
+}
+
+export function WorldMap({ locations, providerLocations, selectedProvider }: WorldMapProps) {
   const [hovered, setHovered] = useState<string | null>(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+
+  const dimBackground = !!selectedProvider;
+  const highlighted = selectedProvider && providerLocations
+    ? providerLocations.filter(p => p.provider === selectedProvider)
+    : [];
 
   return (
     <div
@@ -48,6 +59,7 @@ export function WorldMap({ locations }: { locations: CityCluster[] }) {
           }
         </Geographies>
 
+        {/* Background city-cluster dots */}
         {locations.map((loc, i) => {
           const r =
             loc.pdsCount > 20
@@ -66,6 +78,7 @@ export function WorldMap({ locations }: { locations: CityCluster[] }) {
               key={i}
               coordinates={[loc.longitude, loc.latitude]}
               onMouseEnter={() => {
+                if (dimBackground) return;
                 const parts: string[] = [];
                 if (loc.city && loc.country) parts.push(`${loc.city}, ${loc.country}`);
                 else if (loc.country) parts.push(loc.country);
@@ -76,14 +89,39 @@ export function WorldMap({ locations }: { locations: CityCluster[] }) {
             >
               <circle
                 r={r}
-                fill="#3b82f6"
-                fillOpacity={0.65}
-                stroke="#93c5fd"
+                fill={dimBackground ? "#1e3a5f" : "#3b82f6"}
+                fillOpacity={dimBackground ? 0.3 : 0.65}
+                stroke={dimBackground ? "#1e3a5f" : "#93c5fd"}
                 strokeWidth={0.5}
               />
             </Marker>
           );
         })}
+
+        {/* Highlighted provider dots */}
+        {highlighted.map((loc, i) => (
+          <Marker
+            key={`hl-${i}`}
+            coordinates={[loc.longitude, loc.latitude]}
+            onMouseEnter={() => {
+              const parts: string[] = [];
+              const display = loc.url.replace(/^https?:\/\//, "");
+              parts.push(display);
+              if (loc.city && loc.country) parts.push(`${loc.city}, ${loc.country}`);
+              else if (loc.country) parts.push(loc.country);
+              setHovered(parts.join(" · "));
+            }}
+            onMouseLeave={() => setHovered(null)}
+          >
+            <circle
+              r={4}
+              fill="#f59e0b"
+              fillOpacity={0.9}
+              stroke="#fcd34d"
+              strokeWidth={1}
+            />
+          </Marker>
+        ))}
       </ComposableMap>
 
       {hovered && (

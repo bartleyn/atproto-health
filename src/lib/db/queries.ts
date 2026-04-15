@@ -403,6 +403,15 @@ export interface CityCluster {
   pdsCount: number;
 }
 
+export interface PdsProviderLocation {
+  url: string;
+  latitude: number;
+  longitude: number;
+  city: string | null;
+  country: string | null;
+  provider: string;
+}
+
 export function getPdsLocations(hideBsky = false): CityCluster[] {
   const db = getDb();
   ensureMergedView();
@@ -421,6 +430,25 @@ export function getPdsLocations(hideBsky = false): CityCluster[] {
        ORDER BY pdsCount DESC`
     )
     .all() as CityCluster[];
+}
+
+export function getPdsLocationsWithProvider(hideBsky = false): PdsProviderLocation[] {
+  const db = getDb();
+  ensureMergedView();
+  const view = hideBsky ? "pds_community" : "pds_latest";
+  return db
+    .prepare(
+      `SELECT
+        url,
+        latitude,
+        longitude,
+        city,
+        country,
+        ${PROVIDER_NORMALIZE_SQL} as provider
+       FROM ${view}
+       WHERE latitude IS NOT NULL AND longitude IS NOT NULL`
+    )
+    .all() as PdsProviderLocation[];
 }
 
 // ── Firehose / Federation queries ─────────────────────────────────────
@@ -541,6 +569,7 @@ export interface DashboardData {
   topPds: TopPds[];
   firehose: FirehoseSample | null;
   locations: CityCluster[];
+  providerLocations: PdsProviderLocation[];
   githubStats: GithubTopicStats[];
 }
 
@@ -562,6 +591,7 @@ export function getDashboardData(hideBsky = false): DashboardData {
     topPds: getTopPdsByUsers(10, hideBsky),
     firehose: getLatestFirehoseSample(),
     locations: getPdsLocations(hideBsky),
+    providerLocations: getPdsLocationsWithProvider(hideBsky),
     githubStats: getLatestGithubStats(),
   };
 

@@ -915,13 +915,17 @@ interface MultiStepSankeyProps {
   height?: number;
 }
 
-const STEP_LABELS = ["Origin", "First migration", "Second migration"];
+const STEP_LABELS = ["Origin", "Current PDS"];
 
 export function MultiStepSankeyChart({ data, height = 480 }: MultiStepSankeyProps) {
   const [tooltip, setTooltip] = useState<SankeyTooltip | null>(null);
   const [width, setWidth] = useState(900);
+  const [selectedNode, setSelectedNode] = useState<string | null>(null);
+  const [mounted, setMounted] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
+
+  useEffect(() => setMounted(true), []);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -935,6 +939,7 @@ export function MultiStepSankeyChart({ data, height = 480 }: MultiStepSankeyProp
   }, []);
 
   if (!data.length) return <p className="text-gray-500">No trajectory data.</p>;
+  if (!mounted) return <div style={{ height }} />;
 
   const nodeNames = [...new Set([...data.map(d => d.source), ...data.map(d => d.target)])];
   const nodeIndex = new Map(nodeNames.map((name, i) => [name, i]));
@@ -998,18 +1003,20 @@ export function MultiStepSankeyChart({ data, height = 480 }: MultiStepSankeyProp
           {/* Links */}
           {(links as SankeyLinkDatum[]).map((link, i) => {
             const srcName = (link.source as SankeyNodeDatum).name;
+            const tgtName = (link.target as SankeyNodeDatum).name;
             const color = pdsColorMap.get(srcName.replace(/@\d+$/, "")) ?? "#6b7280";
+            const isActive = !selectedNode || srcName === selectedNode || tgtName === selectedNode;
             return (
               <path
                 key={i}
                 d={linkPath(link as any) ?? ""}
                 fill="none"
                 stroke={color}
-                strokeOpacity={0.45}
+                strokeOpacity={isActive ? 0.5 : 0.05}
                 strokeWidth={Math.max(1, link.width ?? 1)}
                 onMouseEnter={(e) => {
-                  const src = (link.source as SankeyNodeDatum).name.replace(/@\d+$/, "").replace(/^https?:\/\//, "");
-                  const tgt = (link.target as SankeyNodeDatum).name.replace(/@\d+$/, "").replace(/^https?:\/\//, "");
+                  const src = srcName.replace(/@\d+$/, "").replace(/^https?:\/\//, "");
+                  const tgt = tgtName.replace(/@\d+$/, "").replace(/^https?:\/\//, "");
                   showTooltip(e, (
                     <div>
                       <p className="font-medium mb-1" style={{ color: "#e5e7eb" }}>{src} → {tgt}</p>
@@ -1031,29 +1038,45 @@ export function MultiStepSankeyChart({ data, height = 480 }: MultiStepSankeyProp
             const y0 = node.y0 ?? 0, y1 = node.y1 ?? 0;
             const labelRight = x0 > innerW / 2;
             const label = pdsBase.replace(/^https?:\/\//, "");
+            const isSelected = selectedNode === node.name;
+            const isDimmed = selectedNode && !isSelected && (() => {
+              const links = [...(node.sourceLinks as SankeyLinkDatum[]), ...(node.targetLinks as SankeyLinkDatum[])];
+              return !links.some(l =>
+                (l.source as SankeyNodeDatum).name === selectedNode ||
+                (l.target as SankeyNodeDatum).name === selectedNode
+              );
+            })();
             return (
               <g
                 key={i}
+                onClick={() => setSelectedNode(isSelected ? null : node.name)}
                 onMouseEnter={(e) => {
                   const inflow  = (node.targetLinks as SankeyLinkDatum[]).reduce((s, l) => s + l.value, 0);
                   const outflow = (node.sourceLinks as SankeyLinkDatum[]).reduce((s, l) => s + l.value, 0);
                   showTooltip(e, (
                     <div>
                       <p className="font-medium mb-1" style={{ color: "#e5e7eb" }}>{label}</p>
-                      {inflow  > 0 && <p style={{ color: "#10b981", fontSize: "0.8rem" }}>Received: {inflow.toLocaleString()}</p>}
-                      {outflow > 0 && <p style={{ color: "#f59e0b", fontSize: "0.8rem" }}>Then left: {outflow.toLocaleString()}</p>}
+                      {inflow  > 0 && <p style={{ color: "#10b981", fontSize: "0.8rem" }}>Inbound: {inflow.toLocaleString()}</p>}
+                      {outflow > 0 && <p style={{ color: "#f59e0b", fontSize: "0.8rem" }}>Outbound: {outflow.toLocaleString()}</p>}
+                      <p style={{ color: "#6b7280", fontSize: "0.75rem", marginTop: 4 }}>Click to highlight</p>
                     </div>
                   ));
                 }}
                 onMouseMove={moveTooltip}
+                style={{ cursor: "pointer", opacity: isDimmed ? 0.25 : 1 }}
               >
-                <rect x={x0} y={y0} width={x1 - x0} height={Math.max(1, y1 - y0)} fill={color} rx={2} />
+                <rect
+                  x={x0} y={y0} width={x1 - x0} height={Math.max(1, y1 - y0)}
+                  fill={color} rx={2}
+                  stroke={isSelected ? "#fff" : "none"}
+                  strokeWidth={isSelected ? 1.5 : 0}
+                />
                 <text
                   x={labelRight ? x1 + 6 : x0 - 6}
                   y={(y0 + y1) / 2}
                   textAnchor={labelRight ? "start" : "end"}
                   dominantBaseline="middle"
-                  fill="#d1d5db"
+                  fill={isDimmed ? "#4b5563" : "#d1d5db"}
                   fontSize={11}
                 >
                   {label}

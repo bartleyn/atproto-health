@@ -427,39 +427,106 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
     : 0;
 
   return (
-    <div className="space-y-4">
-      {/* Map */}
-      <div className="rounded-lg border border-gray-800 bg-gray-900 p-5">
-        <div className="flex items-baseline justify-between mb-0.5">
-          <h2 className="text-base font-semibold">PDS Geographic Distribution</h2>
-          {selectedProvider && (
-            <button
-              onClick={() => setSelectedProvider(null)}
-              className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
-            >
-              {mappedCount} of {totalCount} {selectedProvider} PDSes mapped · click to clear
-            </button>
-          )}
-        </div>
-        <p className="text-xs text-gray-500 mb-3">
-          {locations.length.toLocaleString()} cities · dot size scales with PDS count
-          {selectedProvider
-            ? ` · amber = cities with ${selectedProvider} PDSes`
-            : " · select a provider below to highlight"}
-        </p>
+    <div className="rounded-lg border border-gray-800 bg-gray-900 p-5">
+      {/* Header */}
+      <div className="flex items-baseline justify-between mb-0.5">
+        <h2 className="text-base font-semibold">PDS Geographic Distribution</h2>
+        {selectedProvider && (
+          <button
+            onClick={() => setSelectedProvider(null)}
+            className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
+          >
+            {mappedCount} of {totalCount} {selectedProvider} PDSes mapped · click to clear
+          </button>
+        )}
+      </div>
+      <p className="text-xs text-gray-500 mb-3">
+        {locations.length.toLocaleString()} cities · dot size scales with PDS count
+        {selectedProvider
+          ? ` · amber = cities with ${selectedProvider} PDSes`
+          : " · click a provider to highlight on map"}
+      </p>
+
+      {/* Map with inset panel (desktop) */}
+      <div className="relative">
         <WorldMap
           locations={locations}
           providerLocations={providerLocations}
           selectedProvider={selectedProvider}
         />
+
+        {/* Provider inset — visible on md+ only; hidden on mobile */}
+        <div className="hidden md:block absolute bottom-3 left-3 w-52 bg-gray-950/90 border border-gray-700 rounded-lg p-3">
+          <p className="text-xs font-medium text-gray-300 mb-0.5">Infrastructure Providers</p>
+          <p className="text-xs text-gray-600 mb-2">
+            {cdnBreakdown.behindCdn} behind CDN · click to highlight
+          </p>
+          {/* Fixed-size pie for the inset (no ResponsiveContainer needed) */}
+          <div className="flex justify-center">
+            <PieChart width={176} height={140}>
+              <Pie
+                data={donutData}
+                cx="50%"
+                cy="50%"
+                innerRadius={34}
+                outerRadius={58}
+                dataKey="value"
+                nameKey="name"
+                stroke="#0a0f1a"
+                strokeWidth={2}
+                style={{ cursor: "pointer" }}
+                onClick={(entry) => {
+                  const name = (entry.name as string) ?? null;
+                  setSelectedProvider(selectedProvider === name ? null : name);
+                }}
+              >
+                {donutData.map((entry, i) => {
+                  const dimmed = selectedProvider && selectedProvider !== entry.name;
+                  return (
+                    <Cell
+                      key={i}
+                      fill={dimmed ? "#374151" : COLORS[i % COLORS.length]}
+                      fillOpacity={dimmed ? 0.4 : 1}
+                      stroke={selectedProvider === entry.name ? "#fff" : "#0a0f1a"}
+                      strokeWidth={2}
+                    />
+                  );
+                })}
+              </Pie>
+              <Tooltip {...tooltipStyle} />
+            </PieChart>
+          </div>
+          {/* Compact scrollable legend */}
+          <div className="space-y-px max-h-28 overflow-y-auto mt-1">
+            {donutData.map((entry, i) => (
+              <button
+                key={entry.name}
+                className="flex items-center gap-1.5 w-full text-left px-1 py-px rounded hover:bg-gray-800/60 transition-colors"
+                onClick={() => setSelectedProvider(selectedProvider === entry.name ? null : entry.name)}
+              >
+                <span
+                  className="w-2 h-2 rounded-full flex-shrink-0"
+                  style={{
+                    backgroundColor: selectedProvider && selectedProvider !== entry.name
+                      ? "#374151"
+                      : COLORS[i % COLORS.length],
+                  }}
+                />
+                <span className={`text-xs truncate ${selectedProvider === entry.name ? "text-white font-medium" : "text-gray-400"}`}>
+                  {entry.name}
+                </span>
+                <span className="text-xs text-gray-600 ml-auto flex-shrink-0 pl-1">{entry.value}</span>
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
 
-      {/* Donut */}
-      <div className="rounded-lg border border-gray-800 bg-gray-900 p-5">
-        <h2 className="text-base font-semibold mb-0.5">Infrastructure Providers</h2>
-        <p className="text-xs text-gray-500 mb-4">
-          {`Derived from IP org via WHOIS/ASN · ${cdnBreakdown.behindCdn} behind CDN · ${cdnBreakdown.directHosting} direct · ${cdnBreakdown.unknown} unknown`}
-          {" · click a slice to highlight on map"}
+      {/* Provider donut — mobile only (stacked below map) */}
+      <div className="block md:hidden mt-4 pt-4 border-t border-gray-800">
+        <p className="text-xs font-medium text-gray-300 mb-0.5">Infrastructure Providers</p>
+        <p className="text-xs text-gray-500 mb-3">
+          {`${cdnBreakdown.behindCdn} behind CDN · ${cdnBreakdown.directHosting} direct · ${cdnBreakdown.unknown} unknown · click to highlight`}
         </p>
         <DonutChart
           data={donutData}
@@ -467,9 +534,6 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
           selectedName={selectedProvider}
           onSliceClick={setSelectedProvider}
         />
-        <p className="text-xs text-gray-500 mt-2">
-          {cdnBreakdown.behindCdn} PDSes behind Cloudflare/CDN (origin host unknown) are excluded above.
-        </p>
       </div>
     </div>
   );

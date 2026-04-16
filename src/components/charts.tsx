@@ -970,6 +970,43 @@ export function MultiStepSankeyChart({ data, height = 480 }: MultiStepSankeyProp
 
   const linkPath = sankeyLinkHorizontal();
 
+  // BFS upstream + downstream from selectedNode to find all links on connected paths.
+  const highlightedLinkSet = new Set<number>();
+  const highlightedNodeSet = new Set<string>();
+  if (selectedNode) {
+    highlightedNodeSet.add(selectedNode);
+    const typedNodes = nodes as SankeyNodeDatum[];
+    const typedLinks = links as SankeyLinkDatum[];
+    // Upstream: follow targetLinks back to origins
+    const upQueue = [typedNodes.find(n => n.name === selectedNode)!];
+    const visitedUp = new Set<string>();
+    while (upQueue.length > 0) {
+      const n = upQueue.shift();
+      if (!n || visitedUp.has(n.name)) continue;
+      visitedUp.add(n.name);
+      for (const link of (n.targetLinks as SankeyLinkDatum[])) {
+        highlightedLinkSet.add(typedLinks.indexOf(link));
+        const src = link.source as SankeyNodeDatum;
+        highlightedNodeSet.add(src.name);
+        upQueue.push(src);
+      }
+    }
+    // Downstream: follow sourceLinks forward to destinations
+    const downQueue = [typedNodes.find(n => n.name === selectedNode)!];
+    const visitedDown = new Set<string>();
+    while (downQueue.length > 0) {
+      const n = downQueue.shift();
+      if (!n || visitedDown.has(n.name)) continue;
+      visitedDown.add(n.name);
+      for (const link of (n.sourceLinks as SankeyLinkDatum[])) {
+        highlightedLinkSet.add(typedLinks.indexOf(link));
+        const tgt = link.target as SankeyNodeDatum;
+        highlightedNodeSet.add(tgt.name);
+        downQueue.push(tgt);
+      }
+    }
+  }
+
   // Compute representative x0 per step column for header labels
   const stepX = new Map<number, number>();
   for (const node of nodes as SankeyNodeDatum[]) {

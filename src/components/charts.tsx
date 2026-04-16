@@ -419,7 +419,10 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
     .slice(0, 11)
     .map((p) => ({ name: p.provider, value: p.count }));
 
-  const highlightCount = selectedProvider
+  const mappedCount = selectedProvider
+    ? providerLocations.filter(p => p.provider === selectedProvider).length
+    : 0;
+  const totalCount = selectedProvider
     ? (providers.find(p => p.provider === selectedProvider)?.count ?? 0)
     : 0;
 
@@ -434,7 +437,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
               onClick={() => setSelectedProvider(null)}
               className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
             >
-              {highlightCount} {selectedProvider} PDS{highlightCount !== 1 ? "es" : ""} · click to clear
+              {mappedCount} of {totalCount} {selectedProvider} PDSes mapped · click to clear
             </button>
           )}
         </div>

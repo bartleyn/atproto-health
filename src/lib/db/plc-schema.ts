@@ -7,7 +7,7 @@ let _db: Database.Database | null = null;
 
 export function getPlcDb(): Database.Database {
   if (!_db) {
-    _db = new Database(DB_PATH);
+    _db = new Database(DB_PATH, { timeout: 10000 }); // 10s busy timeout
     _db.pragma("journal_mode = WAL");
     migrate(_db);
   }

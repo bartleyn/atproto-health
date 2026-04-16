@@ -149,5 +149,10 @@ export function aggregatePlc() {
     FROM labeled GROUP BY source, target HAVING COUNT(*) >= 5;
   `);
 
+  // Checkpoint the WAL so it doesn't grow unboundedly while the dev server holds
+  // open read transactions. TRUNCATE mode writes WAL pages back to the main file
+  // and truncates the WAL to 0 bytes.
+  db.pragma("wal_checkpoint(TRUNCATE)");
+
   console.log(`Aggregated PLC data (monthly + weekly + trajectories) up to ${now}`);
 }

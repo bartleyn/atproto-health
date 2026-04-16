@@ -22,15 +22,16 @@ export function WorldMap({ locations, providerLocations, selectedProvider }: Wor
   const [hovered, setHovered] = useState<string | null>(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
 
-  // Build a set of rounded lat/lon keys for clusters that contain at least one
-  // PDS from the selected provider (0.1° precision matches cities reliably).
-  const providerClusterKeys = selectedProvider && providerLocations
-    ? new Set(
-        providerLocations
-          .filter(p => p.provider === selectedProvider)
-          .map(p => `${Math.round(p.latitude * 10)},${Math.round(p.longitude * 10)}`)
-      )
-    : new Set<string>();
+  // For each cluster key, count how many PDSes belong to the selected provider.
+  const providerCountByCluster = new Map<string, number>();
+  if (selectedProvider && providerLocations) {
+    for (const p of providerLocations) {
+      if (p.provider !== selectedProvider) continue;
+      const key = `${Math.round(p.latitude * 10)},${Math.round(p.longitude * 10)}`;
+      providerCountByCluster.set(key, (providerCountByCluster.get(key) ?? 0) + 1);
+    }
+  }
+  const providerClusterKeys = new Set(providerCountByCluster.keys());
 
   return (
     <div
@@ -66,33 +67,32 @@ export function WorldMap({ locations, providerLocations, selectedProvider }: Wor
 
         {/* City-cluster dots — render dimmed clusters first, highlighted on top */}
         {[false, true].flatMap(renderHighlighted =>
-          locations
-            .filter(loc => {
+          locations.flatMap((loc, originalIdx) => {
               const clusterKey = `${Math.round(loc.latitude * 10)},${Math.round(loc.longitude * 10)}`;
               const hasProvider = selectedProvider ? providerClusterKeys.has(clusterKey) : false;
-              return renderHighlighted ? hasProvider : !hasProvider;
-            })
-            .map((loc, i) => {
-              const clusterKey = `${Math.round(loc.latitude * 10)},${Math.round(loc.longitude * 10)}`;
-              const hasProvider = selectedProvider ? providerClusterKeys.has(clusterKey) : false;
+              if (!selectedProvider && renderHighlighted) return [];
+              if (selectedProvider && renderHighlighted !== hasProvider) return [];
               const dimmed = selectedProvider ? !hasProvider : false;
+              const sizeCount = hasProvider
+                ? (providerCountByCluster.get(clusterKey) ?? 1)
+                : loc.pdsCount;
               const r =
-                loc.pdsCount > 20 ? 7
-                : loc.pdsCount > 10 ? 6
-                : loc.pdsCount > 5 ? 5
-                : loc.pdsCount > 2 ? 4
-                : loc.pdsCount > 1 ? 3
+                sizeCount > 20 ? 7
+                : sizeCount > 10 ? 6
+                : sizeCount > 5 ? 5
+                : sizeCount > 2 ? 4
+                : sizeCount > 1 ? 3
                 : 2;
               return (
                 <Marker
-                  key={`${renderHighlighted ? "h" : "d"}-${Math.round(loc.latitude * 10)}-${Math.round(loc.longitude * 10)}`}
+                  key={`${renderHighlighted ? "h" : "d"}-${originalIdx}`}
                   coordinates={[loc.longitude, loc.latitude]}
                   onMouseEnter={() => {
                     if (dimmed) return;
                     const parts: string[] = [];
                     if (loc.city && loc.country) parts.push(`${loc.city}, ${loc.country}`);
                     else if (loc.country) parts.push(loc.country);
-                    parts.push(`${loc.pdsCount} PDS${loc.pdsCount !== 1 ? "es" : ""}`);
+                    parts.push(`${sizeCount} PDS${sizeCount !== 1 ? "es" : ""}`);
                     setHovered(parts.join(" · "));
                   }}
                   onMouseLeave={() => setHovered(null)}

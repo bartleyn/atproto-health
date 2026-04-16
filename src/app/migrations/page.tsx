@@ -116,7 +116,7 @@ export default async function MigrationsPage({
         {/* Migration Trajectories */}
         <section>
           <h2 className="text-xl font-semibold text-gray-200 mb-1">
-            Migration Trajectories
+            Where do users end up?
           </h2>
           <p className="text-xs text-gray-500 mb-4">
             Where accounts started vs. where they are now — multi-hop paths collapsed to origin → current PDS.

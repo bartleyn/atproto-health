@@ -81,5 +81,72 @@ export function aggregatePlc() {
       updated_at = excluded.updated_at
   `).run(now, now, now);
 
-  console.log(`Aggregated PLC data (monthly + weekly) up to ${now}`);
+  // ── Stats cache (full recompute from did_in_repo) ─────────────────────────
+  // did_in_repo has 42M rows — COUNT(*) takes ~45s live, so we precompute here.
+  db.prepare(`
+    INSERT INTO plc_stats_cache (id, total_dids, bsky_concentration_pct, updated_at)
+    SELECT
+      1,
+      COUNT(*),
+      ROUND(100.0 * SUM(CASE WHEN pds_url LIKE '%bsky.network' OR pds_url = 'https://bsky.social' THEN 1 ELSE 0 END) / COUNT(*), 1),
+      ?
+    FROM did_in_repo
+    ON CONFLICT(id) DO UPDATE SET
+      total_dids             = excluded.total_dids,
+      bsky_concentration_pct = excluded.bsky_concentration_pct,
+      updated_at             = excluded.updated_at
+  `).run(now);
+
+  // ── Trajectory edges (full recompute) ─────────────────────────────────────
+  // Multi-step migration paths for the Sankey chart. DELETE + INSERT since hop
+  // assignments depend on each DID's full history and can't be done incrementally.
+  db.exec(`
+    DELETE FROM plc_trajectory_edges;
+
+    INSERT INTO plc_trajectory_edges (source, target, value)
+    WITH
+      verified AS (SELECT DISTINCT pds_url FROM pds_repo_status_snapshots),
+      normalized AS (
+        SELECT
+          did,
+          CASE WHEN from_pds LIKE '%bsky.network' OR from_pds = 'https://bsky.social' THEN 'bsky.network' ELSE from_pds END AS from_pds,
+          CASE WHEN to_pds LIKE '%bsky.network' OR to_pds = 'https://bsky.social' THEN 'bsky.network' ELSE to_pds END AS to_pds,
+          migrated_at
+        FROM plc_migrations
+        WHERE NOT (
+          (from_pds LIKE '%bsky.network' OR from_pds = 'https://bsky.social')
+          AND (to_pds LIKE '%bsky.network' OR to_pds = 'https://bsky.social')
+        )
+      ),
+      deduped AS (
+        SELECT did, from_pds, to_pds, MIN(migrated_at) AS migrated_at
+        FROM normalized GROUP BY did, from_pds, to_pds
+      ),
+      hops AS (
+        SELECT did, from_pds, to_pds, migrated_at,
+          ROW_NUMBER() OVER (PARTITION BY did ORDER BY migrated_at) AS hop
+        FROM deduped
+        WHERE (from_pds = 'bsky.network' OR from_pds IN (SELECT pds_url FROM verified))
+          AND (to_pds = 'bsky.network' OR to_pds IN (SELECT pds_url FROM verified))
+      ),
+      hop2 AS (SELECT * FROM hops WHERE hop <= 2),
+      top1 AS (SELECT to_pds FROM hop2 WHERE hop = 1 GROUP BY to_pds HAVING COUNT(*) >= 5 ORDER BY COUNT(*) DESC LIMIT 10),
+      top2 AS (SELECT to_pds FROM hop2 WHERE hop = 2 GROUP BY to_pds HAVING COUNT(*) >= 5 ORDER BY COUNT(*) DESC LIMIT 10),
+      top0 AS (SELECT from_pds FROM hop2 WHERE hop = 1 GROUP BY from_pds HAVING COUNT(*) >= 5 ORDER BY COUNT(*) DESC LIMIT 10),
+      edges AS (
+        SELECT
+          CASE WHEN h.from_pds IN (SELECT from_pds FROM top0) THEN h.from_pds ELSE 'Other' END || '@0' AS source,
+          CASE WHEN h.to_pds IN (SELECT to_pds FROM top1) THEN h.to_pds ELSE 'Other' END || '@1' AS target
+        FROM hop2 h WHERE h.hop = 1
+        UNION ALL
+        SELECT
+          CASE WHEN h.from_pds IN (SELECT to_pds FROM top1) THEN h.from_pds ELSE 'Other' END || '@1' AS source,
+          CASE WHEN h.to_pds IN (SELECT to_pds FROM top2) THEN h.to_pds ELSE 'Other' END || '@2' AS target
+        FROM hop2 h WHERE h.hop = 2
+      )
+    SELECT source, target, COUNT(*) AS value
+    FROM edges GROUP BY source, target HAVING COUNT(*) >= 5;
+  `);
+
+  console.log(`Aggregated PLC data (monthly + weekly + trajectories) up to ${now}`);
 }

@@ -1,9 +1,9 @@
 "use client";
 
-import { sankey, sankeyLinkHorizontal, sankeyJustify } from "d3-sankey";
+import { sankey, sankeyLinkHorizontal, sankeyJustify, sankeyLeft } from "d3-sankey";
 import type { SankeyNode, SankeyLink } from "d3-sankey";
 import { useState, useRef, useEffect } from "react";
-import type { MigrationFlow, WeeklyMigrationRow, TimeseriesRow } from "@/lib/db/plc-queries";
+import type { MigrationFlow, WeeklyMigrationRow, TimeseriesRow, TrajectoryEdge } from "@/lib/db/plc-queries";
 import type { CityCluster, PdsProviderLocation, HostingProviderCount } from "@/lib/db/queries";
 import { WorldMap } from "@/components/world-map";
 
@@ -904,6 +904,177 @@ export function CreationChartsSection({ plcData, repoData, allPeriods }: Creatio
         </p>
         <CreationWeeklyBarChart data={repoData} selectedPds={selectedPds} onPdsClick={setSelectedPds} />
       </div>
+    </div>
+  );
+}
+
+// ── Multi-step Migration Trajectory Sankey ────────────────────────────────────
+
+interface MultiStepSankeyProps {
+  data: TrajectoryEdge[];
+  height?: number;
+}
+
+const STEP_LABELS = ["Origin", "First migration", "Second migration"];
+
+export function MultiStepSankeyChart({ data, height = 480 }: MultiStepSankeyProps) {
+  const [tooltip, setTooltip] = useState<SankeyTooltip | null>(null);
+  const [width, setWidth] = useState(900);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect.width;
+      if (w && w > 0) setWidth(w);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  if (!data.length) return <p className="text-gray-500">No trajectory data.</p>;
+
+  const nodeNames = [...new Set([...data.map(d => d.source), ...data.map(d => d.target)])];
+  const nodeIndex = new Map(nodeNames.map((name, i) => [name, i]));
+
+  // Consistent color per PDS base name (strip @N) so the same PDS has the same
+  // color whether it appears as origin, first destination, or second destination.
+  const pdsNames = [...new Set(nodeNames.map(n => n.replace(/@\d+$/, "")))];
+  const pdsColorMap = new Map(pdsNames.map((pds, i) => [pds, COLORS[i % COLORS.length]]));
+
+  const margin = { top: 36, right: 180, bottom: 10, left: 120 };
+  const innerW = width - margin.left - margin.right;
+  const innerH = height - margin.top - margin.bottom;
+
+  const sankeyLayout = sankey<N, L>()
+    .nodeAlign(sankeyLeft)
+    .nodeWidth(14)
+    .nodePadding(10)
+    .extent([[0, 0], [innerW, innerH]]);
+
+  const { nodes, links } = sankeyLayout({
+    nodes: nodeNames.map(name => ({ name })),
+    links: data.map(d => ({
+      source: nodeIndex.get(d.source)!,
+      target: nodeIndex.get(d.target)!,
+      value: d.value,
+    })) as any,
+  });
+
+  const linkPath = sankeyLinkHorizontal();
+
+  // Compute representative x0 per step column for header labels
+  const stepX = new Map<number, number>();
+  for (const node of nodes as SankeyNodeDatum[]) {
+    const step = parseInt(node.name.match(/@(\d+)$/)?.[1] ?? "0");
+    if (!stepX.has(step)) stepX.set(step, (node.x0 ?? 0) + 7);
+  }
+
+  const showTooltip = (e: React.MouseEvent, content: React.ReactNode) => {
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    setTooltip({ x: e.clientX - rect.left, y: e.clientY - rect.top, content });
+  };
+  const moveTooltip = (e: React.MouseEvent) => {
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    setTooltip(t => t ? { ...t, x: e.clientX - rect.left, y: e.clientY - rect.top } : null);
+  };
+
+  return (
+    <div ref={containerRef} className="relative" style={{ width: "100%" }}>
+      <svg ref={svgRef} width={width} height={height} onMouseLeave={() => setTooltip(null)} suppressHydrationWarning>
+        <g transform={`translate(${margin.left},${margin.top})`}>
+
+          {/* Column headers */}
+          {[...stepX.entries()].sort((a, b) => a[0] - b[0]).map(([step, x]) => (
+            <text key={step} x={x} y={-16} textAnchor="middle" fill="#6b7280" fontSize={11}>
+              {STEP_LABELS[step] ?? `Hop ${step}`}
+            </text>
+          ))}
+
+          {/* Links */}
+          {(links as SankeyLinkDatum[]).map((link, i) => {
+            const srcName = (link.source as SankeyNodeDatum).name;
+            const color = pdsColorMap.get(srcName.replace(/@\d+$/, "")) ?? "#6b7280";
+            return (
+              <path
+                key={i}
+                d={linkPath(link as any) ?? ""}
+                fill="none"
+                stroke={color}
+                strokeOpacity={0.45}
+                strokeWidth={Math.max(1, link.width ?? 1)}
+                onMouseEnter={(e) => {
+                  const src = (link.source as SankeyNodeDatum).name.replace(/@\d+$/, "").replace(/^https?:\/\//, "");
+                  const tgt = (link.target as SankeyNodeDatum).name.replace(/@\d+$/, "").replace(/^https?:\/\//, "");
+                  showTooltip(e, (
+                    <div>
+                      <p className="font-medium mb-1" style={{ color: "#e5e7eb" }}>{src} → {tgt}</p>
+                      <p style={{ color: "#f3f4f6", fontSize: "0.8rem" }}>{link.value.toLocaleString()} accounts</p>
+                    </div>
+                  ));
+                }}
+                onMouseMove={moveTooltip}
+                style={{ cursor: "default" }}
+              />
+            );
+          })}
+
+          {/* Nodes */}
+          {(nodes as SankeyNodeDatum[]).map((node, i) => {
+            const pdsBase = node.name.replace(/@\d+$/, "");
+            const color = pdsColorMap.get(pdsBase) ?? COLORS[i % COLORS.length];
+            const x0 = node.x0 ?? 0, x1 = node.x1 ?? 0;
+            const y0 = node.y0 ?? 0, y1 = node.y1 ?? 0;
+            const labelRight = x0 > innerW / 2;
+            const label = pdsBase.replace(/^https?:\/\//, "");
+            return (
+              <g
+                key={i}
+                onMouseEnter={(e) => {
+                  const inflow  = (node.targetLinks as SankeyLinkDatum[]).reduce((s, l) => s + l.value, 0);
+                  const outflow = (node.sourceLinks as SankeyLinkDatum[]).reduce((s, l) => s + l.value, 0);
+                  showTooltip(e, (
+                    <div>
+                      <p className="font-medium mb-1" style={{ color: "#e5e7eb" }}>{label}</p>
+                      {inflow  > 0 && <p style={{ color: "#10b981", fontSize: "0.8rem" }}>Received: {inflow.toLocaleString()}</p>}
+                      {outflow > 0 && <p style={{ color: "#f59e0b", fontSize: "0.8rem" }}>Then left: {outflow.toLocaleString()}</p>}
+                    </div>
+                  ));
+                }}
+                onMouseMove={moveTooltip}
+              >
+                <rect x={x0} y={y0} width={x1 - x0} height={Math.max(1, y1 - y0)} fill={color} rx={2} />
+                <text
+                  x={labelRight ? x1 + 6 : x0 - 6}
+                  y={(y0 + y1) / 2}
+                  textAnchor={labelRight ? "start" : "end"}
+                  dominantBaseline="middle"
+                  fill="#d1d5db"
+                  fontSize={11}
+                >
+                  {label}
+                </text>
+              </g>
+            );
+          })}
+        </g>
+      </svg>
+
+      {tooltip && (
+        <div style={{
+          position: "absolute",
+          left: tooltip.x + 12,
+          top: tooltip.y - 8,
+          pointerEvents: "none",
+          ...tooltipStyle.contentStyle,
+        }}>
+          {tooltip.content}
+        </div>
+      )}
     </div>
   );
 }

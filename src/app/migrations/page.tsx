@@ -6,10 +6,11 @@ import {
   getActiveCreationTimeseriesWeekly,
   getMigrationFlows,
   getMigrationWeeklyBreakdown,
+  getMigrationTrajectories,
   getEcosystemStats,
   getPlcDataTimestamp,
 } from "@/lib/db/plc-queries";
-import { CreationChartsSection, MigrationChartsSection } from "@/components/charts";
+import { CreationChartsSection, MigrationChartsSection, MultiStepSankeyChart } from "@/components/charts";
 
 function StatCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
@@ -34,6 +35,7 @@ export default async function MigrationsPage({
   const activeCreations = getActiveCreationTimeseriesWeekly(hideBsky);
   const flows = getMigrationFlows();
   const weeklyMigrations = getMigrationWeeklyBreakdown();
+  const trajectories = getMigrationTrajectories();
   const stats = getEcosystemStats(hideBsky);
   const timestamp = getPlcDataTimestamp();
 
@@ -64,11 +66,16 @@ export default async function MigrationsPage({
         {/* Summary stats */}
         <section>
           <h2 className="text-xl font-semibold text-gray-200 mb-4">Ecosystem Summary</h2>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
             <StatCard
               label="Total accounts (scanned PDSes)"
               value={fmt(stats.total_dids_ex_trump)}
               sub="Deduplicated by DID across all scanned PDSes, excludes pds.trump.com"
+            />
+            <StatCard
+              label="On bsky.network"
+              value={`${stats.bsky_concentration_pct}%`}
+              sub="Share of accounts on Bluesky-operated infrastructure"
             />
             <StatCard
               label="did:plc accounts that migrated"
@@ -100,6 +107,18 @@ export default async function MigrationsPage({
             Click a destination node to highlight its weekly trend below.
           </p>
           <MigrationChartsSection sankeyData={flows} weeklyData={weeklyMigrations} />
+        </section>
+
+        {/* Migration Trajectories */}
+        <section>
+          <h2 className="text-xl font-semibold text-gray-200 mb-1">
+            Migration Trajectories
+          </h2>
+          <p className="text-xs text-gray-500 mb-4">
+            Multi-step paths: where accounts came from, where they went first, and where multi-hoppers went next.
+            Collapses bsky.network shards. Filters to verified PDSes only.
+          </p>
+          <MultiStepSankeyChart data={trajectories} />
         </section>
 
         {/* Account Creations */}

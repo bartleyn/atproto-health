@@ -32,6 +32,7 @@ export interface EcosystemStats {
   unique_migrating_dids: number;
   independent_pds_count: number;
   independent_pds_account_pct: number;
+  bsky_concentration_pct: number;
   earliest_creation: string;
   latest_creation: string;
 }
@@ -356,16 +357,15 @@ export function getEcosystemStats(hideBsky = false): EcosystemStats {
   const db = getPlcDb();
   const bskyFilter = hideBsky ? `AND m.pds_url NOT LIKE '%bsky.network'` : "";
 
-  // Use did_in_repo for the total — it has a unique constraint on did so it's
-  // deduplicated across PDSes (migrated accounts counted only once, at their current PDS).
-  // trump.com is excluded from scanning so it naturally falls out.
-  // hideBsky filters bsky shards via the pds_url on the did_in_repo row.
-  const bskyTotalFilter = hideBsky ? `AND dir.pds_url NOT LIKE '%bsky.network'` : "";
-  const totals = db.prepare(`
-    SELECT COUNT(*) AS total_dids, COUNT(*) AS total_dids_ex_trump
-    FROM did_in_repo dir
-    WHERE 1=1 ${bskyTotalFilter}
-  `).get() as { total_dids: number; total_dids_ex_trump: number };
+  // Read total_dids from the stats cache (precomputed by aggregate-plc.ts).
+  // did_in_repo has 42M rows — a live COUNT(*) takes ~45s.
+  const statsCache = db.prepare(`
+    SELECT total_dids, bsky_concentration_pct FROM plc_stats_cache WHERE id = 1
+  `).get() as { total_dids: number; bsky_concentration_pct: number } | undefined;
+  const totals = {
+    total_dids: statsCache?.total_dids ?? 0,
+    total_dids_ex_trump: statsCache?.total_dids ?? 0,
+  };
 
   // Match the Sankey filter: verified PDSes only, exclude internal bsky resharding.
   // Includes returns to bsky.network. When hideBsky, also exclude bsky as source or destination.
@@ -396,6 +396,9 @@ export function getEcosystemStats(hideBsky = false): EcosystemStats {
     WHERE from_pds NOT LIKE '%bsky.social'
   `).get() as { unique_migrating_dids: number };
 
+  // Read from stats cache — live query over 42M rows takes ~45s.
+  const concentration = { bsky_pct: statsCache?.bsky_concentration_pct ?? 0 };
+
   return {
     total_dids: totals.total_dids ?? 0,
     total_dids_ex_trump: totals.total_dids_ex_trump ?? 0,
@@ -403,7 +406,23 @@ export function getEcosystemStats(hideBsky = false): EcosystemStats {
     unique_migrating_dids: uniqueMigrators?.unique_migrating_dids ?? 0,
     independent_pds_count: indep?.independent_pds_count ?? 0,
     independent_pds_account_pct: 0,
+    bsky_concentration_pct: concentration?.bsky_pct ?? 0,
     earliest_creation: dates?.earliest_creation ?? "",
     latest_creation: dates?.latest_creation ?? "",
   };
+}
+
+export interface TrajectoryEdge {
+  source: string; // "pds_url@step" e.g. "bsky.network@0"
+  target: string; // "pds_url@step" e.g. "eurosky.social@1"
+  value: number;
+}
+
+// Reads precomputed trajectory edges from plc_trajectory_edges.
+// Populated by aggregate-plc.ts — run npm run aggregate:plc to refresh.
+export function getMigrationTrajectories(): TrajectoryEdge[] {
+  const db = getPlcDb();
+  return db.prepare(`
+    SELECT source, target, value FROM plc_trajectory_edges ORDER BY value DESC
+  `).all() as TrajectoryEdge[];
 }

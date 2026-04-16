@@ -420,7 +420,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
     .map((p) => ({ name: p.provider, value: p.count }));
 
   const highlightCount = selectedProvider
-    ? providerLocations.filter(p => p.provider === selectedProvider).length
+    ? (providers.find(p => p.provider === selectedProvider)?.count ?? 0)
     : 0;
 
   return (
@@ -432,7 +432,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
           {selectedProvider && (
             <button
               onClick={() => setSelectedProvider(null)}
-              className="text-xs text-amber-400 hover:text-amber-300 transition-colors"
+              className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
             >
               {highlightCount} {selectedProvider} PDS{highlightCount !== 1 ? "es" : ""} · click to clear
             </button>
@@ -441,7 +441,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
         <p className="text-xs text-gray-500 mb-3">
           {locations.length.toLocaleString()} cities · dot size scales with PDS count
           {selectedProvider
-            ? ` · amber dots = ${selectedProvider}`
+            ? ` · amber = cities with ${selectedProvider} PDSes`
             : " · select a provider below to highlight"}
         </p>
         <WorldMap
@@ -460,6 +460,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
         </p>
         <DonutChart
           data={donutData}
+          maxSlices={donutData.length}
           selectedName={selectedProvider}
           onSliceClick={setSelectedProvider}
         />

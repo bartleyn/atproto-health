@@ -83,18 +83,16 @@ export function aggregatePlc() {
 
   // ── Stats cache (full recompute from did_in_repo) ─────────────────────────
   // did_in_repo has 42M rows — COUNT(*) takes ~45s live, so we precompute here.
+  // SQLite upsert (ON CONFLICT DO UPDATE) only works with INSERT … VALUES, not INSERT … SELECT.
+  // Use INSERT OR REPLACE instead — same effect since this table always has exactly one row.
   db.prepare(`
-    INSERT INTO plc_stats_cache (id, total_dids, bsky_concentration_pct, updated_at)
+    INSERT OR REPLACE INTO plc_stats_cache (id, total_dids, bsky_concentration_pct, updated_at)
     SELECT
       1,
       COUNT(*),
       ROUND(100.0 * SUM(CASE WHEN pds_url LIKE '%bsky.network' OR pds_url = 'https://bsky.social' THEN 1 ELSE 0 END) / COUNT(*), 1),
       ?
     FROM did_in_repo
-    ON CONFLICT(id) DO UPDATE SET
-      total_dids             = excluded.total_dids,
-      bsky_concentration_pct = excluded.bsky_concentration_pct,
-      updated_at             = excluded.updated_at
   `).run(now);
 
   // ── Trajectory edges (full recompute) ─────────────────────────────────────

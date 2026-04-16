@@ -98,8 +98,9 @@ export function aggregatePlc() {
   `).run(now);
 
   // ── Trajectory edges (full recompute) ─────────────────────────────────────
-  // Multi-step migration paths for the Sankey chart. DELETE + INSERT since hop
-  // assignments depend on each DID's full history and can't be done incrementally.
+  // Origin→current: for each migrating DID, maps first-ever source PDS to current PDS.
+  // Flattens multi-hop paths (x→y→z becomes x→z). DELETE+INSERT since it depends
+  // on full per-DID history and can't be done incrementally.
   db.exec(`
     DELETE FROM plc_trajectory_edges;
 
@@ -107,8 +108,7 @@ export function aggregatePlc() {
     WITH
       verified AS (SELECT DISTINCT pds_url FROM pds_repo_status_snapshots),
       normalized AS (
-        SELECT
-          did,
+        SELECT did,
           CASE WHEN from_pds LIKE '%bsky.network' OR from_pds = 'https://bsky.social' THEN 'bsky.network' ELSE from_pds END AS from_pds,
           CASE WHEN to_pds LIKE '%bsky.network' OR to_pds = 'https://bsky.social' THEN 'bsky.network' ELSE to_pds END AS to_pds,
           migrated_at
@@ -122,30 +122,33 @@ export function aggregatePlc() {
         SELECT did, from_pds, to_pds, MIN(migrated_at) AS migrated_at
         FROM normalized GROUP BY did, from_pds, to_pds
       ),
-      hops AS (
-        SELECT did, from_pds, to_pds, migrated_at,
-          ROW_NUMBER() OVER (PARTITION BY did ORDER BY migrated_at) AS hop
-        FROM deduped
+      filtered AS (
+        SELECT did, from_pds, to_pds, migrated_at FROM deduped
         WHERE (from_pds = 'bsky.network' OR from_pds IN (SELECT pds_url FROM verified))
           AND (to_pds = 'bsky.network' OR to_pds IN (SELECT pds_url FROM verified))
       ),
-      hop2 AS (SELECT * FROM hops WHERE hop <= 2),
-      top1 AS (SELECT to_pds FROM hop2 WHERE hop = 1 GROUP BY to_pds HAVING COUNT(*) >= 5 ORDER BY COUNT(*) DESC LIMIT 10),
-      top2 AS (SELECT to_pds FROM hop2 WHERE hop = 2 GROUP BY to_pds HAVING COUNT(*) >= 5 ORDER BY COUNT(*) DESC LIMIT 10),
-      top0 AS (SELECT from_pds FROM hop2 WHERE hop = 1 GROUP BY from_pds HAVING COUNT(*) >= 5 ORDER BY COUNT(*) DESC LIMIT 10),
-      edges AS (
+      ranked AS (
+        SELECT did, from_pds, to_pds,
+          ROW_NUMBER() OVER (PARTITION BY did ORDER BY migrated_at ASC)  AS rn_asc,
+          ROW_NUMBER() OVER (PARTITION BY did ORDER BY migrated_at DESC) AS rn_desc
+        FROM filtered
+      ),
+      journeys AS (
         SELECT
-          CASE WHEN h.from_pds IN (SELECT from_pds FROM top0) THEN h.from_pds ELSE 'Other' END || '@0' AS source,
-          CASE WHEN h.to_pds IN (SELECT to_pds FROM top1) THEN h.to_pds ELSE 'Other' END || '@1' AS target
-        FROM hop2 h WHERE h.hop = 1
-        UNION ALL
+          MAX(CASE WHEN rn_asc  = 1 THEN from_pds END) AS origin_pds,
+          MAX(CASE WHEN rn_desc = 1 THEN to_pds   END) AS current_pds
+        FROM ranked GROUP BY did
+      ),
+      top_origins AS (SELECT origin_pds  FROM journeys GROUP BY origin_pds  HAVING COUNT(*) >= 5 ORDER BY COUNT(*) DESC LIMIT 10),
+      top_current AS (SELECT current_pds FROM journeys GROUP BY current_pds HAVING COUNT(*) >= 5 ORDER BY COUNT(*) DESC LIMIT 10),
+      labeled AS (
         SELECT
-          CASE WHEN h.from_pds IN (SELECT to_pds FROM top1) THEN h.from_pds ELSE 'Other' END || '@1' AS source,
-          CASE WHEN h.to_pds IN (SELECT to_pds FROM top2) THEN h.to_pds ELSE 'Other' END || '@2' AS target
-        FROM hop2 h WHERE h.hop = 2
+          CASE WHEN j.origin_pds  IN (SELECT origin_pds  FROM top_origins) THEN j.origin_pds  ELSE 'Other' END || '@0' AS source,
+          CASE WHEN j.current_pds IN (SELECT current_pds FROM top_current) THEN j.current_pds ELSE 'Other' END || '@1' AS target
+        FROM journeys j
       )
     SELECT source, target, COUNT(*) AS value
-    FROM edges GROUP BY source, target HAVING COUNT(*) >= 5;
+    FROM labeled GROUP BY source, target HAVING COUNT(*) >= 5;
   `);
 
   console.log(`Aggregated PLC data (monthly + weekly + trajectories) up to ${now}`);

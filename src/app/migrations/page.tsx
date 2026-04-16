@@ -66,31 +66,35 @@ export default async function MigrationsPage({
         {/* Summary stats */}
         <section>
           <h2 className="text-xl font-semibold text-gray-200 mb-4">Ecosystem Summary</h2>
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
-            <StatCard
-              label="Total accounts (scanned PDSes)"
-              value={fmt(stats.total_dids_ex_trump)}
-              sub="Deduplicated by DID across all scanned PDSes, excludes pds.trump.com"
-            />
+          {/* Row 1: the headline — concentration and scale */}
+          <div className="grid grid-cols-2 gap-4 mb-4">
             <StatCard
               label="On bsky.network"
               value={`${stats.bsky_concentration_pct}%`}
-              sub="Share of accounts on Bluesky-operated infrastructure"
+              sub="of accounts are on Bluesky-operated infrastructure"
             />
             <StatCard
-              label="did:plc accounts that migrated"
+              label="Total accounts"
+              value={fmt(stats.total_dids_ex_trump)}
+              sub="Unique DIDs across all scanned PDSes, excludes pds.trump.com"
+            />
+          </div>
+          {/* Row 2: migration details */}
+          <div className="grid grid-cols-3 gap-4">
+            <StatCard
+              label="Accounts that migrated"
               value={fmt(stats.unique_migrating_dids)}
-              sub="Unique DIDs with at least one voluntary migration (excludes bsky.social resharding)"
+              sub="Unique DIDs with at least one voluntary migration"
             />
             <StatCard
-              label="Total Migrations"
+              label="Total migration events"
               value={fmt(stats.total_migrations)}
               sub="PDS-to-PDS transfers, excluding internal bsky.network resharding"
             />
             <StatCard
               label="Scanned PDSes"
               value={fmt(stats.independent_pds_count)}
-              sub="PDSes that responded to the repo scanner"
+              sub="Independent PDSes that responded to the repo scanner"
             />
           </div>
         </section>
@@ -115,8 +119,8 @@ export default async function MigrationsPage({
             Migration Trajectories
           </h2>
           <p className="text-xs text-gray-500 mb-4">
-            Multi-step paths: where accounts came from, where they went first, and where multi-hoppers went next.
-            Collapses bsky.network shards. Filters to verified PDSes only.
+            Where accounts started vs. where they are now — multi-hop paths collapsed to origin → current PDS.
+            Collapses bsky.network shards. Click a node to highlight its flows.
           </p>
           <MultiStepSankeyChart data={trajectories} />
         </section>

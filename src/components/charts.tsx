@@ -1275,7 +1275,7 @@ export function PdsAgeChart({ data }: { data: PdsAgeRow[] }) {
           tick={{ fontSize: 11, fill: "#9ca3af" }}
           label={{ value: "Total accounts (log scale)", angle: -90, position: "insideLeft", offset: -45, fill: "#6b7280", fontSize: 12 }}
         />
-        <Tooltip content={(props) => <CustomTooltip payload={props.payload as { payload: Point }[] | undefined} />} />
+        <Tooltip content={(props) => <CustomTooltip payload={props.payload as unknown as { payload: Point }[] | undefined} />} />
         <Legend
           wrapperStyle={{ fontSize: "0.72rem", paddingTop: "8px" }}
           formatter={(value) => <span style={{ color: "#9ca3af" }}>{value}</span>}

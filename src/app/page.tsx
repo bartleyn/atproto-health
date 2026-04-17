@@ -1,4 +1,4 @@
-import { getDashboardData, getLatestFirehoseSample } from "@/lib/db/queries";
+import { getDashboardData, getLatestFirehoseSample, type ConcentrationStats } from "@/lib/db/queries";
 import { SimpleBarChart, DonutChart, InfraSection } from "@/components/charts";
 import type { GithubTopicStats } from "@/lib/db/queries";
 
@@ -22,6 +22,7 @@ export default async function Home({
     cdnBreakdown,
     userDist,
     topPds,
+    concentration,
     firehose,
     locations,
     providerLocations,
@@ -117,7 +118,7 @@ export default async function Home({
         </a>
         . Online/offline reflects that scraper&apos;s last health check. Open Reg indicates no invite code required to register.
       </p>
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3 mb-12">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-4">
         <StatCard label="Total PDSes" value={stats.total} />
         <StatCard label="Online" value={stats.online} accent="green" />
         <StatCard label="Offline" value={stats.offline} accent="red" />
@@ -125,6 +126,11 @@ export default async function Home({
         <StatCard label="Invite Only" value={stats.inviteOnly} />
         <StatCard label="Countries" value={stats.countries} accent="purple" />
       </div>
+
+      {/* Concentration summary */}
+      {concentration.totalWithData > 0 && (
+        <ConcentrationSection concentration={concentration} totalRepos={stats.totalUsers} activeRepos={stats.activeUsers} />
+      )}
 
       {/* Infrastructure map + provider donut (linked) */}
       {locations.length > 0 && (
@@ -216,26 +222,44 @@ export default async function Home({
                 <tr className="border-b border-gray-800 text-gray-400 text-left">
                   <th className="px-4 py-3 font-medium">#</th>
                   <th className="px-4 py-3 font-medium">PDS</th>
+                  <th className="px-4 py-3 font-medium text-right">Total</th>
+                  <th className="px-4 py-3 font-medium text-right">Active</th>
                   <th className="px-4 py-3 font-medium">Country</th>
                 </tr>
               </thead>
               <tbody>
-                {topPds.map((pds, i) => (
-                  <tr
-                    key={pds.url}
-                    className="border-b border-gray-800/50 hover:bg-gray-900/50"
-                  >
-                    <td className="px-4 py-2.5 text-gray-500 tabular-nums">
-                      {i + 1}
-                    </td>
-                    <td className="px-4 py-2.5 font-mono text-xs">
-                      {pds.url.replace(/^https?:\/\//, "").replace(/\/$/, "")}
-                    </td>
-                    <td className="px-4 py-2.5 text-gray-400">
-                      {pds.country ?? "—"}
-                    </td>
-                  </tr>
-                ))}
+                {topPds.map((pds, i) => {
+                  const activePct = pds.activeCount != null && pds.repoCount > 0
+                    ? ((pds.activeCount / pds.repoCount) * 100).toFixed(0)
+                    : null;
+                  return (
+                    <tr
+                      key={pds.url}
+                      className="border-b border-gray-800/50 hover:bg-gray-900/50"
+                    >
+                      <td className="px-4 py-2.5 text-gray-500 tabular-nums">
+                        {i + 1}
+                      </td>
+                      <td className="px-4 py-2.5 font-mono text-xs">
+                        {pds.url.replace(/^https?:\/\//, "").replace(/\/$/, "")}
+                      </td>
+                      <td className="px-4 py-2.5 text-right tabular-nums">
+                        {pds.repoCount.toLocaleString()}
+                      </td>
+                      <td className="px-4 py-2.5 text-right tabular-nums text-gray-400">
+                        {pds.activeCount != null ? (
+                          <span>
+                            {pds.activeCount.toLocaleString()}
+                            {activePct && <span className="text-gray-600 ml-1 text-xs">({activePct}%)</span>}
+                          </span>
+                        ) : "—"}
+                      </td>
+                      <td className="px-4 py-2.5 text-gray-400">
+                        {pds.country ?? "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -291,6 +315,34 @@ export default async function Home({
         </div>
       </div>
     </main>
+  );
+}
+
+function ConcentrationSection({
+  concentration,
+  totalRepos,
+  activeRepos,
+}: {
+  concentration: ConcentrationStats;
+  totalRepos: number;
+  activeRepos: number;
+}) {
+  const activeRate = totalRepos > 0 ? Math.round((activeRepos / totalRepos) * 100) : 0;
+  return (
+    <div className="mb-12">
+      <p className="text-xs text-gray-500 mb-3">
+        Repo counts from <code className="bg-gray-800 px-1 rounded">listRepos</code> pagination across {concentration.totalWithData.toLocaleString()} PDSes with data.
+        Active = repos marked active by their PDS.
+        Concentration = cumulative share of repos held by the top N PDSes (Bluesky shards counted as one).
+      </p>
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+        <StatCard label="Total Repos" value={totalRepos} />
+        <StatCard label="Active Repos" value={activeRepos} accent="green" />
+        <StatCard label="Active Rate" value={activeRate} suffix="%" accent="cyan" />
+        <StatCard label="Top PDS share" value={Math.round(concentration.top1Pct)} suffix="%" />
+        <StatCard label="Top 10 PDSes share" value={Math.round(concentration.top10Pct)} suffix="%" />
+      </div>
+    </div>
   );
 }
 

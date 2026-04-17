@@ -319,6 +319,7 @@ export function getUserDistribution(hideBsky = false): UserDistBucket[] {
 export interface TopPds {
   url: string;
   repoCount: number;
+  activeCount: number | null;
   version: string | null;
   country: string | null;
   org: string | null;
@@ -337,6 +338,7 @@ export function getTopPdsByUsers(limit = 10, hideBsky = false): TopPds[] {
           ELSE url
         END as url,
         SUM(user_count_total) as repoCount,
+        SUM(user_count_active) as activeCount,
         MAX(version) as version,
         MAX(country) as country,
         MAX(org) as org
@@ -352,6 +354,53 @@ export function getTopPdsByUsers(limit = 10, hideBsky = false): TopPds[] {
        LIMIT ?`
     )
     .all(limit) as TopPds[];
+}
+
+export interface ConcentrationStats {
+  top1Pct: number;
+  top5Pct: number;
+  top10Pct: number;
+  totalWithData: number;
+}
+
+export function getConcentrationStats(hideBsky = false): ConcentrationStats {
+  const db = getDb();
+  ensureMergedView();
+  const view = hideBsky ? "pds_community" : "pds_latest";
+
+  const rows = db
+    .prepare(
+      `SELECT
+        CASE
+          WHEN url LIKE '%host.bsky.network%' OR url LIKE '%bsky.social%'
+          THEN 'https://bsky.social'
+          ELSE url
+        END as url,
+        SUM(user_count_total) as repos
+       FROM ${view}
+       WHERE user_count_total IS NOT NULL
+       GROUP BY 1
+       ORDER BY repos DESC`
+    )
+    .all() as { url: string; repos: number }[];
+
+  const total = rows.reduce((s, r) => s + r.repos, 0);
+  if (total === 0) return { top1Pct: 0, top5Pct: 0, top10Pct: 0, totalWithData: 0 };
+
+  let cum = 0;
+  let top1Pct = 0, top5Pct = 0, top10Pct = 0;
+  for (let i = 0; i < rows.length; i++) {
+    cum += rows[i].repos;
+    const pct = (cum / total) * 100;
+    if (i === 0) top1Pct = pct;
+    if (i === 4) top5Pct = pct;
+    if (i === 9) top10Pct = pct;
+  }
+  // If there are fewer PDSes than the threshold, cumulative % is already 100
+  if (rows.length < 5) top5Pct = 100;
+  if (rows.length < 10) top10Pct = 100;
+
+  return { top1Pct, top5Pct, top10Pct, totalWithData: rows.length };
 }
 
 // ── Ecosystem queries ──────────────────────────────────────────────────
@@ -567,6 +616,7 @@ export interface DashboardData {
   cdnBreakdown: { behindCdn: number; directHosting: number; unknown: number };
   userDist: UserDistBucket[];
   topPds: TopPds[];
+  concentration: ConcentrationStats;
   firehose: FirehoseSample | null;
   locations: CityCluster[];
   providerLocations: PdsProviderLocation[];
@@ -589,6 +639,7 @@ export function getDashboardData(hideBsky = false): DashboardData {
     cdnBreakdown: getCloudflareBreakdown(hideBsky),
     userDist: getUserDistribution(hideBsky),
     topPds: getTopPdsByUsers(10, hideBsky),
+    concentration: getConcentrationStats(hideBsky),
     firehose: getLatestFirehoseSample(),
     locations: getPdsLocations(hideBsky),
     providerLocations: getPdsLocationsWithProvider(hideBsky),

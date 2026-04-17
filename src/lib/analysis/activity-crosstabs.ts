@@ -107,25 +107,27 @@ const labelResult = activityDb.prepare(`
 printTable("Activity by Skywatch Label", labelResult);
 
 
-  const stickiness = activityDb.prepare(`                                                                                             
-    WITH daily_counts AS (                                                                                                            
-      SELECT date, COUNT(DISTINCT did) AS daily_uniques                                                                               
-      FROM did_activity_daily                                                                                                         
+  const stickiness = activityDb.prepare(`
+    WITH daily_counts AS (
+      SELECT date, COUNT(DISTINCT did) AS daily_uniques
+      FROM did_activity_daily
       WHERE date >= date('now', '-' || ? || ' days')
-      GROUP BY date                                                                                                                   
-    ),            
+      GROUP BY date
+    ),
     total_unique AS (
       SELECT COUNT(DISTINCT did) AS total_uniques
-      FROM did_activity_daily                                                                                                         
+      FROM did_activity_daily
       WHERE date >= date('now', '-' || ? || ' days')
-    )                                                                                                                                 
-    SELECT        
+    )
+    SELECT
       ROUND(AVG(daily_uniques), 0) AS avg_daily_uniques,
+      ROUND(SQRT(AVG(daily_uniques * daily_uniques) - AVG(daily_uniques) * AVG(daily_uniques)), 1) AS stddev_daily_uniques,
       total_uniques,
-      ROUND(1.0 * AVG(daily_uniques) / total_uniques, 3) AS ratio                                                                     
+      ROUND(1.0 * AVG(daily_uniques) / total_uniques, 3) AS ratio,
+      ROUND(SQRT(AVG(daily_uniques * daily_uniques) - AVG(daily_uniques) * AVG(daily_uniques)) / total_uniques, 4) AS stddev_ratio
     FROM daily_counts, total_unique
-  `).get(daysBack, daysBack);                                                                                                         
-                                                                                                                                      
+  `).get(daysBack, daysBack);
+
   printTable("Stickiness (avg daily uniques / unique users in window)", [stickiness as Record<string, unknown>]);
 
 // ── Stickiness by age bucket ──────────────────────────────────────────────────
@@ -152,8 +154,10 @@ const stickinessByBucket = activityDb.prepare(`
   SELECT
     d.age_bucket,
     ROUND(AVG(d.daily_uniques), 0) AS avg_daily_uniques,
+    ROUND(SQRT(AVG(d.daily_uniques * d.daily_uniques) - AVG(d.daily_uniques) * AVG(d.daily_uniques)), 1) AS stddev_daily_uniques,
     t.total_uniques,
-    ROUND(1.0 * AVG(d.daily_uniques) / t.total_uniques, 3) AS ratio
+    ROUND(1.0 * AVG(d.daily_uniques) / t.total_uniques, 3) AS ratio,
+    ROUND(SQRT(AVG(d.daily_uniques * d.daily_uniques) - AVG(d.daily_uniques) * AVG(d.daily_uniques)) / t.total_uniques, 4) AS stddev_ratio
   FROM daily_by_bucket d
   JOIN totals t ON d.age_bucket = t.age_bucket
   GROUP BY d.age_bucket
@@ -178,6 +182,7 @@ const activeDaysDist = activityDb.prepare(`
     age_bucket,
     COUNT(*)                                                            AS users,
     ROUND(AVG(active_days), 2)                                         AS avg_active_days,
+    ROUND(SQRT(AVG(active_days * active_days) - AVG(active_days) * AVG(active_days)), 2) AS stddev_active_days,
     SUM(CASE WHEN active_days = 1                    THEN 1 ELSE 0 END) AS days_1,
     SUM(CASE WHEN active_days = 2                    THEN 1 ELSE 0 END) AS days_2,
     SUM(CASE WHEN active_days BETWEEN 3 AND 5        THEN 1 ELSE 0 END) AS days_3_5,
@@ -198,6 +203,8 @@ const cohortActivationRate = activityDb.prepare(`
       COUNT(*) AS total_repos
     FROM plc.did_in_repo dir
     JOIN plc.plc_account_creations p ON dir.did = p.did
+    JOIN plc.did_repo_status d ON p.did = d.did
+    WHERE status = 'active'
     GROUP BY age_bucket
   ),
   active_by_bucket AS (

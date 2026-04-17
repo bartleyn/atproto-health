@@ -34,19 +34,33 @@ const ACTIVITY_BITS: Record<string, number> = {
   "app.bsky.graph.starterpack":  1 << 10,  // 1024
 };
 
-const JETSTREAM_URL = "wss://jetstream2.us-east.bsky.network/subscribe"
-  + "?wantedCollections=app.bsky.feed.post"
-  + "&wantedCollections=app.bsky.feed.like"
-  + "&wantedCollections=app.bsky.feed.repost"
-  + "&wantedCollections=app.bsky.graph.follow"
-  + "&wantedCollections=app.bsky.graph.block"
-  + "&wantedCollections=app.bsky.graph.listitem"
-  + "&wantedCollections=app.bsky.graph.listblock"
-  + "&wantedCollections=app.bsky.graph.list"
-  + "&wantedCollections=app.bsky.feed.threadgate"
-  + "&wantedCollections=app.bsky.feed.generator"
-  + "&wantedCollections=app.bsky.graph.starterpack"
-  + "&wantedCollections=app.bsky.actor.profile";
+const COLLECTIONS = [
+  "app.bsky.feed.post",
+  "app.bsky.feed.like",
+  "app.bsky.feed.repost",
+  "app.bsky.graph.follow",
+  "app.bsky.graph.block",
+  "app.bsky.graph.listitem",
+  "app.bsky.graph.listblock",
+  "app.bsky.graph.list",
+  "app.bsky.feed.threadgate",
+  "app.bsky.feed.generator",
+  "app.bsky.graph.starterpack",
+  "app.bsky.actor.profile",
+];
+
+const COLLECTION_PARAMS = COLLECTIONS.map(c => `wantedCollections=${c}`).join("&");
+
+// All four official Jetstream relays — cursor is compatible across all of them.
+// On disconnect we round-robin to the next one so a single relay outage doesn't stall us.
+const JETSTREAM_RELAYS = [
+  "wss://jetstream1.us-east.bsky.network/subscribe",
+  "wss://jetstream2.us-east.bsky.network/subscribe",
+  "wss://jetstream1.us-west.bsky.network/subscribe",
+  "wss://jetstream2.us-west.bsky.network/subscribe",
+];
+
+let relayIdx = 0;
 
 const FLUSH_INTERVAL_MS  = 5 * 60 * 1000;
 const RECONNECT_DELAY_MS = 5_000;
@@ -66,14 +80,20 @@ const deleteBuffer = new Map<string, number>();
 // Starter pack join buffer: "starterpack_uri|date" → count
 const starterpackBuffer = new Map<string, number>();
 
+// Lang buffer: "did|lang" → post count (posts in that language by that DID this flush window)
+const langBuffer = new Map<string, number>();
+let langPostsSeen = 0;    // total posts in this flush window
+let langTaggedSeen = 0;   // posts with at least one lang tag in this flush window
+
 let lastCursor = 0;
 let totalActivityFlushed = 0;
 let totalDeletesFlushed = 0;
 let totalStarterpackFlushed = 0;
+let totalLangDIDsFlushed = 0;
 let totalEvents = 0;
 
 function flush() {
-  if (activityBuffer.size === 0 && deleteBuffer.size === 0 && starterpackBuffer.size === 0) return;
+  if (activityBuffer.size === 0 && deleteBuffer.size === 0 && starterpackBuffer.size === 0 && langBuffer.size === 0) return;
 
   const db = getActivityDb();
 
@@ -89,18 +109,37 @@ function flush() {
     INSERT INTO starterpack_joins_daily (starterpack_uri, date, count) VALUES (?, ?, ?)
     ON CONFLICT (starterpack_uri, date) DO UPDATE SET count = count + excluded.count
   `);
+  const upsertLang = db.prepare(`
+    INSERT INTO did_langs (did, lang, post_count, last_seen) VALUES (?, ?, ?, datetime('now'))
+    ON CONFLICT (did, lang) DO UPDATE SET
+      post_count = post_count + excluded.post_count,
+      last_seen  = excluded.last_seen
+  `);
+  const upsertLangStats = db.prepare(`
+    INSERT INTO lang_stats (id, total_posts, tagged_posts, updated_at) VALUES (1, ?, ?, datetime('now'))
+    ON CONFLICT (id) DO UPDATE SET
+      total_posts  = total_posts  + excluded.total_posts,
+      tagged_posts = tagged_posts + excluded.tagged_posts,
+      updated_at   = excluded.updated_at
+  `);
   const saveCursor = db.prepare(`
     INSERT INTO jetstream_cursor (id, cursor, updated_at)
     VALUES (1, ?, datetime('now'))
     ON CONFLICT (id) DO UPDATE SET cursor = excluded.cursor, updated_at = excluded.updated_at
   `);
 
-  const activityRows     = [...activityBuffer.entries()];
-  const deleteRows       = [...deleteBuffer.entries()];
-  const starterpackRows  = [...starterpackBuffer.entries()];
+  const activityRows    = [...activityBuffer.entries()];
+  const deleteRows      = [...deleteBuffer.entries()];
+  const starterpackRows = [...starterpackBuffer.entries()];
+  const langRows        = [...langBuffer.entries()];
+  const postsThisFlush  = langPostsSeen;
+  const taggedThisFlush = langTaggedSeen;
   activityBuffer.clear();
   deleteBuffer.clear();
   starterpackBuffer.clear();
+  langBuffer.clear();
+  langPostsSeen  = 0;
+  langTaggedSeen = 0;
 
   db.transaction(() => {
     for (const [entry, bits] of activityRows) {
@@ -115,15 +154,22 @@ function flush() {
       const pipe = key.indexOf("|");
       upsertStarterpack.run(key.slice(0, pipe), key.slice(pipe + 1), count);
     }
+    for (const [key, count] of langRows) {
+      const pipe = key.indexOf("|");
+      upsertLang.run(key.slice(0, pipe), key.slice(pipe + 1), count);
+    }
+    if (postsThisFlush > 0) upsertLangStats.run(postsThisFlush, taggedThisFlush);
     if (lastCursor > 0) saveCursor.run(lastCursor);
   })();
 
   totalActivityFlushed    += activityRows.length;
   totalDeletesFlushed     += deleteRows.reduce((s, [, c]) => s + c, 0);
   totalStarterpackFlushed += starterpackRows.reduce((s, [, c]) => s + c, 0);
+  totalLangDIDsFlushed    += langRows.length;
+  const tagPct = postsThisFlush > 0 ? ((taggedThisFlush / postsThisFlush) * 100).toFixed(1) : "—";
   console.log(
-    `[activity] Flushed activity=${activityRows.length.toLocaleString()} deletes=${deleteRows.length} types starterpack=${starterpackRows.length} uris | ` +
-    `totals: activity=${totalActivityFlushed.toLocaleString()} deletes=${totalDeletesFlushed.toLocaleString()} starterpack_joins=${totalStarterpackFlushed.toLocaleString()} | ` +
+    `[activity] Flushed activity=${activityRows.length.toLocaleString()} deletes=${deleteRows.length} types starterpack=${starterpackRows.length} uris lang=${langRows.length.toLocaleString()} did×lang (${tagPct}% tagged) | ` +
+    `totals: activity=${totalActivityFlushed.toLocaleString()} deletes=${totalDeletesFlushed.toLocaleString()} starterpack=${totalStarterpackFlushed.toLocaleString()} lang_dids=${totalLangDIDsFlushed.toLocaleString()} | ` +
     `events=${totalEvents.toLocaleString()} | cursor=${lastCursor}`
   );
 }
@@ -153,8 +199,9 @@ function connect() {
     console.log(`[activity] Backfill mode: overriding cursor to ${BACKFILL_HOURS}h ago (${new Date(cursor / 1000).toISOString()})`);
   }
 
-  const url = cursor ? `${JETSTREAM_URL}&cursor=${cursor}` : JETSTREAM_URL;
-  console.log(`[activity] Connecting${cursor ? ` from cursor ${cursor}` : " live"}...`);
+  const relay = JETSTREAM_RELAYS[relayIdx % JETSTREAM_RELAYS.length];
+  const url = `${relay}?${COLLECTION_PARAMS}${cursor ? `&cursor=${cursor}` : ""}`;
+  console.log(`[activity] Connecting to ${relay.replace("wss://", "")}${cursor ? ` from cursor ${cursor}` : " live"}...`);
 
   const ws = new WebSocket(url);
 
@@ -176,6 +223,20 @@ function connect() {
           const key = `${evt.did}|${date}`;
           const bit = ACTIVITY_BITS[collection] ?? 0;
           if (bit) activityBuffer.set(key, (activityBuffer.get(key) ?? 0) | bit);
+
+          // Lang tracking: extract langs[] from post records
+          if (collection === "app.bsky.feed.post") {
+            langPostsSeen++;
+            const langs = evt.commit.record?.langs;
+            if (Array.isArray(langs) && langs.length > 0) {
+              langTaggedSeen++;
+              for (const lang of langs as string[]) {
+                if (typeof lang !== "string" || lang.length > 20) continue;
+                const key = `${evt.did}|${lang}`;
+                langBuffer.set(key, (langBuffer.get(key) ?? 0) + 1);
+              }
+            }
+          }
 
           // Starter pack joins: profile creates that reference a joinedViaStarterPack
           if (collection === "app.bsky.actor.profile") {
@@ -208,7 +269,9 @@ function connect() {
 
   ws.on("close", () => {
     flush();
-    console.log(`[activity] Disconnected. Reconnecting in ${RECONNECT_DELAY_MS / 1000}s...`);
+    relayIdx++;
+    const next = JETSTREAM_RELAYS[relayIdx % JETSTREAM_RELAYS.length];
+    console.log(`[activity] Disconnected. Trying ${next.replace("wss://", "")} in ${RECONNECT_DELAY_MS / 1000}s...`);
     setTimeout(connect, RECONNECT_DELAY_MS);
   });
 }

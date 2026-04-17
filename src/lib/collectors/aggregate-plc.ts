@@ -81,5 +81,78 @@ export function aggregatePlc() {
       updated_at = excluded.updated_at
   `).run(now, now, now);
 
-  console.log(`Aggregated PLC data (monthly + weekly) up to ${now}`);
+  // ── Stats cache (full recompute from did_in_repo) ─────────────────────────
+  // did_in_repo has 42M rows — COUNT(*) takes ~45s live, so we precompute here.
+  // SQLite upsert (ON CONFLICT DO UPDATE) only works with INSERT … VALUES, not INSERT … SELECT.
+  // Use INSERT OR REPLACE instead — same effect since this table always has exactly one row.
+  db.prepare(`
+    INSERT OR REPLACE INTO plc_stats_cache (id, total_dids, bsky_concentration_pct, updated_at)
+    SELECT
+      1,
+      COUNT(*),
+      ROUND(100.0 * SUM(CASE WHEN pds_url LIKE '%bsky.network' OR pds_url = 'https://bsky.social' THEN 1 ELSE 0 END) / COUNT(*), 1),
+      ?
+    FROM did_in_repo
+  `).run(now);
+
+  // ── Trajectory edges (full recompute) ─────────────────────────────────────
+  // Origin→current: for each migrating DID, maps first-ever source PDS to current PDS.
+  // Flattens multi-hop paths (x→y→z becomes x→z). DELETE+INSERT since it depends
+  // on full per-DID history and can't be done incrementally.
+  db.exec(`
+    DELETE FROM plc_trajectory_edges;
+
+    INSERT INTO plc_trajectory_edges (source, target, value)
+    WITH
+      verified AS (SELECT DISTINCT pds_url FROM pds_repo_status_snapshots),
+      normalized AS (
+        SELECT did,
+          CASE WHEN from_pds LIKE '%bsky.network' OR from_pds = 'https://bsky.social' THEN 'bsky.network' ELSE from_pds END AS from_pds,
+          CASE WHEN to_pds LIKE '%bsky.network' OR to_pds = 'https://bsky.social' THEN 'bsky.network' ELSE to_pds END AS to_pds,
+          migrated_at
+        FROM plc_migrations
+        WHERE NOT (
+          (from_pds LIKE '%bsky.network' OR from_pds = 'https://bsky.social')
+          AND (to_pds LIKE '%bsky.network' OR to_pds = 'https://bsky.social')
+        )
+      ),
+      deduped AS (
+        SELECT did, from_pds, to_pds, MIN(migrated_at) AS migrated_at
+        FROM normalized GROUP BY did, from_pds, to_pds
+      ),
+      filtered AS (
+        SELECT did, from_pds, to_pds, migrated_at FROM deduped
+        WHERE (from_pds = 'bsky.network' OR from_pds IN (SELECT pds_url FROM verified))
+          AND (to_pds = 'bsky.network' OR to_pds IN (SELECT pds_url FROM verified))
+      ),
+      ranked AS (
+        SELECT did, from_pds, to_pds,
+          ROW_NUMBER() OVER (PARTITION BY did ORDER BY migrated_at ASC)  AS rn_asc,
+          ROW_NUMBER() OVER (PARTITION BY did ORDER BY migrated_at DESC) AS rn_desc
+        FROM filtered
+      ),
+      journeys AS (
+        SELECT
+          MAX(CASE WHEN rn_asc  = 1 THEN from_pds END) AS origin_pds,
+          MAX(CASE WHEN rn_desc = 1 THEN to_pds   END) AS current_pds
+        FROM ranked GROUP BY did
+      ),
+      top_origins AS (SELECT origin_pds  FROM journeys GROUP BY origin_pds  HAVING COUNT(*) >= 5 ORDER BY COUNT(*) DESC LIMIT 10),
+      top_current AS (SELECT current_pds FROM journeys GROUP BY current_pds HAVING COUNT(*) >= 5 ORDER BY COUNT(*) DESC LIMIT 10),
+      labeled AS (
+        SELECT
+          CASE WHEN j.origin_pds  IN (SELECT origin_pds  FROM top_origins) THEN j.origin_pds  ELSE 'Other' END || '@0' AS source,
+          CASE WHEN j.current_pds IN (SELECT current_pds FROM top_current) THEN j.current_pds ELSE 'Other' END || '@1' AS target
+        FROM journeys j
+      )
+    SELECT source, target, COUNT(*) AS value
+    FROM labeled GROUP BY source, target HAVING COUNT(*) >= 5;
+  `);
+
+  // Checkpoint the WAL so it doesn't grow unboundedly while the dev server holds
+  // open read transactions. TRUNCATE mode writes WAL pages back to the main file
+  // and truncates the WAL to 0 bytes.
+  db.pragma("wal_checkpoint(TRUNCATE)");
+
+  console.log(`Aggregated PLC data (monthly + weekly + trajectories) up to ${now}`);
 }

@@ -6,10 +6,11 @@ import {
   getActiveCreationTimeseriesWeekly,
   getMigrationFlows,
   getMigrationWeeklyBreakdown,
+  getMigrationTrajectories,
   getEcosystemStats,
   getPlcDataTimestamp,
 } from "@/lib/db/plc-queries";
-import { CreationChartsSection, MigrationChartsSection } from "@/components/charts";
+import { CreationChartsSection, MigrationChartsSection, MultiStepSankeyChart } from "@/components/charts";
 
 function StatCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
@@ -34,6 +35,7 @@ export default async function MigrationsPage({
   const activeCreations = getActiveCreationTimeseriesWeekly(hideBsky);
   const flows = getMigrationFlows();
   const weeklyMigrations = getMigrationWeeklyBreakdown();
+  const trajectories = getMigrationTrajectories();
   const stats = getEcosystemStats(hideBsky);
   const timestamp = getPlcDataTimestamp();
 
@@ -64,31 +66,39 @@ export default async function MigrationsPage({
         {/* Summary stats */}
         <section>
           <h2 className="text-xl font-semibold text-gray-200 mb-4">Ecosystem Summary</h2>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          {/* Row 1: the headline — concentration and scale */}
+          <div className="grid grid-cols-2 gap-4 mb-4">
             <StatCard
-              label="Total accounts (scanned PDSes)"
+              label="On bsky.network"
+              value={`${stats.bsky_concentration_pct}%`}
+              sub="of accounts are on Bluesky-operated infrastructure"
+            />
+            <StatCard
+              label="Total accounts"
               value={fmt(stats.total_dids_ex_trump)}
-              sub="Deduplicated by DID across all scanned PDSes, excludes pds.trump.com"
+              sub="Unique DIDs across all scanned PDSes, excludes pds.trump.com"
             />
+          </div>
+          {/* Row 2: migration details */}
+          <div className="grid grid-cols-3 gap-4">
             <StatCard
-              label="did:plc accounts that migrated"
+              label="Accounts that migrated"
               value={fmt(stats.unique_migrating_dids)}
-              sub="Unique DIDs with at least one voluntary migration (excludes bsky.social resharding)"
+              sub="Unique DIDs with at least one voluntary migration"
             />
             <StatCard
-              label="Total Migrations"
+              label="Total migration events"
               value={fmt(stats.total_migrations)}
               sub="PDS-to-PDS transfers, excluding internal bsky.network resharding"
             />
             <StatCard
               label="Scanned PDSes"
               value={fmt(stats.independent_pds_count)}
-              sub="PDSes that responded to the repo scanner"
+              sub="Independent PDSes that responded to the repo scanner"
             />
           </div>
         </section>
 
-        
 
         {/* Migration Flows Sankey + weekly bar */}
         <section>
@@ -101,6 +111,18 @@ export default async function MigrationsPage({
             Click a destination node to highlight its weekly trend below.
           </p>
           <MigrationChartsSection sankeyData={flows} weeklyData={weeklyMigrations} />
+        </section>
+
+        {/* Migration Trajectories */}
+        <section>
+          <h2 className="text-xl font-semibold text-gray-200 mb-1">
+            Where do users end up?
+          </h2>
+          <p className="text-xs text-gray-500 mb-4">
+            Where accounts started vs. where they are now — multi-hop paths collapsed to origin → current PDS.
+            Collapses bsky.network shards. Click a node to highlight its flows.
+          </p>
+          <MultiStepSankeyChart data={trajectories} />
         </section>
 
         {/* Account Creations */}

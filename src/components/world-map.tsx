@@ -22,10 +22,16 @@ export function WorldMap({ locations, providerLocations, selectedProvider }: Wor
   const [hovered, setHovered] = useState<string | null>(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
 
-  const dimBackground = !!selectedProvider;
-  const highlighted = selectedProvider && providerLocations
-    ? providerLocations.filter(p => p.provider === selectedProvider)
-    : [];
+  // For each cluster key, count how many PDSes belong to the selected provider.
+  const providerCountByCluster = new Map<string, number>();
+  if (selectedProvider && providerLocations) {
+    for (const p of providerLocations) {
+      if (p.provider !== selectedProvider) continue;
+      const key = `${Math.round(p.latitude * 10)},${Math.round(p.longitude * 10)}`;
+      providerCountByCluster.set(key, (providerCountByCluster.get(key) ?? 0) + 1);
+    }
+  }
+  const providerClusterKeys = new Set(providerCountByCluster.keys());
 
   return (
     <div
@@ -59,69 +65,49 @@ export function WorldMap({ locations, providerLocations, selectedProvider }: Wor
           }
         </Geographies>
 
-        {/* Background city-cluster dots */}
-        {locations.map((loc, i) => {
-          const r =
-            loc.pdsCount > 20
-              ? 7
-              : loc.pdsCount > 10
-              ? 6
-              : loc.pdsCount > 5
-              ? 5
-              : loc.pdsCount > 2
-              ? 4
-              : loc.pdsCount > 1
-              ? 3
-              : 2;
-          return (
-            <Marker
-              key={i}
-              coordinates={[loc.longitude, loc.latitude]}
-              onMouseEnter={() => {
-                if (dimBackground) return;
-                const parts: string[] = [];
-                if (loc.city && loc.country) parts.push(`${loc.city}, ${loc.country}`);
-                else if (loc.country) parts.push(loc.country);
-                parts.push(`${loc.pdsCount} PDS${loc.pdsCount !== 1 ? "es" : ""}`);
-                setHovered(parts.join(" · "));
-              }}
-              onMouseLeave={() => setHovered(null)}
-            >
-              <circle
-                r={r}
-                fill={dimBackground ? "#1e3a5f" : "#3b82f6"}
-                fillOpacity={dimBackground ? 0.3 : 0.65}
-                stroke={dimBackground ? "#1e3a5f" : "#93c5fd"}
-                strokeWidth={0.5}
-              />
-            </Marker>
-          );
-        })}
-
-        {/* Highlighted provider dots */}
-        {highlighted.map((loc, i) => (
-          <Marker
-            key={`hl-${i}`}
-            coordinates={[loc.longitude, loc.latitude]}
-            onMouseEnter={() => {
-              const parts: string[] = [];
-              const display = loc.url.replace(/^https?:\/\//, "");
-              parts.push(display);
-              if (loc.city && loc.country) parts.push(`${loc.city}, ${loc.country}`);
-              else if (loc.country) parts.push(loc.country);
-              setHovered(parts.join(" · "));
-            }}
-            onMouseLeave={() => setHovered(null)}
-          >
-            <circle
-              r={4}
-              fill="#f59e0b"
-              fillOpacity={0.9}
-              stroke="#fcd34d"
-              strokeWidth={1}
-            />
-          </Marker>
-        ))}
+        {/* City-cluster dots — render dimmed clusters first, highlighted on top */}
+        {[false, true].flatMap(renderHighlighted =>
+          locations.flatMap((loc, originalIdx) => {
+              const clusterKey = `${Math.round(loc.latitude * 10)},${Math.round(loc.longitude * 10)}`;
+              const hasProvider = selectedProvider ? providerClusterKeys.has(clusterKey) : false;
+              if (!selectedProvider && renderHighlighted) return [];
+              if (selectedProvider && renderHighlighted !== hasProvider) return [];
+              const dimmed = selectedProvider ? !hasProvider : false;
+              const sizeCount = hasProvider
+                ? (providerCountByCluster.get(clusterKey) ?? 1)
+                : loc.pdsCount;
+              const r =
+                sizeCount > 20 ? 7
+                : sizeCount > 10 ? 6
+                : sizeCount > 5 ? 5
+                : sizeCount > 2 ? 4
+                : sizeCount > 1 ? 3
+                : 2;
+              return (
+                <Marker
+                  key={`${renderHighlighted ? "h" : "d"}-${originalIdx}`}
+                  coordinates={[loc.longitude, loc.latitude]}
+                  onMouseEnter={() => {
+                    if (dimmed) return;
+                    const parts: string[] = [];
+                    if (loc.city && loc.country) parts.push(`${loc.city}, ${loc.country}`);
+                    else if (loc.country) parts.push(loc.country);
+                    parts.push(`${sizeCount} PDS${sizeCount !== 1 ? "es" : ""}`);
+                    setHovered(parts.join(" · "));
+                  }}
+                  onMouseLeave={() => setHovered(null)}
+                >
+                  <circle
+                    r={r}
+                    fill={dimmed ? "#1e3a5f" : hasProvider ? "#f59e0b" : "#3b82f6"}
+                    fillOpacity={dimmed ? 0.25 : 0.75}
+                    stroke={dimmed ? "#1e3a5f" : hasProvider ? "#fcd34d" : "#93c5fd"}
+                    strokeWidth={dimmed ? 0.5 : 1}
+                  />
+                </Marker>
+              );
+            })
+        )}
       </ComposableMap>
 
       {hovered && (

@@ -203,8 +203,8 @@ const cohortActivationRate = activityDb.prepare(`
       COUNT(*) AS total_repos
     FROM plc.did_in_repo dir
     JOIN plc.plc_account_creations p ON dir.did = p.did
-    JOIN plc.did_repo_status d ON p.did = d.did
-    WHERE status = 'active'
+    LEFT JOIN plc.did_repo_status s ON dir.did = s.did
+    WHERE s.did IS NULL
     GROUP BY age_bucket
   ),
   active_by_bucket AS (

@@ -3,7 +3,7 @@
 import { sankey, sankeyLinkHorizontal, sankeyJustify, sankeyLeft } from "d3-sankey";
 import type { SankeyNode, SankeyLink } from "d3-sankey";
 import { useState, useRef, useEffect } from "react";
-import type { MigrationFlow, WeeklyMigrationRow, TimeseriesRow, TrajectoryEdge } from "@/lib/db/plc-queries";
+import type { MigrationFlow, WeeklyMigrationRow, TimeseriesRow, TrajectoryEdge, PdsAgeRow } from "@/lib/db/plc-queries";
 import type { CityCluster, PdsProviderLocation, HostingProviderCount } from "@/lib/db/queries";
 import { WorldMap } from "@/components/world-map";
 
@@ -21,6 +21,9 @@ import {
   ComposedChart,
   Area,
   Line,
+  ScatterChart,
+  Scatter,
+  CartesianGrid,
 } from "recharts";
 import type { PdsStatusRow } from "@/lib/db/plc-queries";
 
@@ -1204,5 +1207,92 @@ export function MultiStepSankeyChart({ data, height = 480 }: MultiStepSankeyProp
         </div>
       )}
     </div>
+  );
+}
+
+// ── PDS Age scatter chart ────────────────────────────────────────────────────
+
+const PDS_AGE_ERAS: { label: string; color: string; from: string; to: string }[] = [
+  { label: "Pre-2023",     color: "#6b7280", from: "0000-00", to: "2022-12" },
+  { label: "2023",         color: "#3b82f6", from: "2023-01", to: "2023-12" },
+  { label: "2024 pre-Nov", color: "#8b5cf6", from: "2024-01", to: "2024-10" },
+  { label: "2024 Nov–Dec", color: "#f59e0b", from: "2024-11", to: "2024-12" },
+  { label: "2025 H1",      color: "#10b981", from: "2025-01", to: "2025-06" },
+  { label: "2025 H2",      color: "#06b6d4", from: "2025-07", to: "2025-12" },
+  { label: "2026+",        color: "#ec4899", from: "2026-01", to: "9999-99" },
+];
+
+function fmtAccounts(n: number) {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000)     return `${(n / 1_000).toFixed(0)}K`;
+  return n.toLocaleString();
+}
+
+export function PdsAgeChart({ data }: { data: PdsAgeRow[] }) {
+  type Point = { x: number; y: number; name: string; firstMonth: string; total: number };
+  const toPoint = (r: PdsAgeRow): Point => ({
+    x: new Date(r.first_month + "-01").getTime(),
+    y: r.total_accounts,
+    name: r.pds_url,
+    firstMonth: r.first_month,
+    total: r.total_accounts,
+  });
+
+  const tickFmt = (ts: number) =>
+    new Date(ts).toLocaleDateString("en-US", { year: "numeric", month: "short" });
+
+  const CustomTooltip = ({ payload }: { payload?: { payload: Point }[] }) => {
+    if (!payload?.length) return null;
+    const d = payload[0].payload;
+    return (
+      <div style={{ ...tooltipStyle.contentStyle, padding: "8px 12px", fontSize: "0.8rem" }}>
+        <div className="font-mono text-gray-200 mb-0.5">{d.name.replace(/^https?:\/\//, "")}</div>
+        <div className="text-gray-400">First account: {d.firstMonth}</div>
+        <div className="text-gray-300">{d.total.toLocaleString()} accounts</div>
+      </div>
+    );
+  };
+
+  return (
+    <ResponsiveContainer width="100%" height={420}>
+      <ScatterChart margin={{ top: 10, right: 20, bottom: 50, left: 70 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+        <XAxis
+          dataKey="x"
+          type="number"
+          domain={["auto", "auto"]}
+          scale="time"
+          tickFormatter={tickFmt}
+          tick={{ fontSize: 11, fill: "#9ca3af" }}
+          label={{ value: "First account date", position: "insideBottom", offset: -30, fill: "#6b7280", fontSize: 12 }}
+        />
+        <YAxis
+          dataKey="y"
+          type="number"
+          scale="log"
+          domain={[10, "auto"]}
+          tickFormatter={fmtAccounts}
+          tick={{ fontSize: 11, fill: "#9ca3af" }}
+          label={{ value: "Total accounts (log scale)", angle: -90, position: "insideLeft", offset: -45, fill: "#6b7280", fontSize: 12 }}
+        />
+        <Tooltip content={(props) => <CustomTooltip payload={props.payload as { payload: Point }[] | undefined} />} />
+        <Legend
+          wrapperStyle={{ fontSize: "0.72rem", paddingTop: "8px" }}
+          formatter={(value) => <span style={{ color: "#9ca3af" }}>{value}</span>}
+        />
+        {PDS_AGE_ERAS.map((era) => (
+          <Scatter
+            key={era.label}
+            name={era.label}
+            data={data
+              .filter((r) => r.first_month >= era.from && r.first_month <= era.to)
+              .map(toPoint)}
+            fill={era.color}
+            fillOpacity={0.75}
+            r={4}
+          />
+        ))}
+      </ScatterChart>
+    </ResponsiveContainer>
   );
 }

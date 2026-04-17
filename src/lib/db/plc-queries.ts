@@ -426,3 +426,46 @@ export function getMigrationTrajectories(): TrajectoryEdge[] {
     SELECT source, target, value FROM plc_trajectory_edges ORDER BY value DESC
   `).all() as TrajectoryEdge[];
 }
+
+// ── Longevity queries ───────────────────────────────────────────────────
+
+export interface PdsAgeRow {
+  pds_url: string;
+  first_month: string;   // YYYY-MM
+  total_accounts: number;
+}
+
+// First month with any account creation per PDS (from precomputed monthly table).
+// Collapses bsky shards. Excludes junk and pds.trump.com. Requires ≥ 10 accounts.
+export function getPdsAgeData(): PdsAgeRow[] {
+  const db = getPlcDb();
+  return db.prepare(`
+    SELECT
+      CASE WHEN pds_url LIKE '%bsky.network' OR pds_url = 'https://bsky.social'
+           THEN 'bsky.network' ELSE pds_url END AS pds_url,
+      MIN(month) AS first_month,
+      SUM(count)  AS total_accounts
+    FROM plc_creation_monthly
+    WHERE ${JUNK_PDS_FILTER} AND pds_url != '${TRUMP_PDS}'
+    GROUP BY 1
+    HAVING total_accounts >= 10
+    ORDER BY first_month
+  `).all() as PdsAgeRow[];
+}
+
+export interface AccountAgeMonthRow {
+  month: string;  // YYYY-MM
+  count: number;
+}
+
+// Total account creations per month (from precomputed table). Age-bucket math done in JS.
+export function getAccountAgeHistogram(): AccountAgeMonthRow[] {
+  const db = getPlcDb();
+  return db.prepare(`
+    SELECT month, SUM(count) AS count
+    FROM plc_creation_monthly
+    WHERE pds_url != '${TRUMP_PDS}'
+    GROUP BY month
+    ORDER BY month
+  `).all() as AccountAgeMonthRow[];
+}

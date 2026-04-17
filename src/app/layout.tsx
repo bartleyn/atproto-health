@@ -23,6 +23,9 @@ export default function RootLayout({
             <Link href="/migrations" className="text-gray-400 underline hover:text-gray-100 transition-colors">
               Migrations
             </Link>
+            <Link href="/longevity" className="text-gray-400 underline hover:text-gray-100 transition-colors">
+              Longevity
+            </Link>
           </div>
         </nav>
         {children}

@@ -49,6 +49,27 @@ function migrate(db: Database.Database) {
 
     CREATE INDEX IF NOT EXISTS idx_starterpack_joins_daily_date
       ON starterpack_joins_daily(date);
+
+    -- Per-DID language usage accumulated from post events.
+    -- One row per (did, lang); post_count grows with each flush.
+    -- BCP-47 lang tags as set by the posting client (e.g. "en", "ja", "pt-BR").
+    CREATE TABLE IF NOT EXISTS did_langs (
+      did        TEXT    NOT NULL,
+      lang       TEXT    NOT NULL,
+      post_count INTEGER NOT NULL DEFAULT 0,
+      last_seen  TEXT    NOT NULL,
+      PRIMARY KEY (did, lang)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_did_langs_lang ON did_langs(lang);
+
+    -- Running totals for lang tag coverage (% of posts that carry a langs field).
+    CREATE TABLE IF NOT EXISTS lang_stats (
+      id           INTEGER PRIMARY KEY CHECK (id = 1),
+      total_posts  INTEGER NOT NULL DEFAULT 0,
+      tagged_posts INTEGER NOT NULL DEFAULT 0,
+      updated_at   TEXT    NOT NULL
+    );
   `);
 
   // Add activity_types column to existing DBs that predate this migration

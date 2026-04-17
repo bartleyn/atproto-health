@@ -23,11 +23,13 @@ export function WorldMap({ locations, providerLocations, selectedProvider }: Wor
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
 
   // For each cluster key, count how many PDSes belong to the selected provider.
+  // Key by city|country to match exactly how getPdsLocations() groups — rounding AVG lat/lon
+  // diverges from individual PDS coordinates when multiple IPs share a city.
   const providerCountByCluster = new Map<string, number>();
   if (selectedProvider && providerLocations) {
     for (const p of providerLocations) {
       if (p.provider !== selectedProvider) continue;
-      const key = `${Math.round(p.latitude * 10)},${Math.round(p.longitude * 10)}`;
+      const key = `${p.city ?? ""}|${p.country ?? ""}`;
       providerCountByCluster.set(key, (providerCountByCluster.get(key) ?? 0) + 1);
     }
   }
@@ -68,7 +70,7 @@ export function WorldMap({ locations, providerLocations, selectedProvider }: Wor
         {/* City-cluster dots — render dimmed clusters first, highlighted on top */}
         {[false, true].flatMap(renderHighlighted =>
           locations.flatMap((loc, originalIdx) => {
-              const clusterKey = `${Math.round(loc.latitude * 10)},${Math.round(loc.longitude * 10)}`;
+              const clusterKey = `${loc.city ?? ""}|${loc.country ?? ""}`;
               const hasProvider = selectedProvider ? providerClusterKeys.has(clusterKey) : false;
               if (!selectedProvider && renderHighlighted) return [];
               if (selectedProvider && renderHighlighted !== hasProvider) return [];

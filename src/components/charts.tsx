@@ -1231,10 +1231,10 @@ function fmtAccounts(n: number) {
 export function PdsAgeChart({ data }: { data: PdsAgeRow[] }) {
   type Point = { x: number; y: number; name: string; firstMonth: string; total: number };
   const toPoint = (r: PdsAgeRow): Point => ({
-    x: new Date(r.first_month + "-01").getTime(),
+    x: new Date(r.first_week).getTime(),
     y: r.total_accounts,
     name: r.pds_url,
-    firstMonth: r.first_month,
+    firstMonth: r.first_week,
     total: r.total_accounts,
   });
 
@@ -1285,7 +1285,7 @@ export function PdsAgeChart({ data }: { data: PdsAgeRow[] }) {
             key={era.label}
             name={era.label}
             data={data
-              .filter((r) => r.first_month >= era.from && r.first_month <= era.to)
+              .filter((r) => r.first_week >= era.from && r.first_week <= era.to)
               .map(toPoint)}
             fill={era.color}
             fillOpacity={0.75}

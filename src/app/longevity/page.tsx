@@ -59,7 +59,7 @@ export default async function LongevityPage() {
   const oldestIndie = indieOnly[0];
   const newestIndie = indieOnly[indieOnly.length - 1];
   const medianIdx = Math.floor(indieOnly.length / 2);
-  const medianFirstMonth = indieOnly[medianIdx]?.first_month ?? "—";
+  const medianFirstWeek = indieOnly[medianIdx]?.first_week ?? "—";
 
   return (
     <main className="min-h-screen bg-gray-950 text-gray-100 p-8">
@@ -89,17 +89,17 @@ export default async function LongevityPage() {
             />
             <StatCard
               label="Oldest independent PDS"
-              value={oldestIndie?.first_month ?? "—"}
+              value={oldestIndie?.first_week ?? "—"}
               sub={oldestIndie?.pds_url.replace(/^https?:\/\//, "") ?? ""}
             />
             <StatCard
               label="Median PDS launch"
-              value={medianFirstMonth}
+              value={medianFirstWeek}
               sub="Half of indie PDSes launched after this"
             />
             <StatCard
               label="Newest indie PDS"
-              value={newestIndie?.first_month ?? "—"}
+              value={newestIndie?.first_week ?? "—"}
               sub={newestIndie?.pds_url.replace(/^https?:\/\//, "") ?? ""}
             />
           </div>
@@ -109,8 +109,8 @@ export default async function LongevityPage() {
         <section>
           <h2 className="text-xl font-semibold text-gray-200 mb-1">When Did PDSes Launch?</h2>
           <p className="text-xs text-gray-500 mb-4">
-            Each point is a PDS. X = first account creation date (proxy for launch). Y = total accounts (log scale).
-            Colored by launch era. Excludes pds.trump.com and PDSes with &lt; 10 accounts.
+            Each point is a PDS. X = first repo-backed account (proxy for launch). Y = total repo-backed accounts (log scale).
+            Colored by launch era. Excludes pds.trump.com and PDSes with &lt; 10 repo-backed accounts.
           </p>
           <ChartCard title="PDS Age vs. Size">
             <PdsAgeChart data={pdsAgeData} />
@@ -121,8 +121,8 @@ export default async function LongevityPage() {
         <section>
           <h2 className="text-xl font-semibold text-gray-200 mb-1">How Old Are Accounts?</h2>
           <p className="text-xs text-gray-500 mb-4">
-            Age distribution of all {totalAccounts.toLocaleString()} accounts in plc_account_creations (excludes pds.trump.com).
-            Age computed relative to today.
+            Age distribution of {totalAccounts.toLocaleString()} repo-backed accounts (excludes pds.trump.com and spam PDSes).
+            Age computed relative to today from the week the account was created.
           </p>
           <ChartCard
             title="Account Age Distribution"
@@ -150,7 +150,7 @@ export default async function LongevityPage() {
                 <tr className="border-b border-gray-800 text-gray-400 text-left">
                   <th className="px-4 py-3 font-medium">#</th>
                   <th className="px-4 py-3 font-medium">PDS</th>
-                  <th className="px-4 py-3 font-medium">First account</th>
+                  <th className="px-4 py-3 font-medium">First repo-backed account</th>
                   <th className="px-4 py-3 font-medium text-right">Total accounts</th>
                 </tr>
               </thead>
@@ -161,7 +161,7 @@ export default async function LongevityPage() {
                     <td className="px-4 py-2.5 font-mono text-xs">
                       {row.pds_url.replace(/^https?:\/\//, "")}
                     </td>
-                    <td className="px-4 py-2.5 text-gray-400">{row.first_month}</td>
+                    <td className="px-4 py-2.5 text-gray-400">{row.first_week}</td>
                     <td className="px-4 py-2.5 text-right tabular-nums">{row.total_accounts.toLocaleString()}</td>
                   </tr>
                 ))}

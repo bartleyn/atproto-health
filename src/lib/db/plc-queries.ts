@@ -431,11 +431,12 @@ export function getMigrationTrajectories(): TrajectoryEdge[] {
 
 export interface PdsAgeRow {
   pds_url: string;
-  first_month: string;   // YYYY-MM
+  first_week: string;    // YYYY-MM-DD (Monday of ISO week)
   total_accounts: number;
 }
 
-// First month with any account creation per PDS (from precomputed monthly table).
+// First week with any repo-backed account per PDS (from active_creation_weekly, which is
+// derived from did_in_repo JOIN plc_account_creations — repo-backed only, no spam).
 // Collapses bsky shards. Excludes junk and pds.trump.com. Requires ≥ 10 accounts.
 export function getPdsAgeData(): PdsAgeRow[] {
   const db = getPlcDb();
@@ -443,29 +444,29 @@ export function getPdsAgeData(): PdsAgeRow[] {
     SELECT
       CASE WHEN pds_url LIKE '%bsky.network' OR pds_url = 'https://bsky.social'
            THEN 'bsky.network' ELSE pds_url END AS pds_url,
-      MIN(month) AS first_month,
-      SUM(count)  AS total_accounts
-    FROM plc_creation_monthly
+      MIN(week) AS first_week,
+      SUM(count) AS total_accounts
+    FROM active_creation_weekly
     WHERE ${JUNK_PDS_FILTER} AND pds_url != '${TRUMP_PDS}'
     GROUP BY 1
     HAVING total_accounts >= 10
-    ORDER BY first_month
+    ORDER BY first_week
   `).all() as PdsAgeRow[];
 }
 
 export interface AccountAgeMonthRow {
-  month: string;  // YYYY-MM
+  month: string;  // YYYY-MM-DD (week date, aliased for compatibility with age-bucket logic)
   count: number;
 }
 
-// Total account creations per month (from precomputed table). Age-bucket math done in JS.
+// Repo-backed account creations per week (active_creation_weekly). Age-bucket math done in JS.
 export function getAccountAgeHistogram(): AccountAgeMonthRow[] {
   const db = getPlcDb();
   return db.prepare(`
-    SELECT month, SUM(count) AS count
-    FROM plc_creation_monthly
+    SELECT week AS month, SUM(count) AS count
+    FROM active_creation_weekly
     WHERE pds_url != '${TRUMP_PDS}'
-    GROUP BY month
-    ORDER BY month
+    GROUP BY week
+    ORDER BY week
   `).all() as AccountAgeMonthRow[];
 }

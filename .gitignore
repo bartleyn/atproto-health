@@ -1,5 +1,7 @@
 # dependencies
 /node_modules
+/node_modules.nosync
+/node_modules 2
 
 # next.js
 /.next/
@@ -30,3 +32,10 @@ next-env.d.ts
 *.db
 *.db-journal
 *.db-wal
+*.db-shm
+
+# data files
+*.csv
+*.csv.gz
+*.csv.zip
+/logs/

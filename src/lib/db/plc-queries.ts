@@ -470,3 +470,42 @@ export function getAccountAgeHistogram(): AccountAgeMonthRow[] {
     ORDER BY week
   `).all() as AccountAgeMonthRow[];
 }
+
+// ── Language queries ────────────────────────────────────────────────────
+
+export interface PdsLangRow {
+  pds_url: string;
+  lang: string;
+  dids: number;
+  post_count: number;
+}
+
+// All (pds_url, lang) pairs from the precomputed summary table.
+// pds_lang_summary is populated by aggregate-plc.ts; returns [] if not yet run.
+export function getPdsLangSummary(): PdsLangRow[] {
+  const db = getPlcDb();
+  return db.prepare(`
+    SELECT pds_url, lang, dids, post_count
+    FROM pds_lang_summary
+    ORDER BY pds_url, dids DESC
+  `).all() as PdsLangRow[];
+}
+
+export interface LangTotal {
+  lang: string;
+  total_dids: number;
+  pds_count: number;
+}
+
+// Top languages by distinct-DID count. Includes bsky.network row.
+// Callers can filter by pds_url to get community-only or all-inclusive totals.
+export function getTopLangs(limit = 25): LangTotal[] {
+  const db = getPlcDb();
+  return db.prepare(`
+    SELECT lang, SUM(dids) AS total_dids, COUNT(DISTINCT pds_url) AS pds_count
+    FROM pds_lang_summary
+    GROUP BY lang
+    ORDER BY total_dids DESC
+    LIMIT ?
+  `).all(limit) as LangTotal[];
+}

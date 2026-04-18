@@ -12,28 +12,53 @@ import type { CityCluster, PdsProviderLocation } from "@/lib/db/queries";
 const GEO_URL =
   "https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json";
 
+export interface PdsLangLocation {
+  url: string;
+  city: string | null;
+  country: string | null;
+  lang: string;
+  dids: number;
+}
+
 interface WorldMapProps {
   locations: CityCluster[];
   providerLocations?: PdsProviderLocation[];
   selectedProvider?: string | null;
+  langLocations?: PdsLangLocation[];
+  selectedLang?: string | null;
 }
 
-export function WorldMap({ locations, providerLocations, selectedProvider }: WorldMapProps) {
+export function WorldMap({
+  locations,
+  providerLocations,
+  selectedProvider,
+  langLocations,
+  selectedLang,
+}: WorldMapProps) {
   const [hovered, setHovered] = useState<string | null>(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
 
-  // For each cluster key, count how many PDSes belong to the selected provider.
-  // Key by city|country to match exactly how getPdsLocations() groups — rounding AVG lat/lon
-  // diverges from individual PDS coordinates when multiple IPs share a city.
-  const providerCountByCluster = new Map<string, number>();
+  // Build highlight counts per cluster.
+  // Key by city|country — rounding AVG lat/lon diverges from individual PDS coordinates.
+  // Only one filter (provider or lang) can be active at a time.
+  const highlightCountByCluster = new Map<string, number>();
+
   if (selectedProvider && providerLocations) {
     for (const p of providerLocations) {
       if (p.provider !== selectedProvider) continue;
       const key = `${p.city ?? ""}|${p.country ?? ""}`;
-      providerCountByCluster.set(key, (providerCountByCluster.get(key) ?? 0) + 1);
+      highlightCountByCluster.set(key, (highlightCountByCluster.get(key) ?? 0) + 1);
+    }
+  } else if (selectedLang && langLocations) {
+    for (const l of langLocations) {
+      if (l.lang !== selectedLang) continue;
+      const key = `${l.city ?? ""}|${l.country ?? ""}`;
+      highlightCountByCluster.set(key, (highlightCountByCluster.get(key) ?? 0) + l.dids);
     }
   }
-  const providerClusterKeys = new Set(providerCountByCluster.keys());
+
+  const activeFilter = selectedProvider ?? selectedLang ?? null;
+  const highlightedClusterKeys = new Set(highlightCountByCluster.keys());
 
   return (
     <div
@@ -71,12 +96,12 @@ export function WorldMap({ locations, providerLocations, selectedProvider }: Wor
         {[false, true].flatMap(renderHighlighted =>
           locations.flatMap((loc, originalIdx) => {
               const clusterKey = `${loc.city ?? ""}|${loc.country ?? ""}`;
-              const hasProvider = selectedProvider ? providerClusterKeys.has(clusterKey) : false;
-              if (!selectedProvider && renderHighlighted) return [];
-              if (selectedProvider && renderHighlighted !== hasProvider) return [];
-              const dimmed = selectedProvider ? !hasProvider : false;
-              const sizeCount = hasProvider
-                ? (providerCountByCluster.get(clusterKey) ?? 1)
+              const isHighlighted = activeFilter ? highlightedClusterKeys.has(clusterKey) : false;
+              if (!activeFilter && renderHighlighted) return [];
+              if (activeFilter && renderHighlighted !== isHighlighted) return [];
+              const dimmed = activeFilter ? !isHighlighted : false;
+              const sizeCount = isHighlighted
+                ? (highlightCountByCluster.get(clusterKey) ?? 1)
                 : loc.pdsCount;
               const r =
                 sizeCount > 20 ? 7
@@ -94,16 +119,20 @@ export function WorldMap({ locations, providerLocations, selectedProvider }: Wor
                     const parts: string[] = [];
                     if (loc.city && loc.country) parts.push(`${loc.city}, ${loc.country}`);
                     else if (loc.country) parts.push(loc.country);
-                    parts.push(`${sizeCount} PDS${sizeCount !== 1 ? "es" : ""}`);
+                    if (selectedLang) {
+                      parts.push(`${sizeCount.toLocaleString()} ${selectedLang} speaker${sizeCount !== 1 ? "s" : ""}`);
+                    } else {
+                      parts.push(`${sizeCount} PDS${sizeCount !== 1 ? "es" : ""}`);
+                    }
                     setHovered(parts.join(" · "));
                   }}
                   onMouseLeave={() => setHovered(null)}
                 >
                   <circle
                     r={r}
-                    fill={dimmed ? "#1e3a5f" : hasProvider ? "#f59e0b" : "#3b82f6"}
+                    fill={dimmed ? "#1e3a5f" : isHighlighted ? "#f59e0b" : "#3b82f6"}
                     fillOpacity={dimmed ? 0.25 : 0.75}
-                    stroke={dimmed ? "#1e3a5f" : hasProvider ? "#fcd34d" : "#93c5fd"}
+                    stroke={dimmed ? "#1e3a5f" : isHighlighted ? "#fcd34d" : "#93c5fd"}
                     strokeWidth={dimmed ? 0.5 : 1}
                   />
                 </Marker>

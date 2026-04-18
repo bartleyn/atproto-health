@@ -1,6 +1,8 @@
 import { getDashboardData, getLatestFirehoseSample, type ConcentrationStats } from "@/lib/db/queries";
 import { SimpleBarChart, DonutChart, InfraSection } from "@/components/charts";
 import type { GithubTopicStats } from "@/lib/db/queries";
+import { getPdsLangSummary, getTopLangs } from "@/lib/db/plc-queries";
+import type { PdsLangLocation } from "@/components/world-map";
 
 export const dynamic = "force-dynamic";
 
@@ -28,6 +30,31 @@ export default async function Home({
     providerLocations,
     githubStats,
   } = getDashboardData(hideBsky);
+
+  // Join pds_lang_summary with providerLocations geo data by URL.
+  // Normalize URLs by stripping trailing slashes — main DB stores them WITH trailing slash
+  // (e.g. "https://blacksky.app/") while plc_did_pds stores them WITHOUT.
+  // pds_lang_summary is populated by aggregate:plc; returns [] if not yet run.
+  const normalizeUrl = (u: string) => u.replace(/\/+$/, "");
+  const isBskyUrl = (u: string) => /bsky\.network|bsky\.social/.test(u);
+  const geoByUrl = new Map(providerLocations.map(p => [normalizeUrl(p.url), { city: p.city, country: p.country }]));
+  // bsky.network providerLocations — used to geo-locate the virtual 'bsky.network' lang row
+  const bskyProviderLocs = providerLocations.filter(p => isBskyUrl(p.url));
+
+  const langRows = getPdsLangSummary();
+  const langLocations: PdsLangLocation[] = langRows.flatMap(row => {
+    if (row.pds_url === "bsky.network") {
+      // Distribute bsky.network across all bsky cluster locations for map highlighting.
+      // dids=1 per server so the cluster key accumulates per-city PDS count (same as provider mode).
+      return bskyProviderLocs
+        .filter(p => p.city !== null)
+        .map(p => ({ url: p.url, city: p.city, country: p.country, lang: row.lang, dids: 1 }));
+    }
+    const geo = geoByUrl.get(normalizeUrl(row.pds_url));
+    if (!geo) return [];
+    return [{ url: row.pds_url, city: geo.city, country: geo.country, lang: row.lang, dids: row.dids }];
+  });
+  const topLangs = getTopLangs(25);
 
   if (!runInfo.dirRun) {
     return (
@@ -140,6 +167,8 @@ export default async function Home({
             cdnBreakdown={cdnBreakdown}
             locations={locations}
             providerLocations={providerLocations}
+            langLocations={langLocations}
+            topLangs={topLangs}
           />
         </div>
       )}

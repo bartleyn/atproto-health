@@ -3,9 +3,9 @@
 import { sankey, sankeyLinkHorizontal, sankeyJustify, sankeyLeft } from "d3-sankey";
 import type { SankeyNode, SankeyLink } from "d3-sankey";
 import { useState, useRef, useEffect } from "react";
-import type { MigrationFlow, WeeklyMigrationRow, TimeseriesRow, TrajectoryEdge, PdsAgeRow } from "@/lib/db/plc-queries";
+import type { MigrationFlow, WeeklyMigrationRow, TimeseriesRow, TrajectoryEdge, PdsAgeRow, LangTotal } from "@/lib/db/plc-queries";
 import type { CityCluster, PdsProviderLocation, HostingProviderCount } from "@/lib/db/queries";
-import { WorldMap } from "@/components/world-map";
+import { WorldMap, type PdsLangLocation } from "@/components/world-map";
 
 import {
   BarChart,
@@ -412,10 +412,15 @@ interface InfraSectionProps {
   cdnBreakdown: { behindCdn: number; directHosting: number; unknown: number };
   locations: CityCluster[];
   providerLocations: PdsProviderLocation[];
+  langLocations?: PdsLangLocation[];
+  topLangs?: LangTotal[];
 }
 
-export function InfraSection({ providers, cdnBreakdown, locations, providerLocations }: InfraSectionProps) {
+export function InfraSection({ providers, cdnBreakdown, locations, providerLocations, langLocations, topLangs }: InfraSectionProps) {
   const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
+  const [selectedLang, setSelectedLang] = useState<string | null>(null);
+  const [insetTab, setInsetTab] = useState<"provider" | "lang">("provider");
+  const [showBskyLang, setShowBskyLang] = useState(false);
 
   const donutData = providers
     .filter((p) => !p.isCdn)
@@ -429,25 +434,82 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
     ? (providers.find(p => p.provider === selectedProvider)?.count ?? 0)
     : 0;
 
+  const isBskyUrl = (u: string) => /bsky\.network|bsky\.social/.test(u);
+
+  // Filter lang data based on bsky toggle
+  const activeLangLocations = langLocations
+    ? showBskyLang ? langLocations : langLocations.filter(l => !isBskyUrl(l.url))
+    : undefined;
+  // Derive per-language totals from the active (filtered) langLocations for the donut.
+  // This correctly excludes bsky counts when the toggle is off.
+  const langTotalsFromLocs = new Map<string, number>();
+  if (activeLangLocations) {
+    for (const l of activeLangLocations) {
+      langTotalsFromLocs.set(l.lang, (langTotalsFromLocs.get(l.lang) ?? 0) + l.dids);
+    }
+  }
+  // Merge with topLangs to preserve ordering and include langs not in locales.
+  // For bsky rows in topLangs, override total_dids with filtered value.
+  const filteredTopLangs = topLangs
+    ? topLangs
+        .map(r => ({
+          ...r,
+          total_dids: showBskyLang
+            ? r.total_dids
+            : (langTotalsFromLocs.get(r.lang) ?? 0),
+        }))
+        .filter(r => r.total_dids > 0)
+        .sort((a, b) => b.total_dids - a.total_dids)
+    : undefined;
+
+  const langMappedCount = selectedLang && activeLangLocations
+    ? new Set(activeLangLocations.filter(l => l.lang === selectedLang).map(l => l.url)).size
+    : 0;
+
+  const hasLangData = filteredTopLangs && filteredTopLangs.length > 0;
+
+  function pickProvider(name: string | null) {
+    setSelectedProvider(prev => prev === name ? null : name);
+    setSelectedLang(null);
+    setInsetTab("provider");
+  }
+
+  function pickLang(lang: string | null) {
+    setSelectedLang(prev => prev === lang ? null : lang);
+    setSelectedProvider(null);
+    setInsetTab("lang");
+  }
+
+  const clearLabel = selectedProvider
+    ? `${mappedCount} of ${totalCount} ${selectedProvider} PDSes mapped · clear`
+    : selectedLang
+    ? `${langMappedCount} PDSes with "${selectedLang}" speakers · clear`
+    : null;
+
+  const subLabel = selectedProvider
+    ? `amber = cities with ${selectedProvider} PDSes`
+    : selectedLang
+    ? `amber = cities with "${selectedLang}" speakers`
+    : hasLangData
+    ? "click a provider or language to highlight on map"
+    : "click a provider to highlight on map";
+
   return (
     <div className="rounded-lg border border-gray-800 bg-gray-900 p-5">
       {/* Header */}
       <div className="flex items-baseline justify-between mb-0.5">
         <h2 className="text-base font-semibold">PDS Geographic Distribution</h2>
-        {selectedProvider && (
+        {clearLabel && (
           <button
-            onClick={() => setSelectedProvider(null)}
+            onClick={() => { setSelectedProvider(null); setSelectedLang(null); }}
             className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
           >
-            {mappedCount} of {totalCount} {selectedProvider} PDSes mapped · click to clear
+            {clearLabel}
           </button>
         )}
       </div>
       <p className="text-xs text-gray-500 mb-3">
-        {locations.length.toLocaleString()} cities · dot size scales with PDS count
-        {selectedProvider
-          ? ` · amber = cities with ${selectedProvider} PDSes`
-          : " · click a provider to highlight on map"}
+        {locations.length.toLocaleString()} cities · dot size scales with PDS count · {subLabel}
       </p>
 
       {/* Map with inset panel (desktop) */}
@@ -456,72 +518,168 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
           locations={locations}
           providerLocations={providerLocations}
           selectedProvider={selectedProvider}
+          langLocations={activeLangLocations}
+          selectedLang={selectedLang}
         />
 
-        {/* Provider inset — visible on md+ only; hidden on mobile */}
+        {/* Inset panel — visible on md+ only; hidden on mobile */}
         <div className="hidden md:block absolute bottom-3 left-3 w-52 bg-gray-950/90 border border-gray-700 rounded-lg p-3">
-          <p className="text-xs font-medium text-gray-300 mb-0.5">Infrastructure Providers</p>
-          <p className="text-xs text-gray-600 mb-2">
-            {cdnBreakdown.behindCdn} behind CDN · click to highlight
-          </p>
-          {/* Fixed-size pie for the inset (no ResponsiveContainer needed) */}
-          <div className="flex justify-center">
-            <PieChart width={176} height={140}>
-              <Pie
-                data={donutData}
-                cx="50%"
-                cy="50%"
-                innerRadius={34}
-                outerRadius={58}
-                dataKey="value"
-                nameKey="name"
-                stroke="#0a0f1a"
-                strokeWidth={2}
-                style={{ cursor: "pointer" }}
-                onClick={(entry) => {
-                  const name = (entry.name as string) ?? null;
-                  setSelectedProvider(selectedProvider === name ? null : name);
-                }}
-              >
-                {donutData.map((entry, i) => {
-                  const dimmed = selectedProvider && selectedProvider !== entry.name;
-                  return (
-                    <Cell
-                      key={i}
-                      fill={dimmed ? "#374151" : COLORS[i % COLORS.length]}
-                      fillOpacity={dimmed ? 0.4 : 1}
-                      stroke={selectedProvider === entry.name ? "#fff" : "#0a0f1a"}
-                      strokeWidth={2}
-                    />
-                  );
-                })}
-              </Pie>
-              <Tooltip {...tooltipStyle} />
-            </PieChart>
-          </div>
-          {/* Compact scrollable legend */}
-          <div className="space-y-px max-h-28 overflow-y-auto mt-1">
-            {donutData.map((entry, i) => (
+          {/* Tab toggle */}
+          {hasLangData && (
+            <div className="flex gap-1 mb-2">
               <button
-                key={entry.name}
-                className="flex items-center gap-1.5 w-full text-left px-1 py-px rounded hover:bg-gray-800/60 transition-colors"
-                onClick={() => setSelectedProvider(selectedProvider === entry.name ? null : entry.name)}
+                onClick={() => setInsetTab("provider")}
+                className={`flex-1 text-xs py-0.5 rounded transition-colors ${insetTab === "provider" ? "bg-gray-700 text-white" : "text-gray-500 hover:text-gray-300"}`}
               >
-                <span
-                  className="w-2 h-2 rounded-full flex-shrink-0"
-                  style={{
-                    backgroundColor: selectedProvider && selectedProvider !== entry.name
-                      ? "#374151"
-                      : COLORS[i % COLORS.length],
-                  }}
-                />
-                <span className={`text-xs truncate ${selectedProvider === entry.name ? "text-white font-medium" : "text-gray-400"}`}>
-                  {entry.name}
-                </span>
-                <span className="text-xs text-gray-600 ml-auto flex-shrink-0 pl-1">{entry.value}</span>
+                Providers
               </button>
-            ))}
-          </div>
+              <button
+                onClick={() => setInsetTab("lang")}
+                className={`flex-1 text-xs py-0.5 rounded transition-colors ${insetTab === "lang" ? "bg-gray-700 text-white" : "text-gray-500 hover:text-gray-300"}`}
+              >
+                Languages
+              </button>
+            </div>
+          )}
+
+          {insetTab === "provider" && (
+            <>
+              <p className="text-xs font-medium text-gray-300 mb-0.5">Infrastructure Providers</p>
+              <p className="text-xs text-gray-600 mb-2">
+                {cdnBreakdown.behindCdn} behind CDN · click to highlight
+              </p>
+              {/* Fixed-size pie for the inset (no ResponsiveContainer needed) */}
+              <div className="flex justify-center">
+                <PieChart width={176} height={140}>
+                  <Pie
+                    data={donutData}
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={34}
+                    outerRadius={58}
+                    dataKey="value"
+                    nameKey="name"
+                    stroke="#0a0f1a"
+                    strokeWidth={2}
+                    style={{ cursor: "pointer" }}
+                    onClick={(entry) => pickProvider((entry.name as string) ?? null)}
+                  >
+                    {donutData.map((entry, i) => {
+                      const dimmed = selectedProvider && selectedProvider !== entry.name;
+                      return (
+                        <Cell
+                          key={i}
+                          fill={dimmed ? "#374151" : COLORS[i % COLORS.length]}
+                          fillOpacity={dimmed ? 0.4 : 1}
+                          stroke={selectedProvider === entry.name ? "#fff" : "#0a0f1a"}
+                          strokeWidth={2}
+                        />
+                      );
+                    })}
+                  </Pie>
+                  <Tooltip {...tooltipStyle} />
+                </PieChart>
+              </div>
+              {/* Compact scrollable legend */}
+              <div className="space-y-px max-h-28 overflow-y-auto mt-1">
+                {donutData.map((entry, i) => (
+                  <button
+                    key={entry.name}
+                    className="flex items-center gap-1.5 w-full text-left px-1 py-px rounded hover:bg-gray-800/60 transition-colors"
+                    onClick={() => pickProvider(entry.name)}
+                  >
+                    <span
+                      className="w-2 h-2 rounded-full flex-shrink-0"
+                      style={{
+                        backgroundColor: selectedProvider && selectedProvider !== entry.name
+                          ? "#374151"
+                          : COLORS[i % COLORS.length],
+                      }}
+                    />
+                    <span className={`text-xs truncate ${selectedProvider === entry.name ? "text-white font-medium" : "text-gray-400"}`}>
+                      {entry.name}
+                    </span>
+                    <span className="text-xs text-gray-600 ml-auto flex-shrink-0 pl-1">{entry.value}</span>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+
+          {insetTab === "lang" && hasLangData && (
+            <>
+              <div className="flex items-center justify-between mb-0.5">
+                <p className="text-xs font-medium text-gray-300">Languages</p>
+                <button
+                  onClick={() => setShowBskyLang(v => !v)}
+                  className={`text-xs px-1.5 py-0.5 rounded transition-colors ${showBskyLang ? "bg-blue-900/60 text-blue-300" : "text-gray-600 hover:text-gray-400"}`}
+                >
+                  {showBskyLang ? "bsky on" : "bsky off"}
+                </button>
+              </div>
+              <p className="text-xs text-gray-600 mb-2"># = active speakers</p>
+              {(() => {
+                const langDonutData = filteredTopLangs!.slice(0, 12).map(r => ({ name: r.lang, value: r.total_dids }));
+                return (
+                  <>
+                    <div className="flex justify-center">
+                      <PieChart width={176} height={140}>
+                        <Pie
+                          data={langDonutData}
+                          cx="50%"
+                          cy="50%"
+                          innerRadius={34}
+                          outerRadius={58}
+                          dataKey="value"
+                          nameKey="name"
+                          stroke="#0a0f1a"
+                          strokeWidth={2}
+                          style={{ cursor: "pointer" }}
+                          onClick={(entry) => pickLang((entry.name as string) ?? null)}
+                        >
+                          {langDonutData.map((entry, i) => {
+                            const dimmed = selectedLang && selectedLang !== entry.name;
+                            return (
+                              <Cell
+                                key={i}
+                                fill={dimmed ? "#374151" : COLORS[i % COLORS.length]}
+                                fillOpacity={dimmed ? 0.4 : 1}
+                                stroke={selectedLang === entry.name ? "#fff" : "#0a0f1a"}
+                                strokeWidth={2}
+                              />
+                            );
+                          })}
+                        </Pie>
+                        <Tooltip {...tooltipStyle} />
+                      </PieChart>
+                    </div>
+                    <div className="space-y-px max-h-28 overflow-y-auto mt-1">
+                      {filteredTopLangs!.map((row, i) => (
+                        <button
+                          key={row.lang}
+                          className="flex items-center gap-1.5 w-full text-left px-1 py-px rounded hover:bg-gray-800/60 transition-colors"
+                          onClick={() => pickLang(row.lang)}
+                        >
+                          <span
+                            className="w-2 h-2 rounded-full flex-shrink-0"
+                            style={{
+                              backgroundColor: selectedLang && selectedLang !== row.lang
+                                ? "#374151"
+                                : i < 12 ? COLORS[i % COLORS.length] : "#6366f1",
+                            }}
+                          />
+                          <span className={`text-xs font-mono truncate ${selectedLang === row.lang ? "text-white font-medium" : "text-gray-400"}`}>
+                            {row.lang}
+                          </span>
+                          <span className="text-xs text-gray-600 ml-auto flex-shrink-0 pl-1">{row.total_dids.toLocaleString()}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                );
+              })()}
+            </>
+          )}
         </div>
       </div>
 
@@ -535,7 +693,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
           data={donutData}
           maxSlices={donutData.length}
           selectedName={selectedProvider}
-          onSliceClick={setSelectedProvider}
+          onSliceClick={pickProvider}
         />
       </div>
     </div>

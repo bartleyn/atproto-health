@@ -1,9 +1,16 @@
+import path from "path";
 import { getPlcDb } from "../db/plc-schema";
 
 // SQLite expression: Monday of the ISO week containing a datetime column.
 // strftime('%w') returns 0=Sunday…6=Saturday; (dow+6)%7 gives days since Monday.
 const WEEK_EXPR = `date(created_at, '-' || ((strftime('%w', created_at) + 6) % 7) || ' days')`;
 const MIGRATED_WEEK_EXPR = `date(migrated_at, '-' || ((strftime('%w', migrated_at) + 6) % 7) || ' days')`;
+
+function step(label: string, fn: () => void) {
+  const t0 = Date.now();
+  fn();
+  console.log(`  ${label}: ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+}
 
 export function aggregatePlc() {
   const db = getPlcDb();
@@ -16,23 +23,23 @@ export function aggregatePlc() {
   const monthlyCreationsCursor  = monthlyCursor?.creations_cursor  ?? "2020-01-01T00:00:00Z";
   const monthlyMigrationsCursor = monthlyCursor?.migrations_cursor ?? "2020-01-01T00:00:00Z";
 
-  db.prepare(`
+  step("monthly creations", () => db.prepare(`
     INSERT INTO plc_creation_monthly (pds_url, month, count)
     SELECT pds_url, substr(created_at, 1, 7) AS month, COUNT(*) AS count
     FROM plc_account_creations
     WHERE created_at > ?
     GROUP BY pds_url, month
     ON CONFLICT (pds_url, month) DO UPDATE SET count = count + excluded.count
-  `).run(monthlyCreationsCursor);
+  `).run(monthlyCreationsCursor));
 
-  db.prepare(`
+  step("monthly migrations", () => db.prepare(`
     INSERT INTO plc_migration_monthly (from_pds, to_pds, month, count)
     SELECT from_pds, to_pds, substr(migrated_at, 1, 7) AS month, COUNT(*) AS count
     FROM plc_migrations
     WHERE migrated_at > ?
     GROUP BY from_pds, to_pds, month
     ON CONFLICT (from_pds, to_pds, month) DO UPDATE SET count = count + excluded.count
-  `).run(monthlyMigrationsCursor);
+  `).run(monthlyMigrationsCursor));
 
   // ── Weekly ─────────────────────────────────────────────────────────────────
   const weeklyCursor = db
@@ -42,23 +49,23 @@ export function aggregatePlc() {
   const weeklyCreationsCursor  = weeklyCursor?.creations_cursor  ?? "2020-01-01T00:00:00Z";
   const weeklyMigrationsCursor = weeklyCursor?.migrations_cursor ?? "2020-01-01T00:00:00Z";
 
-  db.prepare(`
+  step("weekly creations", () => db.prepare(`
     INSERT INTO plc_creation_weekly (pds_url, week, count)
     SELECT pds_url, ${WEEK_EXPR} AS week, COUNT(*) AS count
     FROM plc_account_creations
     WHERE created_at > ?
     GROUP BY pds_url, week
     ON CONFLICT (pds_url, week) DO UPDATE SET count = count + excluded.count
-  `).run(weeklyCreationsCursor);
+  `).run(weeklyCreationsCursor));
 
-  db.prepare(`
+  step("weekly migrations", () => db.prepare(`
     INSERT INTO plc_migration_weekly (from_pds, to_pds, week, count)
     SELECT from_pds, to_pds, ${MIGRATED_WEEK_EXPR} AS week, COUNT(*) AS count
     FROM plc_migrations
     WHERE migrated_at > ?
     GROUP BY from_pds, to_pds, week
     ON CONFLICT (from_pds, to_pds, week) DO UPDATE SET count = count + excluded.count
-  `).run(weeklyMigrationsCursor);
+  `).run(weeklyMigrationsCursor));
 
   // ── Update cursors ─────────────────────────────────────────────────────────
   const now = new Date().toISOString();
@@ -85,7 +92,7 @@ export function aggregatePlc() {
   // did_in_repo has 42M rows — COUNT(*) takes ~45s live, so we precompute here.
   // SQLite upsert (ON CONFLICT DO UPDATE) only works with INSERT … VALUES, not INSERT … SELECT.
   // Use INSERT OR REPLACE instead — same effect since this table always has exactly one row.
-  db.prepare(`
+  step("stats cache", () => db.prepare(`
     INSERT OR REPLACE INTO plc_stats_cache (id, total_dids, bsky_concentration_pct, updated_at)
     SELECT
       1,
@@ -93,13 +100,13 @@ export function aggregatePlc() {
       ROUND(100.0 * SUM(CASE WHEN pds_url LIKE '%bsky.network' OR pds_url = 'https://bsky.social' THEN 1 ELSE 0 END) / COUNT(*), 1),
       ?
     FROM did_in_repo
-  `).run(now);
+  `).run(now));
 
   // ── Trajectory edges (full recompute) ─────────────────────────────────────
   // Origin→current: for each migrating DID, maps first-ever source PDS to current PDS.
   // Flattens multi-hop paths (x→y→z becomes x→z). DELETE+INSERT since it depends
   // on full per-DID history and can't be done incrementally.
-  db.exec(`
+  step("trajectory edges", () => db.exec(`
     DELETE FROM plc_trajectory_edges;
 
     INSERT INTO plc_trajectory_edges (source, target, value)
@@ -147,7 +154,7 @@ export function aggregatePlc() {
       )
     SELECT source, target, COUNT(*) AS value
     FROM labeled GROUP BY source, target HAVING COUNT(*) >= 5;
-  `);
+  `));
 
   // Checkpoint the WAL so it doesn't grow unboundedly while the dev server holds
   // open read transactions. TRUNCATE mode writes WAL pages back to the main file
@@ -155,4 +162,48 @@ export function aggregatePlc() {
   db.pragma("wal_checkpoint(TRUNCATE)");
 
   console.log(`Aggregated PLC data (monthly + weekly + trajectories) up to ${now}`);
+}
+
+/**
+ * Aggregate per-PDS language breakdown from jetstream-activity.db.
+ *
+ * Joins did_langs (activity DB) with plc_did_pds (plc DB) to get the current
+ * PDS for each DID. BCP-47 subtags are collapsed to base tag (en-US → en,
+ * zh-TW → zh). bsky shards (*.bsky.network, bsky.social) are collapsed to
+ * 'bsky.network'. Fully recomputed each run (DELETE + INSERT).
+ */
+export function aggregateLangs() {
+  const db = getPlcDb();
+  const activityDbPath = path.join(process.cwd(), "jetstream-activity.db");
+
+  // ATTACH the activity DB as a read-only alias
+  db.exec(`ATTACH DATABASE '${activityDbPath}' AS activity`);
+
+  try {
+    step("lang aggregation (cross-DB join)", () => db.exec(`
+      DELETE FROM pds_lang_summary;
+
+      INSERT INTO pds_lang_summary (pds_url, lang, dids, post_count)
+      SELECT
+        CASE
+          WHEN RTRIM(p.pds_url, '/') LIKE '%bsky.network'
+            OR RTRIM(p.pds_url, '/') = 'https://bsky.social'
+          THEN 'bsky.network'
+          ELSE RTRIM(p.pds_url, '/')
+        END AS pds_url,
+        substr(dl.lang, 1, instr(dl.lang || '-', '-') - 1) AS lang,
+        COUNT(DISTINCT dl.did) AS dids,
+        SUM(dl.post_count) AS post_count
+      FROM activity.did_langs dl
+      JOIN plc_did_pds p ON dl.did = p.did
+      WHERE dl.lang != ''
+      GROUP BY 1, 2
+      HAVING dids >= 2
+    `));
+  } finally {
+    db.exec(`DETACH DATABASE activity`);
+  }
+
+  const rowCount = (db.prepare(`SELECT COUNT(*) AS n FROM pds_lang_summary`).get() as { n: number }).n;
+  console.log(`Language aggregation complete: ${rowCount} (pds_url, lang) pairs`);
 }

@@ -222,6 +222,20 @@ function migrate(db: Database.Database) {
       value  INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (source, target)
     );
+
+    -- Per-PDS language breakdown derived from jetstream-activity.db did_langs JOIN plc_did_pds.
+    -- BCP-47 subtags collapsed to base tag (en-US → en, zh-TW → zh).
+    -- bsky shards collapsed to 'bsky.network'. Fully recomputed by aggregate-plc.ts.
+    CREATE TABLE IF NOT EXISTS pds_lang_summary (
+      pds_url    TEXT NOT NULL,
+      lang       TEXT NOT NULL,
+      dids       INTEGER NOT NULL DEFAULT 0,
+      post_count INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (pds_url, lang)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pds_lang_summary_lang
+      ON pds_lang_summary(lang);
   `);
 
   // Additive migrations for existing databases

@@ -1,7 +1,7 @@
 import { getDashboardData, getLatestFirehoseSample, type ConcentrationStats } from "@/lib/db/queries";
 import { SimpleBarChart, DonutChart, InfraSection } from "@/components/charts";
 import type { GithubTopicStats } from "@/lib/db/queries";
-import { getPdsLangSummary, getTopLangs } from "@/lib/db/plc-queries";
+import { getPdsLangSummary, getTopLangs, getLastScanTime } from "@/lib/db/plc-queries";
 import type { PdsLangLocation } from "@/components/world-map";
 
 export const dynamic = "force-dynamic";
@@ -41,6 +41,7 @@ export default async function Home({
   // bsky.network providerLocations — used to geo-locate the virtual 'bsky.network' lang row
   const bskyProviderLocs = providerLocations.filter(p => isBskyUrl(p.url));
 
+  const lastScanTime = getLastScanTime();
   const langRows = getPdsLangSummary();
   const langLocations: PdsLangLocation[] = langRows.flatMap(row => {
     if (row.pds_url === "bsky.network") {
@@ -132,6 +133,12 @@ export default async function Home({
             <p>
               Users:{" "}
               {new Date(runInfo.usrRun.completedAt + "Z").toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
+            </p>
+          )}
+          {lastScanTime && (
+            <p>
+              Scan:{" "}
+              {new Date(lastScanTime + "Z").toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
             </p>
           )}
         </div>
@@ -253,15 +260,11 @@ export default async function Home({
                   <th className="px-4 py-3 font-medium">#</th>
                   <th className="px-4 py-3 font-medium">PDS</th>
                   <th className="px-4 py-3 font-medium text-right">Total</th>
-                  <th className="px-4 py-3 font-medium text-right">Active</th>
                   <th className="px-4 py-3 font-medium">Country</th>
                 </tr>
               </thead>
               <tbody>
                 {topPds.map((pds, i) => {
-                  const activePct = pds.activeCount != null && pds.repoCount > 0
-                    ? ((pds.activeCount / pds.repoCount) * 100).toFixed(0)
-                    : null;
                   return (
                     <tr
                       key={pds.url}
@@ -275,14 +278,6 @@ export default async function Home({
                       </td>
                       <td className="px-4 py-2.5 text-right tabular-nums">
                         {pds.repoCount.toLocaleString()}
-                      </td>
-                      <td className="px-4 py-2.5 text-right tabular-nums text-gray-400">
-                        {pds.activeCount != null ? (
-                          <span>
-                            {pds.activeCount.toLocaleString()}
-                            {activePct && <span className="text-gray-600 ml-1 text-xs">({activePct}%)</span>}
-                          </span>
-                        ) : "—"}
                       </td>
                       <td className="px-4 py-2.5 text-gray-400">
                         {pds.country ?? "—"}

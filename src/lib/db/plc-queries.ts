@@ -487,3 +487,11 @@ export function getTopLangs(limit = 25): LangTotal[] {
     LIMIT ?
   `).all(limit) as LangTotal[];
 }
+
+export function getLastScanTime(): string | null {
+  const db = getPlcDb();
+  const row = db.prepare(
+    `SELECT MAX(scanned_at) AS last_scan FROM pds_repo_status_snapshots WHERE is_partial = 0`
+  ).get() as { last_scan: string | null } | undefined;
+  return row?.last_scan ?? null;
+}

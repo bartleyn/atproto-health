@@ -165,6 +165,8 @@ function migrate(db: Database.Database) {
       is_sampled    INTEGER NOT NULL DEFAULT 0, -- 1 if sampled, 0 if full scan
       did_plc_count INTEGER NOT NULL DEFAULT 0,
       did_web_count INTEGER NOT NULL DEFAULT 0,
+      is_partial    INTEGER NOT NULL DEFAULT 0, -- 1 if scan errored mid-way
+      scanned_at    TEXT,                       -- ISO timestamp of when the scan ran
       UNIQUE(pds_url, snapshot_date)
     );
 
@@ -256,4 +258,10 @@ function migrate(db: Database.Database) {
       // Column already exists — ignore
     }
   }
+  try {
+    db.exec(`ALTER TABLE pds_repo_status_snapshots ADD COLUMN is_partial INTEGER NOT NULL DEFAULT 0`);
+  } catch { /* already exists */ }
+  try {
+    db.exec(`ALTER TABLE pds_repo_status_snapshots ADD COLUMN scanned_at TEXT`);
+  } catch { /* already exists */ }
 }

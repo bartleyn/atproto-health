@@ -12,6 +12,8 @@
  *   npx tsx src/lib/collectors/scan-pds-status.ts --concurrency 5
  */
 
+import path from "path";
+import Database from "better-sqlite3";
 import { getPlcDb } from "../db/plc-schema";
 
 const LIST_REPOS_LIMIT = 1000;
@@ -176,25 +178,46 @@ async function main() {
     pdsList = onlyList;
     console.log(`Mode: specific PDSes (${pdsList.length})\n`);
   } else {
-    const rows = db
+    // Start with PLC-derived PDS list (PDSes that actual accounts point to)
+    const plcRows = db
       .prepare(`SELECT pds_url FROM plc_did_pds GROUP BY pds_url ORDER BY COUNT(*) DESC`)
       .all() as { pds_url: string }[];
+    const pdsSet = new Map<string, number>(); // url → approx account count
+    for (const r of plcRows) {
+      pdsSet.set(r.pds_url, 0);
+    }
 
-    pdsList = rows
-      .map(r => r.pds_url)
-      .filter(url => {
-        if (isBskyShard(url) && !includeBsky)  return false;
-        if (isTrump(url)     && !includeTrump) return false;
-        return true;
-      });
+    // Also union in PDSes from the main atproto-health.db directory so both
+    // pipelines scan the same set and produce aligned total account counts.
+    const mainDbPath = path.join(process.cwd(), "atproto-health.db");
+    try {
+      const mainDb = new Database(mainDbPath, { readonly: true, timeout: 5000 });
+      const mainRows = mainDb.prepare(`SELECT url FROM pds_instances`).all() as { url: string }[];
+      mainDb.close();
+      let added = 0;
+      for (const r of mainRows) {
+        const url = r.url.replace(/\/+$/, ""); // strip trailing slash
+        if (!pdsSet.has(url)) { pdsSet.set(url, 0); added++; }
+      }
+      console.log(`PDS sources: ${plcRows.length.toLocaleString()} from PLC + ${added.toLocaleString()} additional from atproto-health.db directory`);
+    } catch {
+      console.log(`PDS sources: ${plcRows.length.toLocaleString()} from PLC (atproto-health.db not found, skipping directory merge)`);
+    }
 
-    const skipped = rows.length - pdsList.length;
+    pdsList = [...pdsSet.keys()].filter(url => {
+      if (isBskyShard(url) && !includeBsky)  return false;
+      if (isTrump(url)     && !includeTrump) return false;
+      return true;
+    });
+
+    const total = pdsSet.size;
+    const skipped = total - pdsList.length;
     console.log(`PDSes to scan: ${pdsList.length.toLocaleString()} (${skipped.toLocaleString()} skipped — pass --include-bsky / --include-trump to include)\n`);
   }
 
   // Skip PDSes already snapshotted today
   const alreadyDone = new Set(
-    (db.prepare(`SELECT pds_url FROM pds_repo_status_snapshots WHERE snapshot_date = ?`).all(today) as { pds_url: string }[])
+    (db.prepare(`SELECT pds_url FROM pds_repo_status_snapshots WHERE snapshot_date = ? AND is_partial = 0`).all(today) as { pds_url: string }[])
       .map(r => r.pds_url)
   );
   const toScan = pdsList.filter(p => !alreadyDone.has(p));
@@ -204,15 +227,17 @@ async function main() {
 
   const upsert = db.prepare(`
     INSERT INTO pds_repo_status_snapshots
-      (pds_url, snapshot_date, active, deactivated, deleted, takendown, suspended, other, total_scanned, is_sampled, did_plc_count, did_web_count)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+      (pds_url, snapshot_date, active, deactivated, deleted, takendown, suspended, other, total_scanned, is_sampled, did_plc_count, did_web_count, is_partial, scanned_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
     ON CONFLICT(pds_url, snapshot_date) DO UPDATE SET
       active = excluded.active, deactivated = excluded.deactivated,
       deleted = excluded.deleted, takendown = excluded.takendown,
       suspended = excluded.suspended, other = excluded.other,
       total_scanned = excluded.total_scanned,
       did_plc_count = excluded.did_plc_count,
-      did_web_count = excluded.did_web_count
+      did_web_count = excluded.did_web_count,
+      is_partial = excluded.is_partial,
+      scanned_at = excluded.scanned_at
   `);
 
   const upsertDidStatus = db.prepare(`
@@ -304,7 +329,8 @@ async function main() {
       pdsUrl, today,
       counts.active, counts.deactivated, counts.deleted,
       counts.takendown, counts.suspended, counts.other,
-      counts.total, counts.didPlc, counts.didWeb
+      counts.total, counts.didPlc, counts.didWeb,
+      partial ? 1 : 0, scannedAt
     );
 
     if (nonActive.length > 0) {

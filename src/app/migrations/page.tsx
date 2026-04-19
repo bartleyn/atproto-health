@@ -2,7 +2,6 @@ export const dynamic = "force-dynamic";
 
 import Link from "next/link";
 import {
-  getCreationTimeseriesWeekly,
   getActiveCreationTimeseriesWeekly,
   getMigrationFlows,
   getMigrationWeeklyBreakdown,
@@ -25,13 +24,11 @@ function StatCard({ label, value, sub }: { label: string; value: string; sub?: s
 export default async function MigrationsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ trump?: string; bsky?: string }>;
+  searchParams: Promise<{ bsky?: string }>;
 }) {
-  const { trump, bsky } = await searchParams;
-  const includeTrump = trump === "1";
+  const { bsky } = await searchParams;
   const hideBsky = bsky === "0";
 
-  const creations = getCreationTimeseriesWeekly(includeTrump, hideBsky);
   const activeCreations = getActiveCreationTimeseriesWeekly(hideBsky);
   const flows = getMigrationFlows();
   const weeklyMigrations = getMigrationWeeklyBreakdown();
@@ -40,7 +37,6 @@ export default async function MigrationsPage({
   const timestamp = getPlcDataTimestamp();
 
   const fmt = (n: number) => n.toLocaleString();
-  const allPeriods = [...new Set([...creations, ...activeCreations].map(r => r.period))].sort();
 
   return (
     <main className="min-h-screen bg-gray-950 text-gray-100 p-8">
@@ -129,36 +125,27 @@ export default async function MigrationsPage({
         <section>
           <div className="flex items-center justify-between mb-1">
             <h2 className="text-xl font-semibold text-gray-200">
-              Weekly did:plc Creations by PDS
+              Weekly Account Creations by PDS
             </h2>
-            <div className="flex gap-2">
-              <Link
-                href={`/migrations?trump=${includeTrump ? "0" : "1"}&bsky=${hideBsky ? "0" : "1"}`}
-                className="text-xs px-3 py-1 rounded border border-gray-700 text-gray-400 hover:text-gray-200 hover:border-gray-500 transition-colors"
-              >
-                {includeTrump ? "Hide pds.trump.com" : "Show pds.trump.com"}
-              </Link>
-              <Link
-                href={`/migrations?trump=${includeTrump ? "1" : "0"}&bsky=${hideBsky ? "1" : "0"}`}
-                className="text-xs px-3 py-1 rounded border border-gray-700 text-gray-400 hover:text-gray-200 hover:border-gray-500 transition-colors"
-              >
-                {hideBsky ? "Show bsky.network" : "Hide bsky.network"}
-              </Link>
-            </div>
+            <Link
+              href={`/migrations?bsky=${hideBsky ? "1" : "0"}`}
+              className="text-xs px-3 py-1 rounded border border-gray-700 text-gray-400 hover:text-gray-200 hover:border-gray-500 transition-colors"
+            >
+              {hideBsky ? "Show bsky.network" : "Hide bsky.network"}
+            </Link>
           </div>
           <p className="text-xs text-gray-500 mb-4">
-            Normalized to 100% — hover for actual counts. Top 10 PDSes by total volume.
+            Repo-backed accounts only. Normalized to 100% — hover for actual counts. Top 10 PDSes by total volume.
             {hideBsky && <span className="text-blue-500 ml-2">bsky.network hidden.</span>}
-            {includeTrump && <span className="text-yellow-600 ml-2">pds.trump.com included (~20.6M DIDs).</span>}
           </p>
-          {creations.length === 0 ? (
+          {activeCreations.length === 0 ? (
             <p className="text-gray-500">
               No data yet — run{" "}
               <code className="text-gray-300">npm run collect:plc</code> then{" "}
               <code className="text-gray-300">npm run aggregate:plc</code>.
             </p>
           ) : (
-            <CreationChartsSection plcData={creations} repoData={activeCreations} allPeriods={allPeriods} />
+            <CreationChartsSection repoData={activeCreations} />
           )}
         </section>
 

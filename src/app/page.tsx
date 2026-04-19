@@ -227,13 +227,14 @@ export default async function Home({
         )}
 
         {/* Repos by country */}
-        <ChartCard title="Repos by Country" subtitle="Share of total repos in each PDS geolocated to that country · may undercount total repos">
+        <ChartCard title="Repos by Country" subtitle="Share of total repos in each PDS geolocated to that country · may undercount total repos · log scale">
           <SimpleBarChart
             data={reposByCountry.slice(0, 15).map((c) => ({
               name: c.countryCode,
               value: c.repoCount,
             }))}
             color="#06b6d4"
+            logScale
           />
         </ChartCard>
       </div>
@@ -364,12 +365,9 @@ function ConcentrationSection({
         Active = repos marked active by their PDS.
         Concentration = cumulative share of repos held by the top N PDSes (Bluesky shards counted as one).
       </p>
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+      <div className="grid grid-cols-2 gap-3">
         <StatCard label="Total Repos" value={totalRepos} />
-        <StatCard label="Active Repos" value={activeRepos} accent="green" />
         <StatCard label="Active Rate" value={activeRate} suffix="%" accent="cyan" />
-        <StatCard label="Top PDS share" value={Math.round(concentration.top1Pct)} suffix="%" />
-        <StatCard label="Top 10 PDSes share" value={Math.round(concentration.top10Pct)} suffix="%" />
       </div>
     </div>
   );

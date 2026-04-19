@@ -59,6 +59,7 @@ interface BarChartProps {
   layout?: "horizontal" | "vertical";
   xLabel?: string;
   yLabel?: string;
+  logScale?: boolean;
 }
 
 export function SimpleBarChart({
@@ -67,6 +68,7 @@ export function SimpleBarChart({
   layout = "vertical",
   xLabel,
   yLabel,
+  logScale = false,
 }: BarChartProps) {
   if (layout === "horizontal") {
     return (
@@ -92,14 +94,24 @@ export function SimpleBarChart({
     );
   }
 
+  const fmtLog = (v: number) => {
+    if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(0)}M`;
+    if (v >= 1_000) return `${(v / 1_000).toFixed(0)}K`;
+    return `${v}`;
+  };
+
   return (
     <ResponsiveContainer width="100%" height={Math.max(300, data.length * 28)}>
       <BarChart data={data} layout="vertical" margin={{ left: 10 }}>
         <XAxis
           type="number"
+          scale={logScale ? "log" : "auto"}
+          domain={logScale ? [1, "auto"] : [0, "auto"]}
           tick={{ fill: "#9ca3af", fontSize: 12 }}
           axisLine={{ stroke: "#374151" }}
           tickLine={false}
+          tickFormatter={logScale ? fmtLog : undefined}
+          allowDataOverflow={logScale}
         />
         <YAxis
           type="category"
@@ -683,18 +695,82 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
         </div>
       </div>
 
-      {/* Provider donut — mobile only (stacked below map) */}
+      {/* Provider/Language filter — mobile only (stacked below map) */}
       <div className="block md:hidden mt-4 pt-4 border-t border-gray-800">
-        <p className="text-xs font-medium text-gray-300 mb-0.5">Infrastructure Providers</p>
-        <p className="text-xs text-gray-500 mb-3">
-          {`${cdnBreakdown.behindCdn} behind CDN · ${cdnBreakdown.directHosting} direct · ${cdnBreakdown.unknown} unknown · click to highlight`}
-        </p>
-        <DonutChart
-          data={donutData}
-          maxSlices={donutData.length}
-          selectedName={selectedProvider}
-          onSliceClick={pickProvider}
-        />
+        {hasLangData && (
+          <div className="flex gap-1 mb-3">
+            <button
+              onClick={() => setInsetTab("provider")}
+              className={`flex-1 text-xs py-1 rounded transition-colors ${insetTab === "provider" ? "bg-gray-700 text-white" : "text-gray-500 hover:text-gray-300"}`}
+            >
+              Providers
+            </button>
+            <button
+              onClick={() => setInsetTab("lang")}
+              className={`flex-1 text-xs py-1 rounded transition-colors ${insetTab === "lang" ? "bg-gray-700 text-white" : "text-gray-500 hover:text-gray-300"}`}
+            >
+              Languages
+            </button>
+          </div>
+        )}
+
+        {insetTab === "provider" && (
+          <>
+            <p className="text-xs font-medium text-gray-300 mb-0.5">Infrastructure Providers</p>
+            <p className="text-xs text-gray-500 mb-3">
+              {`${cdnBreakdown.behindCdn} behind CDN · ${cdnBreakdown.directHosting} direct · ${cdnBreakdown.unknown} unknown · click to highlight`}
+            </p>
+            <DonutChart
+              data={donutData}
+              maxSlices={donutData.length}
+              selectedName={selectedProvider}
+              onSliceClick={pickProvider}
+            />
+          </>
+        )}
+
+        {insetTab === "lang" && hasLangData && (
+          <>
+            <div className="flex items-center justify-between mb-1">
+              <p className="text-xs font-medium text-gray-300">Languages</p>
+              <button
+                onClick={() => setShowBskyLang(v => !v)}
+                className={`text-xs px-1.5 py-0.5 rounded transition-colors ${showBskyLang ? "bg-blue-900/60 text-blue-300" : "text-gray-600 hover:text-gray-400"}`}
+              >
+                {showBskyLang ? "bsky on" : "bsky off"}
+              </button>
+            </div>
+            <p className="text-xs text-gray-500 mb-3"># = active speakers · click to highlight</p>
+            <DonutChart
+              data={filteredTopLangs!.slice(0, 12).map(r => ({ name: r.lang, value: r.total_dids }))}
+              maxSlices={12}
+              selectedName={selectedLang}
+              onSliceClick={pickLang}
+            />
+            <div className="grid grid-cols-3 gap-1 mt-3">
+              {filteredTopLangs!.map((row, i) => (
+                <button
+                  key={row.lang}
+                  className="flex items-center gap-1.5 text-left px-2 py-1 rounded hover:bg-gray-800/60 transition-colors"
+                  onClick={() => pickLang(row.lang)}
+                >
+                  <span
+                    className="w-2 h-2 rounded-full flex-shrink-0"
+                    style={{
+                      backgroundColor: selectedLang && selectedLang !== row.lang
+                        ? "#374151"
+                        : i < 12 ? COLORS[i % COLORS.length] : "#6366f1",
+                    }}
+                  />
+                  <span className={`text-xs font-mono truncate ${selectedLang === row.lang ? "text-white font-medium" : "text-gray-400"}`}>
+                    {row.lang}
+                  </span>
+                  <span className="text-xs text-gray-600 ml-auto flex-shrink-0">{row.total_dids.toLocaleString()}</span>
+                </button>
+              ))}
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -1094,30 +1170,18 @@ function CreationWeeklyBarChart({ data, selectedPds, onPdsClick }: CreationWeekl
 // ── Creation charts section (area chart + weekly bar, shared selection state) ─
 
 interface CreationChartsSectionProps {
-  plcData: TimeseriesRow[];
   repoData: TimeseriesRow[];
-  allPeriods: string[];
 }
 
-export function CreationChartsSection({ plcData, repoData, allPeriods }: CreationChartsSectionProps) {
+export function CreationChartsSection({ repoData }: CreationChartsSectionProps) {
   const [selectedPds, setSelectedPds] = useState<string | null>(null);
 
   return (
     <div className="space-y-8">
       <div>
-        <p className="text-xs text-gray-500 mb-2">PLC directory registrations — all DIDs including unverified and ghost accounts</p>
-        <StackedAreaChart
-          data={plcData}
-          allPeriods={allPeriods}
-          selectedPds={selectedPds}
-          onPdsClick={setSelectedPds}
-        />
-      </div>
-      <div>
         <p className="text-xs text-gray-500 mb-2">Repo-backed accounts — DIDs with an actual repository (excludes ghosts, morel provisioning artifacts)</p>
         <StackedAreaChart
           data={repoData}
-          allPeriods={allPeriods}
           selectedPds={selectedPds}
           onPdsClick={setSelectedPds}
         />

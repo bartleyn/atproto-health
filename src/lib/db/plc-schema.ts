@@ -223,6 +223,16 @@ function migrate(db: Database.Database) {
       PRIMARY KEY (source, target)
     );
 
+    -- Actual per-hop migration transitions for the multi-step Sankey chart.
+    -- Each row is one hop: "pds@step" → "pds@(step+1)". step < 3 (first 3 hops only).
+    -- Fully recomputed by aggregate-plc.ts each run.
+    CREATE TABLE IF NOT EXISTS plc_migration_hops (
+      source TEXT NOT NULL, -- e.g. "bsky.network@0"
+      target TEXT NOT NULL, -- e.g. "eurosky.social@1"
+      value  INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (source, target)
+    );
+
     -- Per-PDS language breakdown derived from jetstream-activity.db did_langs JOIN plc_did_pds.
     -- BCP-47 subtags collapsed to base tag (en-US → en, zh-TW → zh).
     -- bsky shards collapsed to 'bsky.network'. Fully recomputed by aggregate-plc.ts.

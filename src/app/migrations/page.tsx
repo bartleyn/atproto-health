@@ -102,9 +102,8 @@ export default async function MigrationsPage({
             Migration Flows
           </h2>
           <p className="text-xs text-gray-500 mb-4">
-            All-time account migrations between PDSes. Excludes bsky.network destinations.
-            Top 10 sources and destinations shown. Hover nodes and links for details.
-            Click a destination node to highlight its weekly trend below.
+            Where accounts ultimately landed — collapsed origin → current PDS. Excludes bsky.network destinations.
+            Hover for details. Click any node to highlight its trajectories forward and backward.
           </p>
           <MigrationChartsSection sankeyData={flows} weeklyData={weeklyMigrations} />
         </section>
@@ -115,8 +114,8 @@ export default async function MigrationsPage({
             Where do users end up?
           </h2>
           <p className="text-xs text-gray-500 mb-4">
-            Where accounts started vs. where they are now — multi-hop paths collapsed to origin → current PDS.
-            Collapses bsky.network shards. Click a node to highlight its flows.
+            Actual per-hop migration steps — each column is one PDS hop. bsky.network shards collapsed.
+            Click a node to highlight all paths through it in both directions.
           </p>
           <MultiStepSankeyChart data={trajectories} />
         </section>

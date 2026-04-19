@@ -156,6 +156,56 @@ export function aggregatePlc() {
     FROM labeled GROUP BY source, target HAVING COUNT(*) >= 5;
   `));
 
+  // ── Per-hop migration edges (full recompute) ──────────────────────────────
+  // Preserves actual per-hop transitions (A→B, B→C) rather than collapsing to origin→current.
+  // step = 0-indexed hop number; limited to first 3 hops (covers the vast majority of migrants).
+  step("migration hops", () => db.exec(`
+    DELETE FROM plc_migration_hops;
+
+    INSERT INTO plc_migration_hops (source, target, value)
+    WITH
+      verified AS (SELECT DISTINCT pds_url FROM pds_repo_status_snapshots),
+      normalized AS (
+        SELECT did,
+          CASE WHEN from_pds LIKE '%bsky.network' OR from_pds = 'https://bsky.social' THEN 'bsky.network' ELSE from_pds END AS from_pds,
+          CASE WHEN to_pds   LIKE '%bsky.network' OR to_pds   = 'https://bsky.social' THEN 'bsky.network' ELSE to_pds   END AS to_pds,
+          migrated_at
+        FROM plc_migrations
+        WHERE NOT (
+          (from_pds LIKE '%bsky.network' OR from_pds = 'https://bsky.social')
+          AND (to_pds LIKE '%bsky.network' OR to_pds = 'https://bsky.social')
+        )
+      ),
+      deduped AS (
+        SELECT did, from_pds, to_pds, MIN(migrated_at) AS migrated_at
+        FROM normalized GROUP BY did, from_pds, to_pds
+      ),
+      filtered AS (
+        SELECT did, from_pds, to_pds, migrated_at FROM deduped
+        WHERE (from_pds = 'bsky.network' OR from_pds IN (SELECT pds_url FROM verified))
+          AND (to_pds   = 'bsky.network' OR to_pds   IN (SELECT pds_url FROM verified))
+      ),
+      ranked AS (
+        SELECT did, from_pds, to_pds,
+          ROW_NUMBER() OVER (PARTITION BY did ORDER BY migrated_at ASC) - 1 AS step
+        FROM filtered
+      ),
+      top_pdses AS (
+        SELECT pds FROM (
+          SELECT from_pds AS pds FROM ranked UNION ALL SELECT to_pds AS pds FROM ranked
+        ) GROUP BY pds HAVING COUNT(*) >= 10 ORDER BY COUNT(*) DESC LIMIT 12
+      ),
+      labeled AS (
+        SELECT
+          CASE WHEN from_pds IN (SELECT pds FROM top_pdses) THEN from_pds ELSE 'Other' END || '@' || step       AS source,
+          CASE WHEN to_pds   IN (SELECT pds FROM top_pdses) THEN to_pds   ELSE 'Other' END || '@' || (step + 1) AS target
+        FROM ranked
+        WHERE step < 3
+      )
+    SELECT source, target, COUNT(*) AS value
+    FROM labeled GROUP BY source, target HAVING COUNT(*) >= 5;
+  `));
+
   // Checkpoint the WAL so it doesn't grow unboundedly while the dev server holds
   // open read transactions. TRUNCATE mode writes WAL pages back to the main file
   // and truncates the WAL to 0 bytes.

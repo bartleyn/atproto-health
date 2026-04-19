@@ -248,38 +248,16 @@ export interface MigrationFlow {
   value: number;
 }
 
-export function getMigrationFlows(topN = 10): MigrationFlow[] {
+export function getMigrationFlows(): MigrationFlow[] {
   const db = getPlcDb();
+  // Reads collapsed origin→current trajectories: where did accounts ultimately land?
   return db.prepare(`
-    WITH
-      verified AS (SELECT DISTINCT pds_url FROM pds_repo_status_snapshots),
-      collapsed AS (
-        SELECT
-          CASE WHEN from_pds LIKE '%bsky.network' THEN '${BSKY_NETWORK_LABEL}' ELSE from_pds END AS source,
-          CASE WHEN to_pds LIKE '%bsky.network' THEN '${BSKY_NETWORK_LABEL}' ELSE to_pds END AS target,
-          SUM(count) AS value
-        FROM plc_migration_monthly
-        WHERE NOT (from_pds LIKE '%bsky.network' AND to_pds LIKE '%bsky.network')
-          AND (from_pds LIKE '%bsky.network' OR from_pds IN (SELECT pds_url FROM verified))
-          AND (to_pds LIKE '%bsky.network' OR to_pds IN (SELECT pds_url FROM verified))
-        GROUP BY 1, 2
-      ),
-      top_sources AS (
-        SELECT source FROM collapsed GROUP BY source ORDER BY SUM(value) DESC LIMIT ${topN}
-      ),
-      top_targets AS (
-        SELECT target FROM collapsed GROUP BY target ORDER BY SUM(value) DESC LIMIT ${topN}
-      ),
-      labeled AS (
-        SELECT
-          CASE WHEN source IN (SELECT source FROM top_sources) THEN source ELSE 'Other sources' END AS source,
-          CASE WHEN target IN (SELECT target FROM top_targets) THEN target ELSE 'Other destinations' END AS target,
-          value
-        FROM collapsed
-      )
-    SELECT source, target, SUM(value) AS value
-    FROM labeled
-    GROUP BY source, target
+    SELECT
+      replace(source, '@0', '') AS source,
+      replace(target, '@1', '') AS target,
+      value
+    FROM plc_trajectory_edges
+    WHERE replace(source, '@0', '') != replace(target, '@1', '')
     ORDER BY value DESC
   `).all() as MigrationFlow[];
 }
@@ -418,12 +396,12 @@ export interface TrajectoryEdge {
   value: number;
 }
 
-// Reads precomputed trajectory edges from plc_trajectory_edges.
+// Reads per-hop migration edges from plc_migration_hops.
 // Populated by aggregate-plc.ts — run npm run aggregate:plc to refresh.
 export function getMigrationTrajectories(): TrajectoryEdge[] {
   const db = getPlcDb();
   return db.prepare(`
-    SELECT source, target, value FROM plc_trajectory_edges ORDER BY value DESC
+    SELECT source, target, value FROM plc_migration_hops ORDER BY value DESC
   `).all() as TrajectoryEdge[];
 }
 

@@ -887,100 +887,133 @@ export function SankeyChart({ data, height = 400, selectedSink, onSinkClick }: S
     });
   };
 
+  // BFS: collect all nodes/links connected to selectedSink in either direction
+  const highlightedNodes = new Set<string>();
+  const highlightedLinks = new Set<number>();
+  if (selectedSink) {
+    const typedNodes = nodes as SankeyNodeDatum[];
+    const typedLinks = links as SankeyLinkDatum[];
+    highlightedNodes.add(selectedSink);
+    const queue = [typedNodes.find(n => n.name === selectedSink)!];
+    const visited = new Set<string>();
+    while (queue.length) {
+      const n = queue.shift();
+      if (!n || visited.has(n.name)) continue;
+      visited.add(n.name);
+      for (const l of (n.targetLinks as SankeyLinkDatum[])) {
+        highlightedLinks.add(typedLinks.indexOf(l));
+        const src = l.source as SankeyNodeDatum;
+        highlightedNodes.add(src.name);
+        queue.push(src);
+      }
+      for (const l of (n.sourceLinks as SankeyLinkDatum[])) {
+        highlightedLinks.add(typedLinks.indexOf(l));
+        const tgt = l.target as SankeyNodeDatum;
+        highlightedNodes.add(tgt.name);
+        queue.push(tgt);
+      }
+    }
+  }
+
+  const svgWidth = Math.max(width, 520);
+
   return (
-    <div ref={containerRef} className="relative" style={{ width: "100%" }}>
-      <svg
-        ref={svgRef}
-        width={width}
-        height={height}
-        onMouseLeave={() => setTooltip(null)}
-      >
-        <g transform={`translate(${margin.left},${margin.top})`}>
-          {/* Links */}
-          {(links as SankeyLinkDatum[]).map((link, i) => {
-            const srcIdx = nodeIndex.get((link.source as SankeyNodeDatum).name) ?? 0;
-            const color = COLORS[srcIdx % COLORS.length];
-            const tgtName = (link.target as SankeyNodeDatum).name;
-            const isHighlighted = !selectedSink || tgtName === selectedSink;
-            return (
-              <path
-                key={i}
-                d={linkPath(link as any) ?? ""}
-                fill="none"
-                stroke={color}
-                strokeOpacity={isHighlighted ? 0.5 : 0.1}
-                strokeWidth={Math.max(1, link.width ?? 1)}
-                onMouseEnter={(e) => handleLinkHover(e, link)}
-                onMouseMove={(e) => handleLinkHover(e, link)}
-                style={{ cursor: "default" }}
-              />
-            );
-          })}
+    <div ref={containerRef} style={{ width: "100%" }}>
+      <div className="overflow-x-auto">
+        <div className="relative" style={{ width: svgWidth }}>
+          <svg
+            ref={svgRef}
+            width={svgWidth}
+            height={height}
+            onMouseLeave={() => setTooltip(null)}
+          >
+            <g transform={`translate(${margin.left},${margin.top})`}>
+              {/* Links */}
+              {(links as SankeyLinkDatum[]).map((link, i) => {
+                const srcIdx = nodeIndex.get((link.source as SankeyNodeDatum).name) ?? 0;
+                const color = COLORS[srcIdx % COLORS.length];
+                const isHighlighted = !selectedSink || highlightedLinks.has(i);
+                return (
+                  <path
+                    key={i}
+                    d={linkPath(link as any) ?? ""}
+                    fill="none"
+                    stroke={color}
+                    strokeOpacity={isHighlighted ? 0.5 : 0.08}
+                    strokeWidth={Math.max(1, link.width ?? 1)}
+                    onMouseEnter={(e) => handleLinkHover(e, link)}
+                    onMouseMove={(e) => handleLinkHover(e, link)}
+                    style={{ cursor: "default" }}
+                  />
+                );
+              })}
 
-          {/* Nodes */}
-          {(nodes as SankeyNodeDatum[]).map((node, i) => {
-            const color = COLORS[i % COLORS.length];
-            const x0 = node.x0 ?? 0, x1 = node.x1 ?? 0;
-            const y0 = node.y0 ?? 0, y1 = node.y1 ?? 0;
-            const labelRight = x1 > innerW / 2;
-            const isTarget = !node.name.endsWith(SRC_SUFFIX);
-            const isSelected = selectedSink && node.name === selectedSink;
-            const isDimmed = selectedSink && isTarget && node.name !== selectedSink;
-            return (
-              <g
-                key={i}
-                onMouseEnter={(e) => handleNodeHover(e, node)}
-                onMouseMove={(e) => handleNodeHover(e, node)}
-                onClick={() => isTarget && onSinkClick?.(isSelected ? null : node.name)}
-                style={{ cursor: isTarget ? "pointer" : "default", opacity: isDimmed ? 0.3 : 1 }}
-              >
-                <rect
-                  x={x0} y={y0}
-                  width={x1 - x0} height={Math.max(1, y1 - y0)}
-                  fill={color}
-                  rx={2}
-                  stroke={isSelected ? "#fff" : "none"}
-                  strokeWidth={isSelected ? 1.5 : 0}
-                />
-                <text
-                  x={labelRight ? x1 + 6 : x0 - 6}
-                  y={(y0 + y1) / 2}
-                  textAnchor={labelRight ? "start" : "end"}
-                  dominantBaseline="middle"
-                  fill={isDimmed ? "#6b7280" : "#d1d5db"}
-                  fontSize={11}
-                >
-                  {node.name.replace(/\u200b$/, "").replace(/^https?:\/\//, "")}
-                </text>
-              </g>
-            );
-          })}
-        </g>
-      </svg>
+              {/* Nodes */}
+              {(nodes as SankeyNodeDatum[]).map((node, i) => {
+                const color = COLORS[i % COLORS.length];
+                const x0 = node.x0 ?? 0, x1 = node.x1 ?? 0;
+                const y0 = node.y0 ?? 0, y1 = node.y1 ?? 0;
+                const labelRight = x1 > innerW / 2;
+                const isSelected = selectedSink === node.name;
+                const isDimmed = selectedSink && !highlightedNodes.has(node.name);
+                const clickName = node.name.endsWith(SRC_SUFFIX)
+                  ? node.name.slice(0, -1)  // strip zero-width space for source nodes
+                  : node.name;
+                return (
+                  <g
+                    key={i}
+                    onMouseEnter={(e) => handleNodeHover(e, node)}
+                    onMouseMove={(e) => handleNodeHover(e, node)}
+                    onClick={() => onSinkClick?.(isSelected ? null : clickName)}
+                    style={{ cursor: onSinkClick ? "pointer" : "default", opacity: isDimmed ? 0.25 : 1 }}
+                  >
+                    <rect
+                      x={x0} y={y0}
+                      width={x1 - x0} height={Math.max(1, y1 - y0)}
+                      fill={color}
+                      rx={2}
+                      stroke={isSelected ? "#fff" : "none"}
+                      strokeWidth={isSelected ? 1.5 : 0}
+                    />
+                    <text
+                      x={labelRight ? x1 + 6 : x0 - 6}
+                      y={(y0 + y1) / 2}
+                      textAnchor={labelRight ? "start" : "end"}
+                      dominantBaseline="middle"
+                      fill={isDimmed ? "#4b5563" : "#d1d5db"}
+                      fontSize={11}
+                    >
+                      {node.name.replace(/\u200b$/, "").replace(/^https?:\/\//, "")}
+                    </text>
+                  </g>
+                );
+              })}
+            </g>
+          </svg>
 
-      {/* Tooltip */}
-      {tooltip && (
-        <div
-          style={{
-            ...tooltipStyle.contentStyle,
-            position: "absolute",
-            left: tooltip.x + 12,
-            top: tooltip.y - 12,
-            pointerEvents: "none",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {tooltip.content}
+          {/* Tooltip */}
+          {tooltip && (
+            <div
+              style={{
+                ...tooltipStyle.contentStyle,
+                position: "absolute",
+                left: tooltip.x + 12,
+                top: tooltip.y - 12,
+                pointerEvents: "none",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {tooltip.content}
+            </div>
+          )}
         </div>
-      )}
+      </div>
 
       <p style={{ color: "#6b7280", fontSize: "0.7rem", marginTop: 4 }}>
-        Total recorded: {totalFlow.toLocaleString()} migrations · Top 10 sources &amp; destinations shown
-        {selectedSink && (
-          <> · <span style={{ color: "#d1d5db" }}>
-            Click highlighted node to deselect
-          </span></>
-        )}
+        {selectedSink
+          ? <><span style={{ color: "#d1d5db" }}>{selectedSink.replace(/^https?:\/\//, "")} highlighted</span> · click again to clear</>
+          : <>click any node to highlight its trajectories</>
+        }
       </p>
     </div>
   );
@@ -1208,8 +1241,6 @@ interface MultiStepSankeyProps {
   height?: number;
 }
 
-const STEP_LABELS = ["Origin", "Current PDS"];
-
 export function MultiStepSankeyChart({ data, height = 480 }: MultiStepSankeyProps) {
   const [tooltip, setTooltip] = useState<SankeyTooltip | null>(null);
   const [width, setWidth] = useState(900);
@@ -1236,6 +1267,15 @@ export function MultiStepSankeyChart({ data, height = 480 }: MultiStepSankeyProp
 
   const nodeNames = [...new Set([...data.map(d => d.source), ...data.map(d => d.target)])];
   const nodeIndex = new Map(nodeNames.map((name, i) => [name, i]));
+
+  // Dynamic column labels based on max step in data
+  const maxStep = Math.max(...data.flatMap(e => [
+    parseInt(e.source.split('@').pop()!),
+    parseInt(e.target.split('@').pop()!),
+  ]));
+  const stepLabels = Array.from({ length: maxStep + 1 }, (_, i) =>
+    i === 0 ? "Origin" : i === maxStep ? "Current" : `Hop ${i}`
+  );
 
   // Consistent color per PDS base name (strip @N) so the same PDS has the same
   // color whether it appears as origin, first destination, or second destination.
@@ -1318,116 +1358,116 @@ export function MultiStepSankeyChart({ data, height = 480 }: MultiStepSankeyProp
     setTooltip(t => t ? { ...t, x: e.clientX - rect.left, y: e.clientY - rect.top } : null);
   };
 
+  const svgWidth = Math.max(width, 560);
+
   return (
-    <div ref={containerRef} className="relative" style={{ width: "100%" }}>
-      <svg ref={svgRef} width={width} height={height} onMouseLeave={() => setTooltip(null)} suppressHydrationWarning>
-        <g transform={`translate(${margin.left},${margin.top})`}>
+    <div ref={containerRef} style={{ width: "100%" }}>
+      <div className="overflow-x-auto">
+        <div className="relative" style={{ width: svgWidth }}>
+          <svg ref={svgRef} width={svgWidth} height={height} onMouseLeave={() => setTooltip(null)} suppressHydrationWarning>
+            <g transform={`translate(${margin.left},${margin.top})`}>
 
-          {/* Column headers */}
-          {[...stepX.entries()].sort((a, b) => a[0] - b[0]).map(([step, x]) => (
-            <text key={step} x={x} y={-16} textAnchor="middle" fill="#6b7280" fontSize={11}>
-              {STEP_LABELS[step] ?? `Hop ${step}`}
-            </text>
-          ))}
-
-          {/* Links */}
-          {(links as SankeyLinkDatum[]).map((link, i) => {
-            const srcName = (link.source as SankeyNodeDatum).name;
-            const tgtName = (link.target as SankeyNodeDatum).name;
-            const color = pdsColorMap.get(srcName.replace(/@\d+$/, "")) ?? "#6b7280";
-            const isActive = !selectedNode || srcName === selectedNode || tgtName === selectedNode;
-            return (
-              <path
-                key={i}
-                d={linkPath(link as any) ?? ""}
-                fill="none"
-                stroke={color}
-                strokeOpacity={isActive ? 0.5 : 0.05}
-                strokeWidth={Math.max(1, link.width ?? 1)}
-                onMouseEnter={(e) => {
-                  const src = srcName.replace(/@\d+$/, "").replace(/^https?:\/\//, "");
-                  const tgt = tgtName.replace(/@\d+$/, "").replace(/^https?:\/\//, "");
-                  showTooltip(e, (
-                    <div>
-                      <p className="font-medium mb-1" style={{ color: "#e5e7eb" }}>{src} → {tgt}</p>
-                      <p style={{ color: "#f3f4f6", fontSize: "0.8rem" }}>{link.value.toLocaleString()} accounts</p>
-                    </div>
-                  ));
-                }}
-                onMouseMove={moveTooltip}
-                style={{ cursor: "default" }}
-              />
-            );
-          })}
-
-          {/* Nodes */}
-          {(nodes as SankeyNodeDatum[]).map((node, i) => {
-            const pdsBase = node.name.replace(/@\d+$/, "");
-            const color = pdsColorMap.get(pdsBase) ?? COLORS[i % COLORS.length];
-            const x0 = node.x0 ?? 0, x1 = node.x1 ?? 0;
-            const y0 = node.y0 ?? 0, y1 = node.y1 ?? 0;
-            const labelRight = x0 > innerW / 2;
-            const label = pdsBase.replace(/^https?:\/\//, "");
-            const isSelected = selectedNode === node.name;
-            const isDimmed = selectedNode && !isSelected && (() => {
-              const links = [...(node.sourceLinks as SankeyLinkDatum[]), ...(node.targetLinks as SankeyLinkDatum[])];
-              return !links.some(l =>
-                (l.source as SankeyNodeDatum).name === selectedNode ||
-                (l.target as SankeyNodeDatum).name === selectedNode
-              );
-            })();
-            return (
-              <g
-                key={i}
-                onClick={() => setSelectedNode(isSelected ? null : node.name)}
-                onMouseEnter={(e) => {
-                  const inflow  = (node.targetLinks as SankeyLinkDatum[]).reduce((s, l) => s + l.value, 0);
-                  const outflow = (node.sourceLinks as SankeyLinkDatum[]).reduce((s, l) => s + l.value, 0);
-                  showTooltip(e, (
-                    <div>
-                      <p className="font-medium mb-1" style={{ color: "#e5e7eb" }}>{label}</p>
-                      {inflow  > 0 && <p style={{ color: "#10b981", fontSize: "0.8rem" }}>Inbound: {inflow.toLocaleString()}</p>}
-                      {outflow > 0 && <p style={{ color: "#f59e0b", fontSize: "0.8rem" }}>Outbound: {outflow.toLocaleString()}</p>}
-                      <p style={{ color: "#6b7280", fontSize: "0.75rem", marginTop: 4 }}>Click to highlight</p>
-                    </div>
-                  ));
-                }}
-                onMouseMove={moveTooltip}
-                style={{ cursor: "pointer", opacity: isDimmed ? 0.25 : 1 }}
-              >
-                <rect
-                  x={x0} y={y0} width={x1 - x0} height={Math.max(1, y1 - y0)}
-                  fill={color} rx={2}
-                  stroke={isSelected ? "#fff" : "none"}
-                  strokeWidth={isSelected ? 1.5 : 0}
-                />
-                <text
-                  x={labelRight ? x1 + 6 : x0 - 6}
-                  y={(y0 + y1) / 2}
-                  textAnchor={labelRight ? "start" : "end"}
-                  dominantBaseline="middle"
-                  fill={isDimmed ? "#4b5563" : "#d1d5db"}
-                  fontSize={11}
-                >
-                  {label}
+              {/* Column headers */}
+              {[...stepX.entries()].sort((a, b) => a[0] - b[0]).map(([step, x]) => (
+                <text key={step} x={x} y={-16} textAnchor="middle" fill="#6b7280" fontSize={11}>
+                  {stepLabels[step] ?? `Hop ${step}`}
                 </text>
-              </g>
-            );
-          })}
-        </g>
-      </svg>
+              ))}
 
-      {tooltip && (
-        <div style={{
-          position: "absolute",
-          left: tooltip.x + 12,
-          top: tooltip.y - 8,
-          pointerEvents: "none",
-          ...tooltipStyle.contentStyle,
-        }}>
-          {tooltip.content}
+              {/* Links */}
+              {(links as SankeyLinkDatum[]).map((link, i) => {
+                const srcName = (link.source as SankeyNodeDatum).name;
+                const tgtName = (link.target as SankeyNodeDatum).name;
+                const color = pdsColorMap.get(srcName.replace(/@\d+$/, "")) ?? "#6b7280";
+                const isActive = !selectedNode || highlightedLinkSet.has(i);
+                return (
+                  <path
+                    key={i}
+                    d={linkPath(link as any) ?? ""}
+                    fill="none"
+                    stroke={color}
+                    strokeOpacity={isActive ? 0.5 : 0.05}
+                    strokeWidth={Math.max(1, link.width ?? 1)}
+                    onMouseEnter={(e) => {
+                      const src = srcName.replace(/@\d+$/, "").replace(/^https?:\/\//, "");
+                      const tgt = tgtName.replace(/@\d+$/, "").replace(/^https?:\/\//, "");
+                      showTooltip(e, (
+                        <div>
+                          <p className="font-medium mb-1" style={{ color: "#e5e7eb" }}>{src} → {tgt}</p>
+                          <p style={{ color: "#f3f4f6", fontSize: "0.8rem" }}>{link.value.toLocaleString()} accounts</p>
+                        </div>
+                      ));
+                    }}
+                    onMouseMove={moveTooltip}
+                    style={{ cursor: "default" }}
+                  />
+                );
+              })}
+
+              {/* Nodes */}
+              {(nodes as SankeyNodeDatum[]).map((node, i) => {
+                const pdsBase = node.name.replace(/@\d+$/, "");
+                const color = pdsColorMap.get(pdsBase) ?? COLORS[i % COLORS.length];
+                const x0 = node.x0 ?? 0, x1 = node.x1 ?? 0;
+                const y0 = node.y0 ?? 0, y1 = node.y1 ?? 0;
+                const labelRight = x0 > innerW / 2;
+                const label = pdsBase.replace(/^https?:\/\//, "");
+                const isSelected = selectedNode === node.name;
+                const isDimmed = selectedNode && !highlightedNodeSet.has(node.name);
+                return (
+                  <g
+                    key={i}
+                    onClick={() => setSelectedNode(isSelected ? null : node.name)}
+                    onMouseEnter={(e) => {
+                      const inflow  = (node.targetLinks as SankeyLinkDatum[]).reduce((s, l) => s + l.value, 0);
+                      const outflow = (node.sourceLinks as SankeyLinkDatum[]).reduce((s, l) => s + l.value, 0);
+                      showTooltip(e, (
+                        <div>
+                          <p className="font-medium mb-1" style={{ color: "#e5e7eb" }}>{label}</p>
+                          {inflow  > 0 && <p style={{ color: "#10b981", fontSize: "0.8rem" }}>Inbound: {inflow.toLocaleString()}</p>}
+                          {outflow > 0 && <p style={{ color: "#f59e0b", fontSize: "0.8rem" }}>Outbound: {outflow.toLocaleString()}</p>}
+                          <p style={{ color: "#6b7280", fontSize: "0.75rem", marginTop: 4 }}>Click to highlight</p>
+                        </div>
+                      ));
+                    }}
+                    onMouseMove={moveTooltip}
+                    style={{ cursor: "pointer", opacity: isDimmed ? 0.25 : 1 }}
+                  >
+                    <rect
+                      x={x0} y={y0} width={x1 - x0} height={Math.max(1, y1 - y0)}
+                      fill={color} rx={2}
+                      stroke={isSelected ? "#fff" : "none"}
+                      strokeWidth={isSelected ? 1.5 : 0}
+                    />
+                    <text
+                      x={labelRight ? x1 + 6 : x0 - 6}
+                      y={(y0 + y1) / 2}
+                      textAnchor={labelRight ? "start" : "end"}
+                      dominantBaseline="middle"
+                      fill={isDimmed ? "#4b5563" : "#d1d5db"}
+                      fontSize={11}
+                    >
+                      {label}
+                    </text>
+                  </g>
+                );
+              })}
+            </g>
+          </svg>
+
+          {tooltip && (
+            <div style={{
+              position: "absolute",
+              left: tooltip.x + 12,
+              top: tooltip.y - 8,
+              pointerEvents: "none",
+              ...tooltipStyle.contentStyle,
+            }}>
+              {tooltip.content}
+            </div>
+          )}
         </div>
-      )}
+      </div>
     </div>
   );
 }

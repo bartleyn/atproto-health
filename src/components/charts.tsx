@@ -128,6 +128,13 @@ export function SimpleBarChart({
   );
 }
 
+// Strip protocol and collapse subdomains: "dev.blacksky.app" → "blacksky.app"
+function displayPdsLabel(url: string): string {
+  const host = url.replace(/^https?:\/\//, "");
+  const parts = host.split(".");
+  return parts.length > 2 ? parts.slice(-2).join(".") : host;
+}
+
 interface StackedAreaChartProps {
   data: { period: string; pds_url: string; count: number }[];
   allPeriods?: string[]; // force x-axis to cover this full range
@@ -136,6 +143,21 @@ interface StackedAreaChartProps {
 }
 
 export function StackedAreaChart({ data, allPeriods, selectedPds, onPdsClick }: StackedAreaChartProps) {
+  const [containerWidth, setContainerWidth] = useState(900);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect.width;
+      if (w && w > 0) setContainerWidth(w);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const isMobile = containerWidth < 500;
   // Collect ordered list of PDS keys (Other always last)
   const pdsSet = new Set<string>();
   for (const row of data) {
@@ -190,7 +212,7 @@ export function StackedAreaChart({ data, allPeriods, selectedPds, onPdsClick }: 
           const pct = total > 0 ? ((raw / total) * 100).toFixed(1) : "0.0";
           return (
             <p key={rawKey} style={{ color: p.color, fontSize: "0.8rem" }}>
-              {rawKey}: {raw.toLocaleString()} ({pct}%)
+              {displayPdsLabel(rawKey)}: {raw.toLocaleString()} ({pct}%)
             </p>
           );
         })}
@@ -205,36 +227,38 @@ export function StackedAreaChart({ data, allPeriods, selectedPds, onPdsClick }: 
   };
 
   return (
+    <div ref={containerRef} style={{ width: "100%" }}>
     <ResponsiveContainer width="100%" height={400}>
-      <ComposedChart data={chartData} margin={{ top: 8, right: 56, bottom: 0, left: 16 }}>
+      <ComposedChart data={chartData} margin={{ top: 8, right: isMobile ? 36 : 56, bottom: 0, left: isMobile ? 4 : 16 }}>
         <XAxis
           dataKey="period"
-          tick={{ fill: "#9ca3af", fontSize: 11 }}
+          tick={{ fill: "#9ca3af", fontSize: isMobile ? 9 : 11 }}
           axisLine={{ stroke: "#374151" }}
           tickLine={false}
+          interval="preserveStartEnd"
         />
         <YAxis
           yAxisId="left"
-          tick={{ fill: "#9ca3af", fontSize: 11 }}
+          tick={{ fill: "#9ca3af", fontSize: isMobile ? 9 : 11 }}
           axisLine={{ stroke: "#374151" }}
           tickLine={false}
-          width={40}
+          width={isMobile ? 32 : 40}
           tickFormatter={(v) => `${Math.round(v)}%`}
           domain={[0, 100]}
         />
         <YAxis
           yAxisId="right"
           orientation="right"
-          tick={{ fill: "#6b7280", fontSize: 10 }}
+          tick={{ fill: "#6b7280", fontSize: isMobile ? 9 : 10 }}
           axisLine={false}
           tickLine={false}
-          width={52}
+          width={isMobile ? 36 : 52}
           tickFormatter={fmtCumulative}
         />
         <Tooltip content={<CustomTooltip />} />
         <Legend
-          wrapperStyle={{ fontSize: "0.75rem", color: "#9ca3af", cursor: onPdsClick ? "pointer" : "default" }}
-          formatter={(value: string) => value === "__cumulative" ? "cumulative" : value.replace("__pct", "")}
+          wrapperStyle={{ fontSize: isMobile ? "0.65rem" : "0.75rem", color: "#9ca3af", cursor: onPdsClick ? "pointer" : "default" }}
+          formatter={(value: string) => value === "__cumulative" ? "cumulative" : displayPdsLabel(value.replace("__pct", ""))}
           onClick={onPdsClick ? (e: any) => {
             const name = e.value?.replace("__pct", "") ?? e.value;
             if (name === "__cumulative") return;
@@ -274,6 +298,7 @@ export function StackedAreaChart({ data, allPeriods, selectedPds, onPdsClick }: 
         />
       </ComposedChart>
     </ResponsiveContainer>
+    </div>
   );
 }
 
@@ -799,8 +824,11 @@ interface SankeyChartProps {
 export function SankeyChart({ data, height = 400, selectedSink, onSinkClick }: SankeyChartProps) {
   const [tooltip, setTooltip] = useState<SankeyTooltip | null>(null);
   const [width, setWidth] = useState(900);
+  const [mounted, setMounted] = useState(false);
   const svgRef = useRef<SVGSVGElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => setMounted(true), []);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -814,6 +842,7 @@ export function SankeyChart({ data, height = 400, selectedSink, onSinkClick }: S
   }, []);
 
   if (!data.length) return <p className="text-gray-500">No migration data yet.</p>;
+  if (!mounted) return <div style={{ height }} />;
 
   // Treat sources and targets as distinct nodes to avoid cycles (same PDS can be
   // both a source and destination). Suffix internally; strip for display.
@@ -823,7 +852,8 @@ export function SankeyChart({ data, height = 400, selectedSink, onSinkClick }: S
   const nodeNames = [...srcNames, ...tgtNames];
   const nodeIndex = new Map(nodeNames.map((name, i) => [name, i]));
 
-  const margin = { top: 10, right: 160, bottom: 10, left: 160 };
+  const labelMargin = width < 500 ? 100 : 160;
+  const margin = { top: 10, right: labelMargin, bottom: 10, left: labelMargin };
   const innerW = width - margin.left - margin.right;
   const innerH = height - margin.top - margin.bottom;
 
@@ -981,7 +1011,7 @@ export function SankeyChart({ data, height = 400, selectedSink, onSinkClick }: S
                       textAnchor={labelRight ? "start" : "end"}
                       dominantBaseline="middle"
                       fill={isDimmed ? "#4b5563" : "#d1d5db"}
-                      fontSize={11}
+                      fontSize={width < 500 ? 9 : 11}
                     >
                       {node.name.replace(/\u200b$/, "").replace(/^https?:\/\//, "")}
                     </text>
@@ -1151,7 +1181,7 @@ function CreationWeeklyBarChart({ data, selectedPds, onPdsClick }: CreationWeekl
         <p style={{ color: "#9ca3af", fontSize: "0.75rem", marginBottom: 4 }}>{label}</p>
         {[...payload].reverse().map((p: any) => (
           <p key={p.dataKey} style={{ color: p.fill === "#374151" ? "#6b7280" : p.fill, fontSize: "0.8rem" }}>
-            {p.dataKey}: {(p.value ?? 0).toLocaleString()}
+            {displayPdsLabel(p.dataKey)}: {(p.value ?? 0).toLocaleString()}
           </p>
         ))}
         <p style={{ color: "#6b7280", fontSize: "0.75rem", marginTop: 4 }}>

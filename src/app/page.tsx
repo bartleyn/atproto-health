@@ -138,7 +138,7 @@ export default async function Home({
           {lastScanTime && (
             <p>
               Scan:{" "}
-              {new Date(lastScanTime + "Z").toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
+              {new Date(lastScanTime).toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
             </p>
           )}
         </div>

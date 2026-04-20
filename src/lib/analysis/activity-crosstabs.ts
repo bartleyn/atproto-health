@@ -242,7 +242,60 @@ const cohortActivationRate = activityDb.prepare(`
 
 report(`Cohort Activation Rate`, `cohort_activation_${daysBack}d.csv`, cohortActivationRate);
 
-// ── 7. pds.trump.com weekly DID registrations (cumulative) ───────────────────
+// ── 7. Action rates by cohort ─────────────────────────────────────────────────
+
+const actionRatesByCohort = activityDb.prepare(`
+  WITH active_users AS (
+    SELECT
+      did,
+      MAX(CASE WHEN activity_types & 1 THEN 1 ELSE 0 END) AS ever_posted,
+      MAX(CASE WHEN activity_types & 2 THEN 1 ELSE 0 END) AS ever_liked,
+      MAX(CASE WHEN activity_types & 4 THEN 1 ELSE 0 END) AS ever_reposted,
+      MAX(CASE WHEN activity_types & 8 THEN 1 ELSE 0 END) AS ever_followed
+    FROM did_activity_daily
+    WHERE date >= date('now', '-' || ? || ' days')
+    GROUP BY did
+  ),
+  cohort_sizes AS (
+    SELECT
+      ${AGE_BUCKET} AS age_bucket,
+      COUNT(*) AS cohort_size
+    FROM plc.did_in_repo dir
+    JOIN plc.plc_account_creations p ON dir.did = p.did
+    LEFT JOIN plc.did_repo_status s ON dir.did = s.did
+    WHERE s.did IS NULL
+    GROUP BY age_bucket
+  ),
+  action_counts AS (
+    SELECT
+      ${AGE_BUCKET} AS age_bucket,
+      SUM(a.ever_posted)   AS posted,
+      SUM(a.ever_liked)    AS liked,
+      SUM(a.ever_reposted) AS reposted,
+      SUM(a.ever_followed) AS followed
+    FROM active_users a
+    JOIN plc.plc_account_creations p ON a.did = p.did
+    GROUP BY age_bucket
+  )
+  SELECT
+    c.age_bucket,
+    c.cohort_size,
+    COALESCE(a.posted, 0)                                                   AS posted_n,
+    ROUND(100.0 * COALESCE(a.posted, 0)   / c.cohort_size, 2)              AS pct_posted,
+    COALESCE(a.liked, 0)                                                    AS liked_n,
+    ROUND(100.0 * COALESCE(a.liked, 0)    / c.cohort_size, 2)              AS pct_liked,
+    COALESCE(a.reposted, 0)                                                 AS reposted_n,
+    ROUND(100.0 * COALESCE(a.reposted, 0) / c.cohort_size, 2)              AS pct_reposted,
+    COALESCE(a.followed, 0)                                                 AS followed_n,
+    ROUND(100.0 * COALESCE(a.followed, 0) / c.cohort_size, 2)              AS pct_followed
+  FROM cohort_sizes c
+  LEFT JOIN action_counts a USING (age_bucket)
+  ORDER BY c.age_bucket
+`).all(daysBack) as Record<string, unknown>[];
+
+report(`Action Rates by Cohort`, `action_rates_by_cohort_${daysBack}d.csv`, actionRatesByCohort);
+
+// ── 8. pds.trump.com weekly DID registrations (cumulative) ───────────────────
 
 const trumpWeekly = plcDb.prepare(`
   SELECT

@@ -41,7 +41,7 @@ function extractPds(op: PlcOp): string | null {
 }
 
 function normalizeUrl(url: string): string {
-  return url.replace(/\/$/, "").toLowerCase();
+  return url.replace(/\/$/, "").toLowerCase().replace(/^http:\/\//, "https://");
 }
 
 async function fetchBatch(after: string): Promise<PlcOp[]> {
@@ -157,13 +157,13 @@ export async function collectPlcMigrations(): Promise<{
       const isNew = !existing;
       if (isNew) totalCreations++;
       if (existing && normalizeUrl(existing.pds_url) !== normalizedNew) {
-        migration = { fromPds: existing.pds_url, toPds: newPds };
+        migration = { fromPds: existing.pds_url, toPds: normalizedNew };
         totalMigrations++;
       }
 
       pendingBatch.push({
         did: op.did,
-        pdsUrl: newPds,
+        pdsUrl: normalizedNew,
         updatedAt: op.createdAt,
         migration,
         isNew,

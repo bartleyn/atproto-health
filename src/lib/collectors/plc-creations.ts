@@ -113,7 +113,7 @@ export async function backfillPlcCreations(): Promise<{
       const pds = extractPds(op);
       if (!pds) continue;
 
-      pendingCreations.push({ did: op.did, pdsUrl: pds, createdAt: op.createdAt });
+      pendingCreations.push({ did: op.did, pdsUrl: pds.replace(/\/$/, "").toLowerCase().replace(/^http:\/\//, "https://"), createdAt: op.createdAt });
       totalCreations++;
     }
 

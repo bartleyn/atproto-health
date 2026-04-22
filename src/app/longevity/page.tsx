@@ -19,7 +19,7 @@ function computeAgeBuckets(rows: { month: string; count: number }[]) {
   const now = Date.now();
   const buckets = AGE_BUCKETS.map((b) => ({ name: b.label, value: 0 }));
   for (const row of rows) {
-    const ageDays = (now - new Date(row.month + "-01").getTime()) / 86_400_000;
+    const ageDays = (now - new Date(row.month).getTime()) / 86_400_000;
     const idx = AGE_BUCKETS.findIndex((b) => ageDays <= b.maxDays);
     if (idx >= 0) buckets[idx].value += row.count;
   }

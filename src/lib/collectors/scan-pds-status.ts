@@ -184,7 +184,7 @@ async function main() {
       .all() as { pds_url: string }[];
     const pdsSet = new Map<string, number>(); // url → approx account count
     for (const r of plcRows) {
-      pdsSet.set(r.pds_url, 0);
+      pdsSet.set(r.pds_url.replace(/\/+$/, "").replace(/^http:\/\//, "https://"), 0);
     }
 
     // Also union in PDSes from the main atproto-health.db directory so both
@@ -196,7 +196,7 @@ async function main() {
       mainDb.close();
       let added = 0;
       for (const r of mainRows) {
-        const url = r.url.replace(/\/+$/, ""); // strip trailing slash
+        const url = r.url.replace(/\/+$/, "").replace(/^http:\/\//, "https://");
         if (!pdsSet.has(url)) { pdsSet.set(url, 0); added++; }
       }
       console.log(`PDS sources: ${plcRows.length.toLocaleString()} from PLC + ${added.toLocaleString()} additional from atproto-health.db directory`);

@@ -37,11 +37,14 @@ export function WorldMap({
 }: WorldMapProps) {
   const [hovered, setHovered] = useState<string | null>(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+  const [pinnedCluster, setPinnedCluster] = useState<{ key: string; pds: string; dids: number; x: number; y: number } | null>(null);
 
   // Build highlight counts per cluster.
   // Key by city|country — rounding AVG lat/lon diverges from individual PDS coordinates.
   // Only one filter (provider or lang) can be active at a time.
   const highlightCountByCluster = new Map<string, number>();
+  // Top PDS per cluster for the selected language (by dids). Bsky shards collapse to one entry using the real total.
+  const topPdsByCluster = new Map<string, { pds: string; dids: number }>();
 
   if (selectedProvider && providerLocations) {
     for (const p of providerLocations) {
@@ -54,6 +57,12 @@ export function WorldMap({
       if (l.lang !== selectedLang) continue;
       const key = `${l.city ?? ""}|${l.country ?? ""}`;
       highlightCountByCluster.set(key, (highlightCountByCluster.get(key) ?? 0) + l.dids);
+      const isBskyShard = /bsky\.network|bsky\.social/.test(l.url);
+      const displayPds = isBskyShard ? "bsky.network" : l.url.replace(/^https?:\/\//, "");
+      const current = topPdsByCluster.get(key);
+      if (!current || l.dids > current.dids) {
+        topPdsByCluster.set(key, { pds: displayPds, dids: l.dids });
+      }
     }
   }
 
@@ -66,6 +75,10 @@ export function WorldMap({
       onMouseMove={(e) => {
         const rect = e.currentTarget.getBoundingClientRect();
         setMousePos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+      }}
+      onClick={(e) => {
+        // Click outside a dot clears the pinned callout.
+        if ((e.target as SVGElement).tagName !== "circle") setPinnedCluster(null);
       }}
     >
       <ComposableMap
@@ -127,8 +140,19 @@ export function WorldMap({
                     setHovered(parts.join(" · "));
                   }}
                   onMouseLeave={() => setHovered(null)}
+                  onClick={isHighlighted && selectedLang ? (e) => {
+                    e.stopPropagation();
+                    const top = topPdsByCluster.get(clusterKey);
+                    if (!top) return;
+                    const rect = (e.currentTarget as SVGElement).closest(".relative")!.getBoundingClientRect();
+                    setPinnedCluster(prev =>
+                      prev?.key === clusterKey ? null :
+                      { key: clusterKey, pds: top.pds, dids: top.dids, x: mousePos.x, y: mousePos.y }
+                    );
+                  } : undefined}
                 >
                   <circle
+                    style={isHighlighted && selectedLang && topPdsByCluster.has(clusterKey) ? { cursor: "pointer" } : undefined}
                     r={r}
                     fill={dimmed ? "#1e3a5f" : isHighlighted ? "#f59e0b" : "#3b82f6"}
                     fillOpacity={dimmed ? 0.25 : 0.75}
@@ -147,6 +171,15 @@ export function WorldMap({
           style={{ left: mousePos.x + 12, top: mousePos.y - 28 }}
         >
           {hovered}
+        </div>
+      )}
+      {pinnedCluster && (
+        <div
+          className="absolute z-10 bg-gray-900 border border-amber-600/60 rounded px-2.5 py-1.5 text-xs text-gray-200 font-mono whitespace-nowrap shadow-lg"
+          style={{ left: pinnedCluster.x + 12, top: pinnedCluster.y - 40 }}
+        >
+          <span className="text-amber-400">{pinnedCluster.pds}</span>
+          <span className="text-gray-500 ml-1.5">{pinnedCluster.dids.toLocaleString()} {selectedLang} speakers</span>
         </div>
       )}
     </div>

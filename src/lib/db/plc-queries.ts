@@ -53,11 +53,16 @@ function junkPdsFilter(col = "pds_url") {
     AND ${col} NOT LIKE '%10.0.%'
     AND ${col} NOT LIKE '%172.16.%'
     AND (${col} LIKE 'http://%' OR ${col} LIKE 'https://%')
+    AND INSTR(SUBSTR(${col}, INSTR(${col}, '://')+3), '.') > 0
+    AND ${col} NOT LIKE '%ngrok%'
+    AND ${col} NOT LIKE '%.surge.sh%'
+    AND ${col} NOT LIKE '%plc.surge.sh%'
     AND ${col} NOT LIKE '%.uwu%'
     AND ${col} NOT LIKE '%uwu.%'
     AND ${col} NOT LIKE '%.test'
     AND ${col} NOT LIKE '%.test/%'
     AND ${col} NOT LIKE '%.test:%'
+    AND ${col} NOT LIKE '%//example.%'
     AND ${col} NOT LIKE '%.example'
     AND ${col} NOT LIKE '%.example/%'
     AND ${col} NOT LIKE '%.example:%'
@@ -413,21 +418,36 @@ export interface PdsAgeRow {
   total_accounts: number;
 }
 
-// First week with any repo-backed account per PDS (from active_creation_weekly, which is
-// derived from did_in_repo JOIN plc_account_creations — repo-backed only, no spam).
+// First seen date per PDS in the PLC directory: earliest of first account creation week OR first
+// migration arrival. Uses plc_creation_weekly (pre-aggregated) to avoid scanning 86M-row table.
 // Collapses bsky shards. Excludes junk and pds.trump.com. Requires ≥ 10 accounts.
 export function getPdsAgeData(): PdsAgeRow[] {
   const db = getPlcDb();
   return db.prepare(`
+    WITH
+      creation_first AS (
+        SELECT
+          CASE WHEN pds_url LIKE '%bsky.network' OR pds_url = 'https://bsky.social'
+               THEN 'bsky.network' ELSE pds_url END AS pds_url,
+          MIN(week) AS first_seen,
+          SUM(count) AS total_accounts
+        FROM plc_creation_weekly
+        WHERE ${JUNK_PDS_FILTER} AND pds_url != '${TRUMP_PDS}'
+        GROUP BY 1
+      ),
+      migration_first AS (
+        SELECT to_pds AS pds_url, MIN(migrated_at) AS first_seen
+        FROM plc_migrations
+        WHERE ${junkPdsFilter('to_pds')} AND to_pds != '${TRUMP_PDS}'
+        GROUP BY to_pds
+      )
     SELECT
-      CASE WHEN pds_url LIKE '%bsky.network' OR pds_url = 'https://bsky.social'
-           THEN 'bsky.network' ELSE pds_url END AS pds_url,
-      MIN(week) AS first_week,
-      SUM(count) AS total_accounts
-    FROM active_creation_weekly
-    WHERE ${JUNK_PDS_FILTER} AND pds_url != '${TRUMP_PDS}'
-    GROUP BY 1
-    HAVING total_accounts >= 10
+      c.pds_url,
+      date(MIN(c.first_seen, COALESCE(m.first_seen, c.first_seen))) AS first_week,
+      c.total_accounts
+    FROM creation_first c
+    LEFT JOIN migration_first m ON c.pds_url = m.pds_url
+    WHERE c.total_accounts >= 10
     ORDER BY first_week
   `).all() as PdsAgeRow[];
 }

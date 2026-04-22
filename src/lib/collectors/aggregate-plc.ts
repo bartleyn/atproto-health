@@ -235,12 +235,7 @@ export function aggregateLangs() {
 
       INSERT INTO pds_lang_summary (pds_url, lang, dids, post_count)
       SELECT
-        CASE
-          WHEN RTRIM(p.pds_url, '/') LIKE '%bsky.network'
-            OR RTRIM(p.pds_url, '/') = 'https://bsky.social'
-          THEN 'bsky.network'
-          ELSE RTRIM(p.pds_url, '/')
-        END AS pds_url,
+        RTRIM(p.pds_url, '/') AS pds_url,
         substr(dl.lang, 1, instr(dl.lang || '-', '-') - 1) AS lang,
         COUNT(DISTINCT dl.did) AS dids,
         SUM(dl.post_count) AS post_count
@@ -248,7 +243,7 @@ export function aggregateLangs() {
       JOIN plc_did_pds p ON dl.did = p.did
       WHERE dl.lang != ''
       GROUP BY 1, 2
-      HAVING dids >= 2
+      HAVING dids >= 2;
     `));
   } finally {
     db.exec(`DETACH DATABASE activity`);

@@ -43,19 +43,25 @@ export default async function Home({
 
   const lastScanTime = getLastScanTime();
   const langRows = getPdsLangSummary();
-  // bsky lang totals keyed by lang — used by InfraSection to subtract bsky from totals when toggle is off.
-  const bskyLangTotals = new Map(
-    langRows.filter(r => r.pds_url === "bsky.network").map(r => [r.lang, r.dids])
-  );
+  // bsky lang totals keyed by lang — sum across all individual shards.
+  // Used by InfraSection to subtract bsky from totals when the bsky toggle is off.
+  const bskyLangTotals = new Map<string, number>();
+  for (const r of langRows) {
+    if (isBskyUrl(r.pds_url)) {
+      bskyLangTotals.set(r.lang, (bskyLangTotals.get(r.lang) ?? 0) + r.dids);
+    }
+  }
   const langLocations: PdsLangLocation[] = langRows.flatMap(row => {
+    // Legacy collapsed entry (pre-re-aggregation): distribute evenly across geolocated bsky shards.
+    // After re-running aggregate:plc, this branch is dead — individual shard rows take over.
     if (row.pds_url === "bsky.network") {
-      // dids=1 per shard so highlighted cluster size reflects shard count (consistent with provider mode).
-      return bskyProviderLocs
-        .filter(p => p.city !== null)
-        .map(p => ({ url: p.url, city: p.city, country: p.country, lang: row.lang, dids: 1 }));
+      const geoShards = bskyProviderLocs.filter(p => p.city !== null);
+      if (geoShards.length === 0) return [];
+      const perShard = Math.round(row.dids / geoShards.length);
+      return geoShards.map(p => ({ url: p.url, city: p.city!, country: p.country, lang: row.lang, dids: perShard }));
     }
     const geo = geoByUrl.get(normalizeUrl(row.pds_url));
-    if (!geo) return [];
+    if (!geo?.city) return [];
     return [{ url: row.pds_url, city: geo.city, country: geo.country, lang: row.lang, dids: row.dids }];
   });
   const topLangs = getTopLangs(25);

@@ -43,10 +43,13 @@ export default async function Home({
 
   const lastScanTime = getLastScanTime();
   const langRows = getPdsLangSummary();
+  // bsky lang totals keyed by lang — used by InfraSection to subtract bsky from totals when toggle is off.
+  const bskyLangTotals = new Map(
+    langRows.filter(r => r.pds_url === "bsky.network").map(r => [r.lang, r.dids])
+  );
   const langLocations: PdsLangLocation[] = langRows.flatMap(row => {
     if (row.pds_url === "bsky.network") {
-      // Distribute bsky.network across all bsky cluster locations for map highlighting.
-      // dids=1 per server so the cluster key accumulates per-city PDS count (same as provider mode).
+      // dids=1 per shard so highlighted cluster size reflects shard count (consistent with provider mode).
       return bskyProviderLocs
         .filter(p => p.city !== null)
         .map(p => ({ url: p.url, city: p.city, country: p.country, lang: row.lang, dids: 1 }));
@@ -176,6 +179,7 @@ export default async function Home({
             providerLocations={providerLocations}
             langLocations={langLocations}
             topLangs={topLangs}
+            bskyLangTotals={bskyLangTotals}
           />
         </div>
       )}

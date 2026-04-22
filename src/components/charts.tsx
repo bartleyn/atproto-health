@@ -451,9 +451,10 @@ interface InfraSectionProps {
   providerLocations: PdsProviderLocation[];
   langLocations?: PdsLangLocation[];
   topLangs?: LangTotal[];
+  bskyLangTotals?: Map<string, number>;
 }
 
-export function InfraSection({ providers, cdnBreakdown, locations, providerLocations, langLocations, topLangs }: InfraSectionProps) {
+export function InfraSection({ providers, cdnBreakdown, locations, providerLocations, langLocations, topLangs, bskyLangTotals }: InfraSectionProps) {
   const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
   const [selectedLang, setSelectedLang] = useState<string | null>(null);
   const [insetTab, setInsetTab] = useState<"provider" | "lang">("provider");
@@ -473,27 +474,18 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
 
   const isBskyUrl = (u: string) => /bsky\.network|bsky\.social/.test(u);
 
-  // Filter lang data based on bsky toggle
+  // Filter lang locations for map highlighting based on bsky toggle.
   const activeLangLocations = langLocations
     ? showBskyLang ? langLocations : langLocations.filter(l => !isBskyUrl(l.url))
     : undefined;
-  // Derive per-language totals from the active (filtered) langLocations for the donut.
-  // This correctly excludes bsky counts when the toggle is off.
-  const langTotalsFromLocs = new Map<string, number>();
-  if (activeLangLocations) {
-    for (const l of activeLangLocations) {
-      langTotalsFromLocs.set(l.lang, (langTotalsFromLocs.get(l.lang) ?? 0) + l.dids);
-    }
-  }
-  // Merge with topLangs to preserve ordering and include langs not in locales.
-  // For bsky rows in topLangs, override total_dids with filtered value.
+  // Compute per-language totals: full count when bsky on, subtract known bsky count when off.
   const filteredTopLangs = topLangs
     ? topLangs
         .map(r => ({
           ...r,
           total_dids: showBskyLang
             ? r.total_dids
-            : (langTotalsFromLocs.get(r.lang) ?? 0),
+            : r.total_dids - (bskyLangTotals?.get(r.lang) ?? 0),
         }))
         .filter(r => r.total_dids > 0)
         .sort((a, b) => b.total_dids - a.total_dids)
@@ -502,6 +494,14 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
   const langMappedCount = selectedLang && activeLangLocations
     ? new Set(activeLangLocations.filter(l => l.lang === selectedLang).map(l => l.url)).size
     : 0;
+
+  const langHighlightedCityCount = selectedLang && activeLangLocations
+    ? new Set(
+        activeLangLocations
+          .filter(l => l.lang === selectedLang && l.city && l.country)
+          .map(l => `${l.city}|${l.country}`)
+      ).size
+    : null;
 
   const hasLangData = filteredTopLangs && filteredTopLangs.length > 0;
 
@@ -546,7 +546,10 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
         )}
       </div>
       <p className="text-xs text-gray-500 mb-3">
-        {locations.length.toLocaleString()} cities · dot size scales with PDS count · {subLabel}
+        {langHighlightedCityCount !== null
+          ? `${langHighlightedCityCount} of ${locations.length.toLocaleString()} cities`
+          : `${locations.length.toLocaleString()} cities`
+        } · dot size scales with PDS count · {subLabel}
       </p>
 
       {/* Map with inset panel (desktop) */}

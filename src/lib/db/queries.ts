@@ -18,39 +18,40 @@ function ensureMergedView() {
   db.exec(`
     CREATE TEMPORARY VIEW IF NOT EXISTS pds_latest AS
     SELECT
-      p.id as pds_id,
-      p.url,
+      -- Normalize URL: strip trailing slash so duplicate entries (with/without /)
+      -- collapse into one row. MAX picks the best non-null value across duplicates.
+      RTRIM(p.url, '/') as url,
 
       -- directory data: from the most recent run (always collected)
-      dir.version,
-      dir.invite_code_required,
-      dir.is_online,
-      dir.error_at,
+      MAX(dir.version) as version,
+      MAX(dir.invite_code_required) as invite_code_required,
+      MAX(dir.is_online) as is_online,
+      MAX(dir.error_at) as error_at,
 
       -- user data: latest run that has it
-      usr.user_count_total,
-      usr.user_count_active,
-      usr.did,
-      usr.available_domains,
-      usr.contact,
-      usr.links,
+      MAX(usr.user_count_total) as user_count_total,
+      MAX(usr.user_count_active) as user_count_active,
+      MAX(usr.did) as did,
+      MAX(usr.available_domains) as available_domains,
+      MAX(usr.contact) as contact,
+      MAX(usr.links) as links,
 
       -- geo data: latest run that has it
-      geo.ip_address,
-      geo.country,
-      geo.country_code,
-      geo.region,
-      geo.city,
-      geo.latitude,
-      geo.longitude,
-      geo.isp,
-      geo.org,
-      geo.as_number,
-      geo.hosting_provider,
+      MAX(geo.ip_address) as ip_address,
+      MAX(geo.country) as country,
+      MAX(geo.country_code) as country_code,
+      MAX(geo.region) as region,
+      MAX(geo.city) as city,
+      MAX(geo.latitude) as latitude,
+      MAX(geo.longitude) as longitude,
+      MAX(geo.isp) as isp,
+      MAX(geo.org) as org,
+      MAX(geo.as_number) as as_number,
+      MAX(geo.hosting_provider) as hosting_provider,
 
-      dir.run_id as dir_run_id,
-      usr.run_id as usr_run_id,
-      geo.run_id as geo_run_id
+      MAX(dir.run_id) as dir_run_id,
+      MAX(usr.run_id) as usr_run_id,
+      MAX(geo.run_id) as geo_run_id
 
     FROM pds_instances p
 
@@ -79,6 +80,7 @@ function ensureMergedView() {
     )
 
     WHERE dir.id IS NOT NULL
+    GROUP BY RTRIM(p.url, '/')
   `);
   db.exec(`
     CREATE TEMPORARY VIEW IF NOT EXISTS pds_community AS

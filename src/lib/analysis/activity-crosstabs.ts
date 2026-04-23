@@ -295,7 +295,82 @@ const actionRatesByCohort = activityDb.prepare(`
 
 report(`Action Rates by Cohort`, `action_rates_by_cohort_${daysBack}d.csv`, actionRatesByCohort);
 
-// ── 8. pds.trump.com weekly DID registrations (cumulative) ───────────────────
+// ── 8. Non-active account status by cohort ───────────────────────────────────
+
+const nonActiveByCohort = plcDb.prepare(`
+  WITH cohort_sizes AS (
+    SELECT
+      CASE
+        WHEN p.created_at >= date('now', '-7 days') THEN '0. last 7 days'
+        WHEN p.created_at < '2023-01-01'            THEN '1. pre-2023'
+        WHEN p.created_at < '2024-01-01'            THEN '2. 2023'
+        WHEN p.created_at < '2024-11-01'            THEN '3. 2024 pre-Nov'
+        WHEN p.created_at < '2025-01-01'            THEN '4. 2024 Nov-Dec (exodus)'
+        WHEN p.created_at < '2025-07-01'            THEN '5. 2025 H1'
+        WHEN p.created_at < '2026-01-01'            THEN '6. 2025 H2'
+        ELSE                                             '7. 2026'
+      END AS age_bucket,
+      COUNT(*) AS cohort_size
+    FROM did_in_repo dir
+    JOIN plc_account_creations p ON dir.did = p.did
+    LEFT JOIN did_repo_status s ON dir.did = s.did
+    WHERE s.did IS NULL
+    GROUP BY age_bucket
+  ),
+  status_counts AS (
+    SELECT
+      CASE
+        WHEN p.created_at >= date('now', '-7 days') THEN '0. last 7 days'
+        WHEN p.created_at < '2023-01-01'            THEN '1. pre-2023'
+        WHEN p.created_at < '2024-01-01'            THEN '2. 2023'
+        WHEN p.created_at < '2024-11-01'            THEN '3. 2024 pre-Nov'
+        WHEN p.created_at < '2025-01-01'            THEN '4. 2024 Nov-Dec (exodus)'
+        WHEN p.created_at < '2025-07-01'            THEN '5. 2025 H1'
+        WHEN p.created_at < '2026-01-01'            THEN '6. 2025 H2'
+        ELSE                                             '7. 2026'
+      END AS age_bucket,
+      SUM(CASE WHEN s.status = 'deactivated' THEN 1 ELSE 0 END) AS deactivated,
+      SUM(CASE WHEN s.status IN ('takendown','takedown') THEN 1 ELSE 0 END) AS takendown,
+      COUNT(*) AS total_non_active
+    FROM did_repo_status s
+    JOIN plc_account_creations p ON s.did = p.did
+    GROUP BY age_bucket
+  )
+  SELECT
+    c.age_bucket,
+    c.cohort_size,
+    COALESCE(sc.deactivated, 0)                                                    AS deactivated_n,
+    ROUND(100.0 * COALESCE(sc.deactivated, 0)   / c.cohort_size, 2)               AS pct_deactivated,
+    COALESCE(sc.takendown, 0)                                                      AS takendown_n,
+    ROUND(100.0 * COALESCE(sc.takendown, 0)     / c.cohort_size, 2)               AS pct_takendown,
+    COALESCE(sc.total_non_active, 0)                                               AS total_non_active_n,
+    ROUND(100.0 * COALESCE(sc.total_non_active, 0) / c.cohort_size, 2)            AS pct_non_active
+  FROM cohort_sizes c
+  LEFT JOIN status_counts sc USING (age_bucket)
+  ORDER BY c.age_bucket
+`).all() as Record<string, unknown>[];
+
+report("Non-Active Account Status by Cohort", `non_active_by_cohort.csv`, nonActiveByCohort);
+
+// ── 9. Account-level event trends ────────────────────────────────────────────
+
+const accountEventTrends = activityDb.prepare(`
+  SELECT
+    date,
+    SUM(CASE WHEN event_type = 'account:deleted'     THEN count ELSE 0 END) AS deleted,
+    SUM(CASE WHEN event_type = 'account:deactivated' THEN count ELSE 0 END) AS deactivated,
+    SUM(CASE WHEN event_type = 'account:reactivated' THEN count ELSE 0 END) AS reactivated,
+    SUM(CASE WHEN event_type = 'account:takendown'   THEN count ELSE 0 END) AS takendown
+  FROM delete_events_daily
+  WHERE event_type IN ('account:deleted','account:deactivated','account:reactivated','account:takendown')
+    AND date >= date('now', '-' || ? || ' days')
+  GROUP BY date
+  ORDER BY date
+`).all(daysBack) as Record<string, unknown>[];
+
+report(`Account Event Trends`, `account_event_trends_${daysBack}d.csv`, accountEventTrends);
+
+// ── 10. pds.trump.com weekly DID registrations (cumulative) ─────────────────
 
 const trumpWeekly = plcDb.prepare(`
   SELECT

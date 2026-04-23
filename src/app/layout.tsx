@@ -18,13 +18,13 @@ export default function RootLayout({
         <nav className="px-8 py-3">
           <div className="max-w-6xl mx-auto flex justify-center gap-8 text-sm">
             <Link href="/" className="text-gray-400 underline hover:text-gray-100 transition-colors">
-              PDS Network
+              PDS Geography
             </Link>
             <Link href="/migrations" className="text-gray-400 underline hover:text-gray-100 transition-colors">
               Migrations
             </Link>
             <Link href="/longevity" className="text-gray-400 underline hover:text-gray-100 transition-colors">
-              Longevity
+              PDS & Account Ages
             </Link>
           </div>
         </nav>

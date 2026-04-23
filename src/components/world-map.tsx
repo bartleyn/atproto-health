@@ -134,6 +134,8 @@ export function WorldMap({
                     else if (loc.country) parts.push(loc.country);
                     if (selectedLang) {
                       parts.push(`${sizeCount.toLocaleString()} ${selectedLang} speaker${sizeCount !== 1 ? "s" : ""}`);
+                      const top = topPdsByCluster.get(clusterKey);
+                      if (top) parts.push(`${top.pds} (${top.dids.toLocaleString()})`);
                     } else {
                       parts.push(`${sizeCount} PDS${sizeCount !== 1 ? "es" : ""}`);
                     }

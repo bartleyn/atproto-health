@@ -1,8 +1,6 @@
 export const dynamic = "force-dynamic";
 
-import Link from "next/link";
 import {
-  getActiveCreationTimeseriesWeekly,
   getMigrationFlows,
   getMigrationWeeklyBreakdown,
   getMigrationTrajectories,
@@ -11,7 +9,7 @@ import {
   getScannedPdsCount,
 } from "@/lib/db/plc-queries";
 import { getOverviewStats } from "@/lib/db/queries";
-import { CreationChartsSection, MigrationChartsSection, MultiStepSankeyChart } from "@/components/charts";
+import { MigrationChartsSection, MultiStepSankeyChart } from "@/components/charts";
 
 function StatCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
@@ -23,19 +21,11 @@ function StatCard({ label, value, sub }: { label: string; value: string; sub?: s
   );
 }
 
-export default async function MigrationsPage({
-  searchParams,
-}: {
-  searchParams: Promise<{ bsky?: string }>;
-}) {
-  const { bsky } = await searchParams;
-  const hideBsky = bsky === "0";
-
-  const activeCreations = getActiveCreationTimeseriesWeekly(hideBsky);
+export default async function MigrationsPage() {
   const flows = getMigrationFlows();
   const weeklyMigrations = getMigrationWeeklyBreakdown();
   const trajectories = getMigrationTrajectories();
-  const stats = getEcosystemStats(hideBsky);
+  const stats = getEcosystemStats();
   const scanStats = getOverviewStats();
   const scannedPdsCount = getScannedPdsCount();
   const timestamp = getPlcDataTimestamp();
@@ -103,7 +93,7 @@ export default async function MigrationsPage({
         {/* Migration Flows Sankey + weekly bar */}
         <section>
           <h2 className="text-xl font-semibold text-gray-200 mb-1">
-            Migration Flows
+            Where do users end up?
           </h2>
           <p className="text-xs text-gray-500 mb-4">
             Where accounts ultimately landed — collapsed origin → current PDS. Excludes bsky.network destinations.
@@ -115,41 +105,13 @@ export default async function MigrationsPage({
         {/* Migration Trajectories */}
         <section>
           <h2 className="text-xl font-semibold text-gray-200 mb-1">
-            Where do users end up?
+            Migration Flows
           </h2>
           <p className="text-xs text-gray-500 mb-4">
             Actual per-hop migration steps — each column is one PDS hop. bsky.network shards collapsed.
             Click a node to highlight all paths through it in both directions.
           </p>
           <MultiStepSankeyChart data={trajectories} height={500} />
-        </section>
-
-        {/* Account Creations */}
-        <section>
-          <div className="flex items-center justify-between mb-1">
-            <h2 className="text-xl font-semibold text-gray-200">
-              Weekly Account Creations by PDS
-            </h2>
-            <Link
-              href={`/migrations?bsky=${hideBsky ? "1" : "0"}`}
-              className="text-xs px-3 py-1 rounded border border-gray-700 text-gray-400 hover:text-gray-200 hover:border-gray-500 transition-colors"
-            >
-              {hideBsky ? "Show bsky.network" : "Hide bsky.network"}
-            </Link>
-          </div>
-          <p className="text-xs text-gray-500 mb-4">
-            Repo-backed accounts only. Normalized to 100% — hover for actual counts. Top 10 PDSes by total volume.
-            {hideBsky && <span className="text-blue-500 ml-2">bsky.network hidden.</span>}
-          </p>
-          {activeCreations.length === 0 ? (
-            <p className="text-gray-500">
-              No data yet — run{" "}
-              <code className="text-gray-300">npm run collect:plc</code> then{" "}
-              <code className="text-gray-300">npm run aggregate:plc</code>.
-            </p>
-          ) : (
-            <CreationChartsSection repoData={activeCreations} />
-          )}
         </section>
 
       </div>

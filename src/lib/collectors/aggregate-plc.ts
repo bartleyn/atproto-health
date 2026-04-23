@@ -217,10 +217,11 @@ export function aggregatePlc() {
 /**
  * Aggregate per-PDS language breakdown from jetstream-activity.db.
  *
- * Joins did_langs (activity DB) with plc_did_pds (plc DB) to get the current
- * PDS for each DID. BCP-47 subtags are collapsed to base tag (en-US → en,
- * zh-TW → zh). bsky shards (*.bsky.network, bsky.social) are collapsed to
- * 'bsky.network'. Fully recomputed each run (DELETE + INSERT).
+ * Joins did_langs (activity DB) with did_in_repo (plc DB) to get the current
+ * PDS for each DID. did_in_repo is populated by listRepos scans so bsky shards
+ * appear as individual URLs (https://morel.us-east.host.bsky.network etc.).
+ * BCP-47 subtags are collapsed to base tag (en-US → en, zh-TW → zh).
+ * Fully recomputed each run (DELETE + INSERT).
  */
 export function aggregateLangs() {
   const db = getPlcDb();
@@ -240,7 +241,7 @@ export function aggregateLangs() {
         COUNT(DISTINCT dl.did) AS dids,
         SUM(dl.post_count) AS post_count
       FROM activity.did_langs dl
-      JOIN plc_did_pds p ON dl.did = p.did
+      JOIN did_in_repo p ON dl.did = p.did
       WHERE dl.lang != ''
       GROUP BY 1, 2
       HAVING dids >= 2;

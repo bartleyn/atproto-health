@@ -52,13 +52,18 @@ export default async function Home({
     }
   }
   const langLocations: PdsLangLocation[] = langRows.flatMap(row => {
-    // Legacy collapsed entry (pre-re-aggregation): distribute evenly across geolocated bsky shards.
+    // Legacy collapsed entry (pre-re-aggregation): distribute evenly across unique bsky cities.
+    // Distributing per-city (not per-shard) avoids inflating cities that have many shards.
     // After re-running aggregate:plc, this branch is dead — individual shard rows take over.
     if (row.pds_url === "bsky.network") {
       const geoShards = bskyProviderLocs.filter(p => p.city !== null);
       if (geoShards.length === 0) return [];
-      const perShard = Math.round(row.dids / geoShards.length);
-      return geoShards.map(p => ({ url: p.url, city: p.city!, country: p.country, lang: row.lang, dids: perShard }));
+      // One representative shard per city (first encountered)
+      const byCity = new Map<string, typeof geoShards[number]>();
+      for (const p of geoShards) { if (!byCity.has(p.city!)) byCity.set(p.city!, p); }
+      const cities = [...byCity.values()];
+      const perCity = Math.round(row.dids / cities.length);
+      return cities.map(p => ({ url: p.url, city: p.city!, country: p.country, lang: row.lang, dids: perCity }));
     }
     const geo = geoByUrl.get(normalizeUrl(row.pds_url));
     if (!geo?.city) return [];

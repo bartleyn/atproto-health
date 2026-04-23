@@ -662,7 +662,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
                   {showBskyLang ? "bsky on" : "bsky off"}
                 </button>
               </div>
-              <p className="text-xs text-gray-600 mb-2"># = active speakers</p>
+              <p className="text-xs text-gray-600 mb-2"># = active speakers (from jetstream data)</p>
               {(() => {
                 const langDonutData = filteredTopLangs!.slice(0, 12).map(r => ({ name: r.lang, value: r.total_dids }));
                 return (
@@ -1251,7 +1251,7 @@ export function CreationChartsSection({ repoData }: CreationChartsSectionProps) 
   return (
     <div className="space-y-8">
       <div>
-        <p className="text-xs text-gray-500 mb-2">Repo-backed accounts — DIDs with an actual repository (excludes ghosts, morel provisioning artifacts)</p>
+        <p className="text-xs text-gray-500 mb-2">Repo-backed accounts — DIDs with an actual repository (e.g., morel ghosts, pds.trump.com accounts )</p>
         <StackedAreaChart
           data={repoData}
           selectedPds={selectedPds}

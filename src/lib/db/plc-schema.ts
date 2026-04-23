@@ -174,6 +174,8 @@ function migrate(db: Database.Database) {
       ON pds_repo_status_snapshots(snapshot_date);
     CREATE INDEX IF NOT EXISTS idx_pds_repo_status_snapshots_pds
       ON pds_repo_status_snapshots(pds_url);
+    CREATE INDEX IF NOT EXISTS idx_pds_repo_status_snapshots_pds_date
+      ON pds_repo_status_snapshots(pds_url, snapshot_date);
 
     CREATE TABLE IF NOT EXISTS skywatch_labels (
       did        TEXT NOT NULL,
@@ -235,9 +237,10 @@ function migrate(db: Database.Database) {
       PRIMARY KEY (source, target)
     );
 
-    -- Per-PDS language breakdown derived from jetstream-activity.db did_langs JOIN plc_did_pds.
+    -- Per-PDS language breakdown derived from jetstream-activity.db did_langs JOIN did_in_repo.
+    -- did_in_repo has per-shard bsky URLs from listRepos scans (not collapsed).
     -- BCP-47 subtags collapsed to base tag (en-US → en, zh-TW → zh).
-    -- bsky shards collapsed to 'bsky.network'. Fully recomputed by aggregate-plc.ts.
+    -- Fully recomputed by aggregate-plc.ts.
     CREATE TABLE IF NOT EXISTS pds_lang_summary (
       pds_url    TEXT NOT NULL,
       lang       TEXT NOT NULL,

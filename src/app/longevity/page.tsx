@@ -1,30 +1,8 @@
 export const dynamic = "force-dynamic";
 
-import { getPdsAgeData, getAccountAgeHistogram, getPlcDataTimestamp } from "@/lib/db/plc-queries";
+import { getPdsAgeData, getAccountCohortCounts, getPlcDataTimestamp } from "@/lib/db/plc-queries";
 import { PdsAgeChart } from "@/components/charts";
 import { SimpleBarChart } from "@/components/charts";
-
-// Age-bucket thresholds in days from today
-const AGE_BUCKETS: { label: string; maxDays: number }[] = [
-  { label: "< 3 months",  maxDays: 90  },
-  { label: "3–6 months",  maxDays: 180 },
-  { label: "6–12 months", maxDays: 365 },
-  { label: "1–2 years",   maxDays: 730 },
-  { label: "2–3 years",   maxDays: 1095 },
-  { label: "3–4 years",   maxDays: 1460 },
-  { label: "4+ years",    maxDays: Infinity },
-];
-
-function computeAgeBuckets(rows: { month: string; count: number }[]) {
-  const now = Date.now();
-  const buckets = AGE_BUCKETS.map((b) => ({ name: b.label, value: 0 }));
-  for (const row of rows) {
-    const ageDays = (now - new Date(row.month).getTime()) / 86_400_000;
-    const idx = AGE_BUCKETS.findIndex((b) => ageDays <= b.maxDays);
-    if (idx >= 0) buckets[idx].value += row.count;
-  }
-  return buckets;
-}
 
 function StatCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
@@ -48,11 +26,11 @@ function ChartCard({ title, subtitle, children }: { title: string; subtitle?: st
 
 export default async function LongevityPage() {
   const pdsAgeData    = getPdsAgeData();
-  const monthlyData   = getAccountAgeHistogram();
+  const cohortData    = getAccountCohortCounts();
   const timestamp     = getPlcDataTimestamp();
 
-  const ageBuckets    = computeAgeBuckets(monthlyData);
-  const totalAccounts = ageBuckets.reduce((s, b) => s + b.value, 0);
+  const totalAccounts = cohortData.reduce((s, r) => s + r.count, 0);
+  const cohortBuckets = cohortData.map(r => ({ name: r.cohort, value: r.count }));
 
   // Summary stats
   const indieOnly = pdsAgeData.filter((r) => r.pds_url !== "bsky.network");
@@ -109,8 +87,8 @@ export default async function LongevityPage() {
         <section>
           <h2 className="text-xl font-semibold text-gray-200 mb-1">When Did PDSes Launch?</h2>
           <p className="text-xs text-gray-500 mb-4">
-            Each point is a PDS. X = first repo-backed account (proxy for launch). Y = total repo-backed accounts (log scale).
-            Colored by launch era. Excludes pds.trump.com and PDSes with &lt; 10 repo-backed accounts.
+            Each point is a PDS. X = first repo-backed account (proxy for launch). Y = total repos (log scale).
+            Colored by launch era. Excludes pds.trump.com and junk PDSes.
           </p>
           <ChartCard title="PDS Age vs. Size">
             <PdsAgeChart data={pdsAgeData} />
@@ -119,55 +97,22 @@ export default async function LongevityPage() {
 
         {/* Account age histogram */}
         <section>
-          <h2 className="text-xl font-semibold text-gray-200 mb-1">How Old Are Accounts?</h2>
+          <h2 className="text-xl font-semibold text-gray-200 mb-1">When Were Accounts Created?</h2>
           <p className="text-xs text-gray-500 mb-4">
-            Age distribution of {totalAccounts.toLocaleString()} repo-backed accounts (excludes pds.trump.com and spam PDSes).
-            Age computed relative to today from the week the account was created.
+            {totalAccounts.toLocaleString()} repo-backed accounts grouped by creation era (excludes pds.trump.com and spam PDSes).
           </p>
           <ChartCard
             title="Account Age Distribution"
-            subtitle="Buckets by time since account creation"
+            subtitle="Accounts grouped by creation era"
           >
             <SimpleBarChart
-              data={ageBuckets}
+              data={cohortBuckets}
               color="#8b5cf6"
               layout="horizontal"
-              xLabel="Account age"
+              xLabel="Creation cohort"
               yLabel="Accounts"
             />
           </ChartCard>
-        </section>
-
-        {/* PDS age table */}
-        <section>
-          <h2 className="text-xl font-semibold text-gray-200 mb-1">Independent PDSes by Age</h2>
-          <p className="text-xs text-gray-500 mb-4">
-            Sorted oldest to newest. First account date is a proxy for PDS launch.
-          </p>
-          <div className="overflow-x-auto rounded-lg border border-gray-800">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-gray-800 text-gray-400 text-left">
-                  <th className="px-4 py-3 font-medium">#</th>
-                  <th className="px-4 py-3 font-medium">PDS</th>
-                  <th className="px-4 py-3 font-medium">First repo-backed account</th>
-                  <th className="px-4 py-3 font-medium text-right">Total accounts</th>
-                </tr>
-              </thead>
-              <tbody>
-                {indieOnly.slice(0, 50).map((row, i) => (
-                  <tr key={row.pds_url} className="border-b border-gray-800/50 hover:bg-gray-900/50">
-                    <td className="px-4 py-2.5 text-gray-500 tabular-nums">{i + 1}</td>
-                    <td className="px-4 py-2.5 font-mono text-xs">
-                      {row.pds_url.replace(/^https?:\/\//, "")}
-                    </td>
-                    <td className="px-4 py-2.5 text-gray-400">{row.first_week}</td>
-                    <td className="px-4 py-2.5 text-right tabular-nums">{row.total_accounts.toLocaleString()}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
         </section>
 
       </div>

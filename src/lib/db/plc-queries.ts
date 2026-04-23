@@ -425,48 +425,69 @@ export function getPdsAgeData(): PdsAgeRow[] {
   const db = getPlcDb();
   return db.prepare(`
     WITH
+      latest_scan AS (
+        SELECT RTRIM(pds_url, '/') AS pds_url, MAX(active) AS total_accounts
+        FROM pds_repo_status_snapshots s
+        WHERE snapshot_date = (
+          SELECT MAX(s2.snapshot_date) FROM pds_repo_status_snapshots s2
+          WHERE s2.pds_url = s.pds_url
+        )
+        GROUP BY RTRIM(pds_url, '/')
+      ),
+      known_mirrors AS (
+        SELECT 'https://dev.blacksky.app' AS pds_url
+        UNION ALL SELECT 'https://cryptoanarchy.network'
+      ),
       creation_first AS (
-        SELECT
-          CASE WHEN pds_url LIKE '%bsky.network' OR pds_url = 'https://bsky.social'
-               THEN 'bsky.network' ELSE pds_url END AS pds_url,
-          MIN(week) AS first_seen,
-          SUM(count) AS total_accounts
+        SELECT RTRIM(pds_url, '/') AS pds_url, MIN(week) AS first_seen
         FROM plc_creation_weekly
         WHERE ${JUNK_PDS_FILTER} AND pds_url != '${TRUMP_PDS}'
-        GROUP BY 1
+          AND RTRIM(pds_url, '/') IN (SELECT pds_url FROM latest_scan)
+          AND RTRIM(pds_url, '/') NOT IN (SELECT pds_url FROM known_mirrors)
+        GROUP BY RTRIM(pds_url, '/')
       ),
       migration_first AS (
-        SELECT to_pds AS pds_url, MIN(migrated_at) AS first_seen
+        SELECT RTRIM(to_pds, '/') AS pds_url, MIN(migrated_at) AS first_seen
         FROM plc_migrations
         WHERE ${junkPdsFilter('to_pds')} AND to_pds != '${TRUMP_PDS}'
-        GROUP BY to_pds
+        GROUP BY RTRIM(to_pds, '/')
       )
     SELECT
       c.pds_url,
       date(MIN(c.first_seen, COALESCE(m.first_seen, c.first_seen))) AS first_week,
-      c.total_accounts
+      ls.total_accounts
     FROM creation_first c
+    JOIN latest_scan ls ON c.pds_url = ls.pds_url AND ls.total_accounts >= 5
     LEFT JOIN migration_first m ON c.pds_url = m.pds_url
-    WHERE c.total_accounts >= 10
     ORDER BY first_week
   `).all() as PdsAgeRow[];
 }
 
-export interface AccountAgeMonthRow {
-  month: string;  // YYYY-MM-DD (week date, aliased for compatibility with age-bucket logic)
+export interface AccountCohortRow {
+  cohort: string;
   count: number;
 }
 
-// Repo-backed account creations per week (active_creation_weekly). Age-bucket math done in JS.
-export function getAccountAgeHistogram(): AccountAgeMonthRow[] {
+// Repo-backed account creations bucketed by the same cohorts used in the analysis script.
+export function getAccountCohortCounts(): AccountCohortRow[] {
   const db = getPlcDb();
   return db.prepare(`
-    SELECT week AS month, SUM(count) AS count
+    SELECT
+      CASE
+        WHEN week < '2023-01-01' THEN 'pre-2023'
+        WHEN week < '2024-01-01' THEN '2023'
+        WHEN week < '2024-11-01' THEN '2024 (pre-Nov)'
+        WHEN week < '2025-01-01' THEN 'Nov–Dec 2024 (exodus)'
+        WHEN week < '2025-07-01' THEN '2025 H1'
+        WHEN week < '2026-01-01' THEN '2025 H2'
+        ELSE '2026+'
+      END AS cohort,
+      SUM(count) AS count
     FROM active_creation_weekly
     WHERE pds_url != '${TRUMP_PDS}'
-    GROUP BY week
-    ORDER BY week
-  `).all() as AccountAgeMonthRow[];
+    GROUP BY cohort
+    ORDER BY MIN(week)
+  `).all() as AccountCohortRow[];
 }
 
 // ── Language queries ────────────────────────────────────────────────────

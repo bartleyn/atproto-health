@@ -312,43 +312,6 @@ export default async function Home({
         </>
       )}
 
-      {/* Country breakdown table */}
-      <div className="mb-12">
-        <h2 className="text-lg font-semibold mb-1">All Countries</h2>
-        <p className="text-sm text-gray-500 mb-4">
-          PDS instances by country
-        </p>
-        <div className="overflow-x-auto rounded-lg border border-gray-800">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-gray-800 text-gray-400 text-left">
-                <th className="px-4 py-3 font-medium">Country</th>
-                <th className="px-4 py-3 font-medium text-right">PDSes</th>
-                <th className="px-4 py-3 font-medium text-right">% of Total</th>
-              </tr>
-            </thead>
-            <tbody>
-              {countries.map((c) => (
-                <tr
-                  key={c.countryCode}
-                  className="border-b border-gray-800/50 hover:bg-gray-900/50"
-                >
-                  <td className="px-4 py-2">
-                    {c.country}{" "}
-                    <span className="text-gray-500">{c.countryCode}</span>
-                  </td>
-                  <td className="px-4 py-2 text-right tabular-nums">
-                    {c.count}
-                  </td>
-                  <td className="px-4 py-2 text-right tabular-nums text-gray-400">
-                    {((c.count / stats.total) * 100).toFixed(1)}%
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
     </main>
   );
 }

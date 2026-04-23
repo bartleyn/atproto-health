@@ -70,22 +70,33 @@ export function SimpleBarChart({
   yLabel,
   logScale = false,
 }: BarChartProps) {
+  const fmtLog = (v: number) => {
+    if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(0)}M`;
+    if (v >= 1_000) return `${(v / 1_000).toFixed(0)}K`;
+    return `${v}`;
+  };
+
   if (layout === "horizontal") {
     return (
       <ResponsiveContainer width="100%" height={300}>
-        <BarChart data={data} margin={{ bottom: xLabel ? 24 : 0 }}>
+        <BarChart data={data} margin={{ bottom: xLabel ? 40 : 4, left: yLabel ? 20 : 0, right: 8 }}>
           <XAxis
             dataKey="name"
             tick={{ fill: "#9ca3af", fontSize: 12 }}
             axisLine={{ stroke: "#374151" }}
             tickLine={false}
-            label={xLabel ? { value: xLabel, position: "insideBottom", offset: -16, fill: "#6b7280", fontSize: 11 } : undefined}
+            label={xLabel ? { value: xLabel, position: "insideBottom", offset: -28, fill: "#6b7280", fontSize: 11 } : undefined}
           />
           <YAxis
+            scale={logScale ? "log" : "auto"}
+            domain={logScale ? [1, "auto"] : [0, "auto"]}
+            allowDataOverflow={logScale}
+            tickFormatter={logScale ? fmtLog : undefined}
             tick={{ fill: "#9ca3af", fontSize: 12 }}
             axisLine={{ stroke: "#374151" }}
             tickLine={false}
-            label={yLabel ? { value: yLabel, angle: -90, position: "insideLeft", offset: 10, fill: "#6b7280", fontSize: 11 } : undefined}
+            label={yLabel ? { value: yLabel, angle: -90, position: "insideLeft", dx: -12, fill: "#6b7280", fontSize: 11 } : undefined}
+            width={yLabel ? 60 : 40}
           />
           <Tooltip {...tooltipStyle} />
           <Bar dataKey="value" fill={color} radius={[4, 4, 0, 0]} />
@@ -93,12 +104,6 @@ export function SimpleBarChart({
       </ResponsiveContainer>
     );
   }
-
-  const fmtLog = (v: number) => {
-    if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(0)}M`;
-    if (v >= 1_000) return `${(v / 1_000).toFixed(0)}K`;
-    return `${v}`;
-  };
 
   return (
     <ResponsiveContainer width="100%" height={Math.max(300, data.length * 28)}>
@@ -1508,13 +1513,13 @@ export function MultiStepSankeyChart({ data, height = 480 }: MultiStepSankeyProp
 // ── PDS Age scatter chart ────────────────────────────────────────────────────
 
 const PDS_AGE_ERAS: { label: string; color: string; from: string; to: string }[] = [
-  { label: "Pre-2023",     color: "#6b7280", from: "0000-00", to: "2022-12" },
-  { label: "2023",         color: "#3b82f6", from: "2023-01", to: "2023-12" },
-  { label: "2024 pre-Nov", color: "#8b5cf6", from: "2024-01", to: "2024-10" },
-  { label: "2024 Nov–Dec", color: "#f59e0b", from: "2024-11", to: "2024-12" },
-  { label: "2025 H1",      color: "#10b981", from: "2025-01", to: "2025-06" },
-  { label: "2025 H2",      color: "#06b6d4", from: "2025-07", to: "2025-12" },
-  { label: "2026+",        color: "#ec4899", from: "2026-01", to: "9999-99" },
+  { label: "Pre-2023",     color: "#6b7280", from: "0000-00",    to: "2022-12-99" },
+  { label: "2023",         color: "#3b82f6", from: "2023-01",    to: "2023-12-99" },
+  { label: "2024 pre-Nov", color: "#8b5cf6", from: "2024-01",    to: "2024-10-99" },
+  { label: "2024 Nov–Dec", color: "#f59e0b", from: "2024-11",    to: "2024-12-99" },
+  { label: "2025 H1",      color: "#10b981", from: "2025-01",    to: "2025-06-99" },
+  { label: "2025 H2",      color: "#06b6d4", from: "2025-07",    to: "2025-12-99" },
+  { label: "2026+",        color: "#ec4899", from: "2026-01",    to: "9999-99-99" },
 ];
 
 function fmtAccounts(n: number) {
@@ -1524,13 +1529,13 @@ function fmtAccounts(n: number) {
 }
 
 export function PdsAgeChart({ data }: { data: PdsAgeRow[] }) {
-  type Point = { x: number; y: number; name: string; firstMonth: string; total: number };
+  type Point = { x: number; y: number; pds_url: string; first_week: string; total_accounts: number };
   const toPoint = (r: PdsAgeRow): Point => ({
     x: new Date(r.first_week).getTime(),
     y: r.total_accounts,
-    name: r.pds_url,
-    firstMonth: r.first_week,
-    total: r.total_accounts,
+    pds_url: r.pds_url,
+    first_week: r.first_week,
+    total_accounts: r.total_accounts,
   });
 
   const tickFmt = (ts: number) =>
@@ -1541,16 +1546,16 @@ export function PdsAgeChart({ data }: { data: PdsAgeRow[] }) {
     const d = payload[0].payload;
     return (
       <div style={{ ...tooltipStyle.contentStyle, padding: "8px 12px", fontSize: "0.8rem" }}>
-        <div className="font-mono text-gray-200 mb-0.5">{d.name.replace(/^https?:\/\//, "")}</div>
-        <div className="text-gray-400">First account: {d.firstMonth}</div>
-        <div className="text-gray-300">{d.total.toLocaleString()} accounts</div>
+        <div className="font-mono text-gray-200 mb-0.5">{d.pds_url.replace(/^https?:\/\//, "")}</div>
+        <div className="text-gray-400">First account: {d.first_week}</div>
+        <div className="text-gray-300">{d.total_accounts.toLocaleString()} active repos</div>
       </div>
     );
   };
 
   return (
     <ResponsiveContainer width="100%" height={420}>
-      <ScatterChart margin={{ top: 10, right: 20, bottom: 50, left: 70 }}>
+      <ScatterChart margin={{ top: 10, right: 20, bottom: 60, left: 80 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
         <XAxis
           dataKey="x"
@@ -1565,14 +1570,15 @@ export function PdsAgeChart({ data }: { data: PdsAgeRow[] }) {
           dataKey="y"
           type="number"
           scale="log"
-          domain={[10, "auto"]}
+          domain={[1, "auto"]}
           tickFormatter={fmtAccounts}
           tick={{ fontSize: 11, fill: "#9ca3af" }}
-          label={{ value: "Total accounts (log scale)", angle: -90, position: "insideLeft", offset: -45, fill: "#6b7280", fontSize: 12 }}
+          label={{ value: "Active repos (log scale)", angle: -90, position: "insideLeft", dx: -60, fill: "#6b7280", fontSize: 12 }}
         />
-        <Tooltip content={(props) => <CustomTooltip payload={props.payload as unknown as { payload: Point }[] | undefined} />} />
+        <Tooltip content={(props) => <CustomTooltip payload={props.payload as unknown as { payload: Point }[] | undefined} />} cursor={{ strokeDasharray: "3 3", stroke: "#4b5563" }} />
         <Legend
-          wrapperStyle={{ fontSize: "0.72rem", paddingTop: "8px" }}
+          verticalAlign="top"
+          wrapperStyle={{ fontSize: "0.72rem", paddingBottom: "8px" }}
           formatter={(value) => <span style={{ color: "#9ca3af" }}>{value}</span>}
         />
         {PDS_AGE_ERAS.map((era) => (
@@ -1583,8 +1589,9 @@ export function PdsAgeChart({ data }: { data: PdsAgeRow[] }) {
               .filter((r) => r.first_week >= era.from && r.first_week <= era.to)
               .map(toPoint)}
             fill={era.color}
-            fillOpacity={0.75}
-            r={4}
+            fillOpacity={0.6}
+            r={2}
+            isAnimationActive={false}
           />
         ))}
       </ScatterChart>

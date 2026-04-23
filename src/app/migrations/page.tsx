@@ -8,6 +8,7 @@ import {
   getMigrationTrajectories,
   getEcosystemStats,
   getPlcDataTimestamp,
+  getScannedPdsCount,
 } from "@/lib/db/plc-queries";
 import { getOverviewStats } from "@/lib/db/queries";
 import { CreationChartsSection, MigrationChartsSection, MultiStepSankeyChart } from "@/components/charts";
@@ -36,6 +37,7 @@ export default async function MigrationsPage({
   const trajectories = getMigrationTrajectories();
   const stats = getEcosystemStats(hideBsky);
   const scanStats = getOverviewStats();
+  const scannedPdsCount = getScannedPdsCount();
   const timestamp = getPlcDataTimestamp();
 
   const fmt = (n: number) => n.toLocaleString();

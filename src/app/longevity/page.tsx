@@ -25,15 +25,16 @@ function ChartCard({ title, subtitle, children }: { title: string; subtitle?: st
 }
 
 export default async function LongevityPage() {
-  const pdsAgeData    = getPdsAgeData();
+  const pdsAgeDataAll = getPdsAgeData(1);   // all PDSes with ≥ 1 repo — for stat cards
+  const pdsAgeData    = getPdsAgeData(5);   // ≥ 5 repos — for chart
   const cohortData    = getAccountCohortCounts();
   const timestamp     = getPlcDataTimestamp();
 
   const totalAccounts = cohortData.reduce((s, r) => s + r.count, 0);
   const cohortBuckets = cohortData.map(r => ({ name: r.cohort, value: r.count }));
 
-  // Summary stats
-  const indieOnly = pdsAgeData.filter((r) => r.pds_url !== "bsky.network");
+  // Summary stats — use unfiltered set so count/oldest/newest reflect all real PDSes
+  const indieOnly = pdsAgeDataAll.filter((r) => r.pds_url !== "bsky.network");
   const oldestIndie = indieOnly[0];
   const newestIndie = indieOnly[indieOnly.length - 1];
   const medianIdx = Math.floor(indieOnly.length / 2);
@@ -63,7 +64,7 @@ export default async function LongevityPage() {
             <StatCard
               label="Independent PDSes tracked"
               value={indieOnly.length.toLocaleString()}
-              sub="With ≥ 10 accounts, excluding bsky.network"
+              sub="With at least 1 repo, excluding bsky.network"
             />
             <StatCard
               label="Oldest independent PDS"

@@ -421,7 +421,7 @@ export interface PdsAgeRow {
 // First seen date per PDS in the PLC directory: earliest of first account creation week OR first
 // migration arrival. Uses plc_creation_weekly (pre-aggregated) to avoid scanning 86M-row table.
 // Collapses bsky shards. Excludes junk and pds.trump.com. Requires ≥ 10 accounts.
-export function getPdsAgeData(): PdsAgeRow[] {
+export function getPdsAgeData(minAccounts = 1): PdsAgeRow[] {
   const db = getPlcDb();
   return db.prepare(`
     WITH
@@ -457,10 +457,22 @@ export function getPdsAgeData(): PdsAgeRow[] {
       date(MIN(c.first_seen, COALESCE(m.first_seen, c.first_seen))) AS first_week,
       ls.total_accounts
     FROM creation_first c
-    JOIN latest_scan ls ON c.pds_url = ls.pds_url AND ls.total_accounts >= 5
+    JOIN latest_scan ls ON c.pds_url = ls.pds_url AND ls.total_accounts >= ${minAccounts}
     LEFT JOIN migration_first m ON c.pds_url = m.pds_url
     ORDER BY first_week
   `).all() as PdsAgeRow[];
+}
+
+export function getScannedPdsCount(): number {
+  const db = getPlcDb();
+  const row = db.prepare(`
+    SELECT COUNT(DISTINCT RTRIM(pds_url, '/')) AS cnt
+    FROM pds_repo_status_snapshots s
+    WHERE snapshot_date = (
+      SELECT MAX(s2.snapshot_date) FROM pds_repo_status_snapshots s2 WHERE s2.pds_url = s.pds_url
+    )
+  `).get() as { cnt: number };
+  return row.cnt;
 }
 
 export interface AccountCohortRow {

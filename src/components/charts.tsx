@@ -1251,7 +1251,7 @@ export function CreationChartsSection({ repoData }: CreationChartsSectionProps) 
   return (
     <div className="space-y-8">
       <div>
-        <p className="text-xs text-gray-500 mb-2">Repo-backed accounts — DIDs with an actual repository (e.g., morel ghosts, pds.trump.com accounts )</p>
+        <p className="text-xs text-gray-500 mb-2">Repo-backed accounts — DIDs with an actual repository (excludes 'ghosts', e.g., most morel dids, and all pds.trump.com accounts )</p>
         <StackedAreaChart
           data={repoData}
           selectedPds={selectedPds}
@@ -1571,7 +1571,7 @@ export function PdsAgeChart({ data }: { data: PdsAgeRow[] }) {
           dataKey="y"
           type="number"
           scale="log"
-          domain={[1, "auto"]}
+          domain={[5, "auto"]}
           tickFormatter={fmtAccounts}
           tick={{ fontSize: 11, fill: "#9ca3af" }}
           label={{ value: "Active repos (log scale)", angle: -90, position: "insideLeft", dx: -60, fill: "#6b7280", fontSize: 12 }}
@@ -1579,7 +1579,7 @@ export function PdsAgeChart({ data }: { data: PdsAgeRow[] }) {
         <Tooltip content={(props) => <CustomTooltip payload={props.payload as unknown as { payload: Point }[] | undefined} />} cursor={{ strokeDasharray: "3 3", stroke: "#4b5563" }} />
         <Legend
           verticalAlign="top"
-          wrapperStyle={{ fontSize: "0.72rem", paddingBottom: "8px" }}
+          wrapperStyle={{ fontSize: "0.72rem", paddingBottom: "16px" }}
           formatter={(value) => <span style={{ color: "#9ca3af" }}>{value}</span>}
         />
         {PDS_AGE_ERAS.map((era) => (

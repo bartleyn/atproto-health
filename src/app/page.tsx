@@ -310,12 +310,7 @@ export default async function Home({
       {firehose && <FederationSection sample={firehose} />}
 
       {/* GitHub ecosystem stats */}
-      {githubStats.length > 0 && (
-        <>
-          <h2 className="text-xl font-semibold mb-6 text-gray-400">Extra</h2>
-          <GithubSection stats={githubStats} />
-        </>
-      )}
+      
 
     </main>
   );

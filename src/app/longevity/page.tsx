@@ -92,30 +92,16 @@ export default async function LongevityPage({
           </div>
         </section>
 
-        {/* Account creations over time */}
+        {/* PDS age scatter */}
         <section>
-          <div className="flex items-center justify-between mb-1">
-            <h2 className="text-xl font-semibold text-gray-200">Weekly Account Creations by PDS</h2>
-            <Link
-              href={`/longevity?bsky=${hideBsky ? "1" : "0"}`}
-              className="text-xs px-3 py-1 rounded border border-gray-700 text-gray-400 hover:text-gray-200 hover:border-gray-500 transition-colors"
-            >
-              {hideBsky ? "Show bsky.network" : "Hide bsky.network"}
-            </Link>
-          </div>
+          <h2 className="text-xl font-semibold text-gray-200 mb-1">When Did PDSes Launch?</h2>
           <p className="text-xs text-gray-500 mb-4">
-            Repo-backed accounts only. Normalized to 100% — hover for actual counts. Top 10 PDSes by total volume.
-            {hideBsky && <span className="text-blue-500 ml-2">bsky.network hidden.</span>}
+            Each point is a PDS. X = first repo-backed account (proxy for launch). Y = total repos (log scale).
+            Colored by launch era. Excludes pds.trump.com and junk PDSes.
           </p>
-          {activeCreations.length === 0 ? (
-            <p className="text-gray-500">
-              No data yet — run{" "}
-              <code className="text-gray-300">npm run collect:plc</code> then{" "}
-              <code className="text-gray-300">npm run aggregate:plc</code>.
-            </p>
-          ) : (
-            <CreationChartsSection repoData={activeCreations} />
-          )}
+          <ChartCard title="PDS Age vs. Size">
+            <PdsAgeChart data={pdsAgeData} />
+          </ChartCard>
         </section>
 
         {/* Account age histogram */}
@@ -138,17 +124,33 @@ export default async function LongevityPage({
           </ChartCard>
         </section>
 
-        {/* PDS age scatter */}
+        {/* Account creations over time */}
         <section>
-          <h2 className="text-xl font-semibold text-gray-200 mb-1">When Did PDSes Launch?</h2>
+          <div className="flex items-center justify-between mb-1">
+            <h2 className="text-xl font-semibold text-gray-200">Weekly Account Creations per PDS</h2>
+            <Link
+              href={`/longevity?bsky=${hideBsky ? "1" : "0"}`}
+              className="text-xs px-3 py-1 rounded border border-gray-700 text-gray-400 hover:text-gray-200 hover:border-gray-500 transition-colors"
+            >
+              {hideBsky ? "Show bsky.network" : "Hide bsky.network"}
+            </Link>
+          </div>
           <p className="text-xs text-gray-500 mb-4">
-            Each point is a PDS. X = first repo-backed account (proxy for launch). Y = total repos (log scale).
-            Colored by launch era. Excludes pds.trump.com and junk PDSes.
+            Repo-backed accounts only. Normalized to 100% — hover for actual counts. Top 10 PDSes by total volume.
+            {hideBsky && <span className="text-blue-500 ml-2">bsky.network hidden.</span>}
           </p>
-          <ChartCard title="PDS Age vs. Size">
-            <PdsAgeChart data={pdsAgeData} />
-          </ChartCard>
+          {activeCreations.length === 0 ? (
+            <p className="text-gray-500">
+              No data yet — run{" "}
+              <code className="text-gray-300">npm run collect:plc</code> then{" "}
+              <code className="text-gray-300">npm run aggregate:plc</code>.
+            </p>
+          ) : (
+            <CreationChartsSection repoData={activeCreations} />
+          )}
         </section>
+
+        
 
       </div>
     </main>

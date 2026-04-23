@@ -9,6 +9,7 @@ import {
   getEcosystemStats,
   getPlcDataTimestamp,
 } from "@/lib/db/plc-queries";
+import { getOverviewStats } from "@/lib/db/queries";
 import { CreationChartsSection, MigrationChartsSection, MultiStepSankeyChart } from "@/components/charts";
 
 function StatCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
@@ -34,6 +35,7 @@ export default async function MigrationsPage({
   const weeklyMigrations = getMigrationWeeklyBreakdown();
   const trajectories = getMigrationTrajectories();
   const stats = getEcosystemStats(hideBsky);
+  const scanStats = getOverviewStats();
   const timestamp = getPlcDataTimestamp();
 
   const fmt = (n: number) => n.toLocaleString();
@@ -70,9 +72,9 @@ export default async function MigrationsPage({
               sub="of accounts are on Bluesky-operated infrastructure"
             />
             <StatCard
-              label="Total accounts"
-              value={fmt(stats.total_dids_ex_trump)}
-              sub="Unique DIDs across all scanned PDSes, excludes pds.trump.com"
+              label="Total repos"
+              value={fmt(scanStats.totalUsers)}
+              sub={`Across ${scanStats.total.toLocaleString()} scanned PDSes · from listRepos`}
             />
           </div>
           {/* Row 2: migration details */}
@@ -89,8 +91,8 @@ export default async function MigrationsPage({
             />
             <StatCard
               label="Scanned PDSes"
-              value={fmt(stats.independent_pds_count)}
-              sub="Independent PDSes that responded to the repo scanner"
+              value={fmt(scanStats.total)}
+              sub="PDSes that responded to the repo scanner"
             />
           </div>
         </section>
@@ -117,7 +119,7 @@ export default async function MigrationsPage({
             Actual per-hop migration steps — each column is one PDS hop. bsky.network shards collapsed.
             Click a node to highlight all paths through it in both directions.
           </p>
-          <MultiStepSankeyChart data={trajectories} />
+          <MultiStepSankeyChart data={trajectories} height={500} />
         </section>
 
         {/* Account Creations */}

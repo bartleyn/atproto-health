@@ -70,6 +70,23 @@ function migrate(db: Database.Database) {
       tagged_posts INTEGER NOT NULL DEFAULT 0,
       updated_at   TEXT    NOT NULL
     );
+
+    -- Per-(collection, DID) event counts accumulated from all Jetstream creates.
+    -- Full collection name (e.g. "app.bsky.feed.post", "com.whtwnd.blog.entry").
+    -- Join with plc_did_pds at query time to get per-PDS breakdowns.
+    CREATE TABLE IF NOT EXISTS collection_activity (
+      collection  TEXT NOT NULL,
+      did         TEXT NOT NULL,
+      event_count INTEGER NOT NULL DEFAULT 0,
+      last_seen   TEXT NOT NULL,
+      PRIMARY KEY (collection, did)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_collection_activity_collection
+      ON collection_activity(collection);
+
+    CREATE INDEX IF NOT EXISTS idx_collection_activity_last_seen
+      ON collection_activity(last_seen);
   `);
 
   // Add activity_types column to existing DBs that predate this migration

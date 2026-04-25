@@ -5,7 +5,8 @@ import fs from "fs";
 const args = process.argv.slice(2);
 const daysBack = args[0] ? parseInt(args[0], 10) : 3;
 
-const OUT_DIR = path.join(process.cwd(), "analysis-output");
+const RUN_DATE = new Date().toISOString().slice(0, 10);
+const OUT_DIR = path.join(process.cwd(), "analysis-output", RUN_DATE);
 fs.mkdirSync(OUT_DIR, { recursive: true });
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

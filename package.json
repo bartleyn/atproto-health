@@ -17,11 +17,13 @@
     "collect:plc:creations": "npx tsx src/lib/collectors/run-plc-creations.ts",
     "aggregate:plc": "npx tsx src/lib/collectors/run-aggregate-plc.ts",
     "aggregate:active-plc": "npx tsx src/lib/collectors/aggregate-active-plc.ts",
+    "seed:manual-geo": "npx tsx src/lib/collectors/seed-manual-geo.ts",
     "collect:skywatch": "npx tsx src/lib/collectors/skywatch-labels.ts",
     "collect:bsky-mod": "npx tsx src/lib/collectors/skywatch-labels.ts bsky-mod",
     "collect:activity": "npx tsx src/lib/collectors/jetstream-activity.ts",
     "scan:pds-status": "npx tsx src/lib/collectors/scan-pds-status.ts",
-    "analysis": "npx tsx src/lib/analysis/activity-crosstabs.ts"
+    "analysis": "npx tsx src/lib/analysis/activity-crosstabs.ts",
+    "analysis:retention": "npx tsx src/lib/analysis/retention-cohorts.ts"
   },
   "keywords": [],
   "author": "",

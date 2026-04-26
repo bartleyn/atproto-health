@@ -83,6 +83,18 @@ function migrate(db: Database.Database) {
       top_repos TEXT NOT NULL  -- JSON: [{name, fullName, stars, url, description}]
     );
 
+    -- Hand-curated geo for PDSes seen in Jetstream/PLC but not in the collector scan
+    -- (e.g. Bridgy Fed, EuroSky). Included in world-map and lang-map queries.
+    CREATE TABLE IF NOT EXISTS pds_manual_geo (
+      url       TEXT PRIMARY KEY,
+      city      TEXT,
+      country   TEXT,
+      latitude  REAL NOT NULL,
+      longitude REAL NOT NULL,
+      org       TEXT,
+      note      TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS firehose_samples (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       sampled_at TEXT NOT NULL DEFAULT (datetime('now')),

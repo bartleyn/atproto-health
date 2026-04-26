@@ -124,6 +124,22 @@ function migrate(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_active_creation_weekly_week
       ON active_creation_weekly(week);
 
+    -- Cursor for aggregate-active-plc incremental mode.
+    -- last_scanned_at = MAX(did_in_repo.scanned_at) processed on the last run.
+    CREATE TABLE IF NOT EXISTS active_creation_cursor (
+      id             INTEGER PRIMARY KEY CHECK (id = 1),
+      last_scanned_at TEXT NOT NULL,
+      updated_at      TEXT NOT NULL
+    );
+
+    -- Cursors for aggregate-plc heavy recomputes (trajectory edges, lang summary).
+    CREATE TABLE IF NOT EXISTS plc_heavy_recompute_cursor (
+      id                  INTEGER PRIMARY KEY CHECK (id = 1),
+      migrations_cursor   TEXT NOT NULL, -- MAX(migrated_at) when trajectories were last built
+      did_scanned_cursor  TEXT NOT NULL, -- MAX(scanned_at) from did_in_repo when langs were last built
+      updated_at          TEXT NOT NULL
+    );
+
     -- Every DID observed in a listRepos scan, with its current PDS.
     -- Updated on each scan so it reflects the latest known location.
     CREATE TABLE IF NOT EXISTS did_in_repo (

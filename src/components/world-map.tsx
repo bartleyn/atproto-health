@@ -131,6 +131,7 @@ export function WorldMap({
                     if (dimmed) return;
                     const parts: string[] = [];
                     if (loc.city && loc.country) parts.push(`${loc.city}, ${loc.country}`);
+                    else if (loc.city) parts.push(loc.city);
                     else if (loc.country) parts.push(loc.country);
                     if (selectedLang) {
                       parts.push(`${sizeCount.toLocaleString()} ${selectedLang} speaker${sizeCount !== 1 ? "s" : ""}`);

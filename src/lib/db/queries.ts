@@ -469,16 +469,23 @@ export function getPdsLocations(hideBsky = false): CityCluster[] {
   const view = hideBsky ? "pds_community" : "pds_latest";
   return db
     .prepare(
-      `SELECT
-        AVG(latitude) as latitude,
-        AVG(longitude) as longitude,
-        city,
-        country,
-        COUNT(*) as pdsCount
-       FROM ${view}
-       WHERE latitude IS NOT NULL AND longitude IS NOT NULL
-       GROUP BY city, country
-       ORDER BY pdsCount DESC`
+      `WITH placed AS (
+        SELECT
+          CASE WHEN org LIKE '%Cloudflare%' OR org LIKE '%Fastly%' THEN 38.0  ELSE latitude  END AS latitude,
+          CASE WHEN org LIKE '%Cloudflare%' OR org LIKE '%Fastly%' THEN -30.0 ELSE longitude END AS longitude,
+          CASE WHEN org LIKE '%Cloudflare%' OR org LIKE '%Fastly%' THEN 'CDN / Host Unknown' ELSE city    END AS city,
+          CASE WHEN org LIKE '%Cloudflare%' OR org LIKE '%Fastly%' THEN NULL                  ELSE country END AS country
+        FROM ${view}
+        WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+        UNION ALL
+        SELECT latitude, longitude, city, country
+        FROM pds_manual_geo
+      )
+      SELECT AVG(latitude) AS latitude, AVG(longitude) AS longitude,
+             city, country, COUNT(*) AS pdsCount
+      FROM placed
+      GROUP BY city, country
+      ORDER BY pdsCount DESC`
     )
     .all() as CityCluster[];
 }
@@ -491,13 +498,16 @@ export function getPdsLocationsWithProvider(hideBsky = false): PdsProviderLocati
     .prepare(
       `SELECT
         url,
-        latitude,
-        longitude,
-        city,
-        country,
+        CASE WHEN org LIKE '%Cloudflare%' THEN 38.0  ELSE latitude  END AS latitude,
+        CASE WHEN org LIKE '%Cloudflare%' THEN -30.0 ELSE longitude END AS longitude,
+        CASE WHEN org LIKE '%Cloudflare%' THEN 'Cloudflare Network' ELSE city    END AS city,
+        CASE WHEN org LIKE '%Cloudflare%' THEN NULL                  ELSE country END AS country,
         ${PROVIDER_NORMALIZE_SQL} as provider
        FROM ${view}
-       WHERE latitude IS NOT NULL AND longitude IS NOT NULL`
+       WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+       UNION ALL
+       SELECT url, latitude, longitude, city, country, COALESCE(org, 'Self-hosted') AS provider
+       FROM pds_manual_geo`
     )
     .all() as PdsProviderLocation[];
 }

@@ -10,16 +10,17 @@
 
 import { getDb } from "../db/schema";
 
+// NOTE: atproto.brid.gy is intentionally omitted — the collector already scans
+// https://atproto.brid.gy/ (trailing slash) and has real geo from ip-api. The
+// page.tsx normalizeUrl() strips trailing slashes before lookup, so it matches.
+
+// NOTE: Only add PDSes here that are genuinely absent from the collector scan
+// (i.e., not in pds_instances). Always verify first with:
+//   sqlite3 atproto-health.db "SELECT url FROM pds_instances WHERE url LIKE '%hostname%';"
+// If they're in pds_instances with a trailing slash, normalizeUrl() in page.tsx
+// handles the mismatch and the collector geo is used automatically.
+
 const entries = [
-  {
-    url: "https://atproto.brid.gy",
-    city: "San Francisco",
-    country: "US",
-    latitude: 37.7749,
-    longitude: -122.4194,
-    org: "Bridgy Fed",
-    note: "Fediverse bridge (Mastodon ↔ ATProto); operated by Ryan Barrett",
-  },
   {
     url: "https://berlin-user.eurosky.social",
     city: "Berlin",
@@ -27,25 +28,7 @@ const entries = [
     latitude: 52.52,
     longitude: 13.405,
     org: "EuroSky Social",
-    note: "EuroSky Social Berlin shard",
-  },
-  {
-    url: "https://northsky.social",
-    city: "Stockholm",
-    country: "SE",
-    latitude: 59.3293,
-    longitude: 18.0686,
-    org: "Self-hosted",
-    note: "Nordic Bluesky-compatible PDS",
-  },
-  {
-    url: "https://at.app.wafrn.net",
-    city: "Madrid",
-    country: "ES",
-    latitude: 40.4168,
-    longitude: -3.7038,
-    org: "WAFRN",
-    note: "WAFRN Fediverse app ATProto bridge",
+    note: "EuroSky Social Berlin shard — not in collector scan",
   },
 ];
 

@@ -98,7 +98,7 @@ const JETSTREAM_RELAYS = [
 
 let relayIdx = 0;
 
-const FLUSH_INTERVAL_MS  = 5 * 60 * 1000;
+const FLUSH_INTERVAL_MS  = 60 * 1000;
 const RECONNECT_DELAY_MS = 5_000;
 
 const args = process.argv.slice(2);
@@ -229,6 +229,10 @@ function flush() {
     if (lastCursor > 0) saveCursor.run(lastCursor);
   })();
 
+  // Truncate the WAL after every flush — auto-checkpoint only copies frames (PASSIVE mode)
+  // and never shrinks the WAL file. TRUNCATE zeroes it while we're the sole connection.
+  db.pragma("wal_checkpoint(TRUNCATE)");
+
   totalActivityFlushed    += activityRows.length;
   totalDeletesFlushed     += deleteRows.reduce((s, [, c]) => s + c, 0);
   totalStarterpackFlushed += starterpackRows.reduce((s, [, c]) => s + c, 0);
@@ -258,6 +262,12 @@ function recordDelete(key: string) {
   deleteBuffer.set(key, (deleteBuffer.get(key) ?? 0) + 1);
 }
 
+// Stall detection: if no message is received within this window the connection
+// is considered hung (TCP half-open). We close it ourselves to trigger reconnect.
+const STALL_TIMEOUT_MS = 120_000;
+// Client-side ping keeps the server from closing idle connections.
+const PING_INTERVAL_MS = 30_000;
+
 function connect() {
   const db = getActivityDb();
   const cursorRow = db.prepare(`SELECT cursor FROM jetstream_cursor WHERE id = 1`).get() as { cursor: number } | undefined;
@@ -274,14 +284,35 @@ function connect() {
 
   const ws = new WebSocket(url);
 
+  let stallTimer: ReturnType<typeof setTimeout> | null = null;
+  let pingTimer: ReturnType<typeof setInterval> | null = null;
+
+  function resetStallTimer() {
+    if (stallTimer) clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => {
+      console.warn(`[activity] No messages in ${STALL_TIMEOUT_MS / 1000}s — connection stalled. Reconnecting...`);
+      ws.terminate();
+    }, STALL_TIMEOUT_MS);
+  }
+
+  function cleanup() {
+    if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
+    if (pingTimer)  { clearInterval(pingTimer);  pingTimer  = null; }
+  }
+
   ws.on("open", () => {
     const collectionStatus = NO_COLLECTION_TRACKING
       ? "DISABLED (--no-collection-tracking)"
       : `enabled, pauses at ${MAX_COLLECTION_ROWS.toLocaleString()} rows`;
     console.log(`[activity] Connected. Retention: ${RETENTION_DAYS}d. Flushing every ${FLUSH_INTERVAL_MS / 1000}s. Collection tracking: ${collectionStatus}`);
+    resetStallTimer();
+    pingTimer = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) ws.ping();
+    }, PING_INTERVAL_MS);
   });
 
   ws.on("message", (data: Buffer) => {
+    resetStallTimer();
     try {
       const evt = JSON.parse(data.toString());
       const date = new Date(evt.time_us / 1000).toISOString().slice(0, 10);
@@ -353,15 +384,22 @@ function connect() {
     }
   });
 
+  ws.on("pong", () => {
+    // Server acknowledged our ping — connection is alive
+    resetStallTimer();
+  });
+
   ws.on("error", (err: Error) => {
     console.error(`[activity] WebSocket error: ${err.message}`);
   });
 
-  ws.on("close", () => {
+  ws.on("close", (code, reason) => {
+    cleanup();
     flush();
     relayIdx++;
     const next = JETSTREAM_RELAYS[relayIdx % JETSTREAM_RELAYS.length];
-    console.log(`[activity] Disconnected. Trying ${next.replace("wss://", "")} in ${RECONNECT_DELAY_MS / 1000}s...`);
+    const why = code !== 1000 ? ` (code ${code}${reason?.length ? `: ${reason}` : ""})` : "";
+    console.log(`[activity] Disconnected${why}. Trying ${next.replace("wss://", "")} in ${RECONNECT_DELAY_MS / 1000}s...`);
     setTimeout(connect, RECONNECT_DELAY_MS);
   });
 }

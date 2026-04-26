@@ -250,8 +250,8 @@ async function main() {
   `);
 
   const upsertDidInRepo = db.prepare(`
-    INSERT INTO did_in_repo (did, pds_url, scanned_at)
-    VALUES (?, ?, ?)
+    INSERT INTO did_in_repo (did, pds_url, scanned_at, first_scanned_at)
+    VALUES (?, ?, ?, ?)
     ON CONFLICT(did) DO UPDATE SET
       pds_url    = excluded.pds_url,
       scanned_at = excluded.scanned_at
@@ -261,7 +261,7 @@ async function main() {
 
   const writeDidBatch = db.transaction((pdsUrl: string, scannedAt: string, batch: RepoInfo[]) => {
     for (const r of batch) {
-      upsertDidInRepo.run(r.did, pdsUrl, scannedAt);
+      upsertDidInRepo.run(r.did, pdsUrl, scannedAt, scannedAt);
     }
   });
 

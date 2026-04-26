@@ -49,7 +49,7 @@ async function main() {
   }
 
   const { max_scanned_at } = db.prepare(
-    `SELECT MAX(scanned_at) AS max_scanned_at FROM did_in_repo`
+    `SELECT MAX(first_scanned_at) AS max_scanned_at FROM did_in_repo`
   ).get() as { max_scanned_at: string };
 
   // When exclude-status is in use, always do a full rebuild for correctness:
@@ -64,12 +64,12 @@ async function main() {
     cursor = row?.last_scanned_at ?? "1970-01-01T00:00:00Z";
   }
 
-  console.log(`did_in_repo: ${didInRepoCount.toLocaleString()} rows (max scanned_at: ${max_scanned_at})`);
+  console.log(`did_in_repo: ${didInRepoCount.toLocaleString()} rows (max first_scanned_at: ${max_scanned_at})`);
   console.log(`plc_account_creations: ${creationsCount.toLocaleString()} rows`);
   if (!doFull) console.log(`Cursor: ${cursor}`);
 
   const newRows = doFull ? didInRepoCount : (db.prepare(
-    `SELECT COUNT(*) AS n FROM did_in_repo WHERE scanned_at > ?`
+    `SELECT COUNT(*) AS n FROM did_in_repo WHERE first_scanned_at > ?`
   ).get(cursor) as { n: number }).n;
 
   if (!doFull && newRows === 0) {
@@ -100,7 +100,7 @@ async function main() {
     FROM did_in_repo dir
     JOIN plc_account_creations pac ON pac.did = dir.did
     WHERE pac.created_at IS NOT NULL
-      AND dir.scanned_at > ?
+      AND dir.first_scanned_at > ?
       ${excludeClause}
     GROUP BY dir.pds_url, week
     ON CONFLICT (pds_url, week) DO UPDATE SET count = count + excluded.count

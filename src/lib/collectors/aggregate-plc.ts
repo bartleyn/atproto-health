@@ -227,7 +227,7 @@ export function aggregatePlc() {
           CASE WHEN from_pds IN (SELECT pds FROM top_pdses) THEN from_pds ELSE 'Other' END || '@' || step       AS source,
           CASE WHEN to_pds   IN (SELECT pds FROM top_pdses) THEN to_pds   ELSE 'Other' END || '@' || (step + 1) AS target
         FROM ranked
-        WHERE step < 3
+        WHERE step < 4
       )
     SELECT source, target, COUNT(*) AS value
     FROM labeled GROUP BY source, target HAVING COUNT(*) >= 5;

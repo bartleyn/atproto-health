@@ -143,13 +143,16 @@ function migrate(db: Database.Database) {
     -- Every DID observed in a listRepos scan, with its current PDS.
     -- Updated on each scan so it reflects the latest known location.
     CREATE TABLE IF NOT EXISTS did_in_repo (
-      did        TEXT PRIMARY KEY,
-      pds_url    TEXT NOT NULL,
-      scanned_at TEXT NOT NULL
+      did              TEXT PRIMARY KEY,
+      pds_url          TEXT NOT NULL,
+      scanned_at       TEXT NOT NULL,
+      first_scanned_at TEXT             -- set once on INSERT; never updated; used as agg cursor
     );
 
     CREATE INDEX IF NOT EXISTS idx_did_in_repo_pds
       ON did_in_repo(pds_url);
+    CREATE INDEX IF NOT EXISTS idx_did_in_repo_first_scanned_at
+      ON did_in_repo(first_scanned_at);
 
     -- Non-active individual DID statuses from listRepos scans.
     -- Only non-active repos are stored (takendown, deactivated, deleted, suspended).
@@ -282,5 +285,12 @@ function migrate(db: Database.Database) {
   } catch { /* already exists */ }
   try {
     db.exec(`ALTER TABLE pds_repo_status_snapshots ADD COLUMN scanned_at TEXT`);
+  } catch { /* already exists */ }
+  try {
+    db.exec(`ALTER TABLE did_in_repo ADD COLUMN first_scanned_at TEXT`);
+    // Backfill existing rows: use scanned_at as a conservative proxy for first seen.
+    // This is safe — it only affects the incremental cursor start point for future runs.
+    db.exec(`UPDATE did_in_repo SET first_scanned_at = scanned_at WHERE first_scanned_at IS NULL`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_did_in_repo_first_scanned_at ON did_in_repo(first_scanned_at)`);
   } catch { /* already exists */ }
 }

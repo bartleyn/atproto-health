@@ -541,6 +541,70 @@ export function getTopLangs(limit = 25): LangTotal[] {
   `).all(limit) as LangTotal[];
 }
 
+export interface MigrationJourneyStats {
+  buckets: { label: string; users: number }[];
+  maxMigrations: number;
+  medianMigrations: number;
+  pctMultiple: number; // % of migrants with 2+ migrations
+  totalMigrants: number;
+}
+
+export function getMigrationJourneyStats(): MigrationJourneyStats {
+  const db = getPlcDb();
+
+  const rows = db.prepare(`
+    SELECT migration_count, COUNT(*) AS users
+    FROM (
+      SELECT did, COUNT(*) AS migration_count
+      FROM plc_migrations
+      WHERE NOT (
+        (from_pds LIKE '%bsky.network' OR from_pds = 'https://bsky.social')
+        AND (to_pds LIKE '%bsky.network' OR to_pds = 'https://bsky.social')
+      )
+      GROUP BY did
+      HAVING COUNT(*) >= 1
+    )
+    GROUP BY migration_count
+    ORDER BY migration_count
+  `).all() as { migration_count: number; users: number }[];
+
+  if (rows.length === 0) return { buckets: [], maxMigrations: 0, medianMigrations: 1, pctMultiple: 0, totalMigrants: 0 };
+
+  const totalMigrants = rows.reduce((s, r) => s + r.users, 0);
+  const maxMigrations = rows[rows.length - 1].migration_count;
+  const multipleUsers = rows.filter(r => r.migration_count >= 2).reduce((s, r) => s + r.users, 0);
+  const pctMultiple = totalMigrants > 0 ? (multipleUsers / totalMigrants) * 100 : 0;
+
+  // Median: find the migration_count where cumulative users crosses 50%
+  let cum = 0;
+  let medianMigrations = 1;
+  const half = totalMigrants / 2;
+  for (const r of rows) {
+    cum += r.users;
+    if (cum >= half) { medianMigrations = r.migration_count; break; }
+  }
+
+  const buckets = [
+    { label: "1", users: 0 },
+    { label: "2", users: 0 },
+    { label: "3", users: 0 },
+    { label: "4", users: 0 },
+    { label: "5–9", users: 0 },
+    { label: "10+", users: 0 },
+  ];
+  for (const r of rows) {
+    const n = r.migration_count;
+    if      (n === 1)           buckets[0].users += r.users;
+    else if (n === 2)           buckets[1].users += r.users;
+    else if (n === 3)           buckets[2].users += r.users;
+    else if (n === 4)           buckets[3].users += r.users;
+    else if (n <= 9)            buckets[4].users += r.users;
+    else                        buckets[5].users += r.users;
+  }
+
+  return { buckets, maxMigrations, medianMigrations, pctMultiple, totalMigrants };
+}
+
 export function getLastScanTime(): string | null {
   const db = getPlcDb();
   const row = db.prepare(

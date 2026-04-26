@@ -4,12 +4,13 @@ import {
   getMigrationFlows,
   getMigrationWeeklyBreakdown,
   getMigrationTrajectories,
+  getMigrationJourneyStats,
   getEcosystemStats,
   getPlcDataTimestamp,
   getScannedPdsCount,
 } from "@/lib/db/plc-queries";
 import { getOverviewStats } from "@/lib/db/queries";
-import { MigrationChartsSection, MultiStepSankeyChart } from "@/components/charts";
+import { MigrationChartsSection, MultiStepSankeyChart, SimpleBarChart } from "@/components/charts";
 
 function StatCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
@@ -25,6 +26,7 @@ export default async function MigrationsPage() {
   const flows = getMigrationFlows();
   const weeklyMigrations = getMigrationWeeklyBreakdown();
   const trajectories = getMigrationTrajectories();
+  const journeyStats = getMigrationJourneyStats();
   const stats = getEcosystemStats();
   const scanStats = getOverviewStats();
   const scannedPdsCount = getScannedPdsCount();
@@ -113,6 +115,47 @@ export default async function MigrationsPage() {
           </p>
           <MultiStepSankeyChart data={trajectories} height={500} />
         </section>
+
+        {/* Journey length distribution */}
+        {journeyStats.totalMigrants > 0 && (
+          <section>
+            <h2 className="text-xl font-semibold text-gray-200 mb-1">Migration Journey Length</h2>
+            <p className="text-xs text-gray-500 mb-4">
+              How many times did each account migrate? Excludes bsky.network internal resharding —
+              only voluntary migrations between distinct operators counted.
+              Max recorded: {journeyStats.maxMigrations} migrations by a single account.
+            </p>
+            <div className="grid grid-cols-3 gap-4 mb-6">
+              <StatCard
+                label="Total real migrants"
+                value={journeyStats.totalMigrants.toLocaleString()}
+                sub="Accounts with ≥1 non-bsky-internal migration"
+              />
+              <StatCard
+                label="Migrated more than once"
+                value={`${journeyStats.pctMultiple.toFixed(1)}%`}
+                sub="Of real migrants"
+              />
+              <StatCard
+                label="Most migrations by one account"
+                value={journeyStats.maxMigrations.toLocaleString()}
+                sub="Single account record"
+              />
+            </div>
+            <div className="rounded-lg border border-gray-800 bg-gray-900 p-5">
+              <h3 className="text-sm font-medium text-gray-300 mb-1">Migrations per account</h3>
+              <p className="text-xs text-gray-600 mb-4">Accounts by number of voluntary migration events</p>
+              <SimpleBarChart
+                data={journeyStats.buckets.map(b => ({ name: b.label, value: b.users }))}
+                color="#8b5cf6"
+                layout="horizontal"
+                xLabel="Migration count"
+                yLabel="Accounts"
+                logScale
+              />
+            </div>
+          </section>
+        )}
 
       </div>
     </main>

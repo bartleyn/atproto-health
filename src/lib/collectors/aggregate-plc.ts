@@ -6,6 +6,8 @@ import { getPlcDb } from "../db/plc-schema";
 const WEEK_EXPR = `date(created_at, '-' || ((strftime('%w', created_at) + 6) % 7) || ' days')`;
 const MIGRATED_WEEK_EXPR = `date(migrated_at, '-' || ((strftime('%w', migrated_at) + 6) % 7) || ' days')`;
 
+const forceHeavy = process.argv.includes("--force");
+
 function step(label: string, fn: () => void) {
   const t0 = Date.now();
   fn();
@@ -88,25 +90,48 @@ export function aggregatePlc() {
       updated_at = excluded.updated_at
   `).run(now, now, now);
 
-  // ── Stats cache (full recompute from did_in_repo) ─────────────────────────
+  // ── Stats cache + heavy recomputes: skip when nothing has changed ─────────
   // did_in_repo has 42M rows — COUNT(*) takes ~45s live, so we precompute here.
-  // SQLite upsert (ON CONFLICT DO UPDATE) only works with INSERT … VALUES, not INSERT … SELECT.
-  // Use INSERT OR REPLACE instead — same effect since this table always has exactly one row.
-  step("stats cache", () => db.prepare(`
-    INSERT OR REPLACE INTO plc_stats_cache (id, total_dids, bsky_concentration_pct, updated_at)
-    SELECT
-      1,
-      COUNT(*),
-      ROUND(100.0 * SUM(CASE WHEN pds_url LIKE '%bsky.network' OR pds_url = 'https://bsky.social' THEN 1 ELSE 0 END) / COUNT(*), 1),
-      ?
-    FROM did_in_repo
-  `).run(now));
+  // Trajectory/hop recomputes are expensive; skip if migrations haven't advanced.
 
-  // ── Trajectory edges (full recompute) ─────────────────────────────────────
+  const { max_migrated_at } = db.prepare(
+    `SELECT MAX(migrated_at) AS max_migrated_at FROM plc_migrations`
+  ).get() as { max_migrated_at: string };
+
+  const { max_scanned_at } = db.prepare(
+    `SELECT MAX(scanned_at) AS max_scanned_at FROM did_in_repo`
+  ).get() as { max_scanned_at: string };
+
+  const heavyCursor = db.prepare(
+    `SELECT migrations_cursor, did_scanned_cursor FROM plc_heavy_recompute_cursor WHERE id = 1`
+  ).get() as { migrations_cursor: string; did_scanned_cursor: string } | undefined;
+
+  const migrationsNew = !heavyCursor || max_migrated_at > heavyCursor.migrations_cursor;
+  const didScanNew    = !heavyCursor || max_scanned_at  > heavyCursor.did_scanned_cursor;
+
+  if (!forceHeavy && !didScanNew) {
+    console.log(`  stats cache: skipped (did_in_repo unchanged since ${heavyCursor?.did_scanned_cursor})`);
+  } else {
+    // SQLite upsert (ON CONFLICT DO UPDATE) only works with INSERT … VALUES, not INSERT … SELECT.
+    // Use INSERT OR REPLACE instead — same effect since this table always has exactly one row.
+    step("stats cache", () => db.prepare(`
+      INSERT OR REPLACE INTO plc_stats_cache (id, total_dids, bsky_concentration_pct, updated_at)
+      SELECT
+        1,
+        COUNT(*),
+        ROUND(100.0 * SUM(CASE WHEN pds_url LIKE '%bsky.network' OR pds_url = 'https://bsky.social' THEN 1 ELSE 0 END) / COUNT(*), 1),
+        ?
+      FROM did_in_repo
+    `).run(now));
+  }
+
+  // ── Trajectory edges ───────────────────────────────────────────────────────
   // Origin→current: for each migrating DID, maps first-ever source PDS to current PDS.
   // Flattens multi-hop paths (x→y→z becomes x→z). DELETE+INSERT since it depends
   // on full per-DID history and can't be done incrementally.
-  step("trajectory edges", () => db.exec(`
+  if (!forceHeavy && !migrationsNew) {
+    console.log(`  trajectory edges: skipped (migrations unchanged since ${heavyCursor?.migrations_cursor})`);
+  } else step("trajectory edges", () => db.exec(`
     DELETE FROM plc_trajectory_edges;
 
     INSERT INTO plc_trajectory_edges (source, target, value)
@@ -156,10 +181,12 @@ export function aggregatePlc() {
     FROM labeled GROUP BY source, target HAVING COUNT(*) >= 5;
   `));
 
-  // ── Per-hop migration edges (full recompute) ──────────────────────────────
+  // ── Per-hop migration edges ────────────────────────────────────────────────
   // Preserves actual per-hop transitions (A→B, B→C) rather than collapsing to origin→current.
   // step = 0-indexed hop number; limited to first 3 hops (covers the vast majority of migrants).
-  step("migration hops", () => db.exec(`
+  if (!forceHeavy && !migrationsNew) {
+    console.log(`  migration hops: skipped (migrations unchanged since ${heavyCursor?.migrations_cursor})`);
+  } else step("migration hops", () => db.exec(`
     DELETE FROM plc_migration_hops;
 
     INSERT INTO plc_migration_hops (source, target, value)
@@ -206,6 +233,18 @@ export function aggregatePlc() {
     FROM labeled GROUP BY source, target HAVING COUNT(*) >= 5;
   `));
 
+  // ── Update heavy recompute cursor ─────────────────────────────────────────
+  if (forceHeavy || migrationsNew || didScanNew) {
+    db.prepare(`
+      INSERT INTO plc_heavy_recompute_cursor (id, migrations_cursor, did_scanned_cursor, updated_at)
+      VALUES (1, ?, ?, ?)
+      ON CONFLICT (id) DO UPDATE SET
+        migrations_cursor  = excluded.migrations_cursor,
+        did_scanned_cursor = excluded.did_scanned_cursor,
+        updated_at         = excluded.updated_at
+    `).run(max_migrated_at, max_scanned_at, now);
+  }
+
   // Checkpoint the WAL so it doesn't grow unboundedly while the dev server holds
   // open read transactions. TRUNCATE mode writes WAL pages back to the main file
   // and truncates the WAL to 0 bytes.
@@ -221,11 +260,24 @@ export function aggregatePlc() {
  * PDS for each DID. did_in_repo is populated by listRepos scans so bsky shards
  * appear as individual URLs (https://morel.us-east.host.bsky.network etc.).
  * BCP-47 subtags are collapsed to base tag (en-US → en, zh-TW → zh).
- * Fully recomputed each run (DELETE + INSERT).
+ * Fully recomputed each run (DELETE + INSERT), skipped if did_in_repo is unchanged.
  */
 export function aggregateLangs() {
   const db = getPlcDb();
   const activityDbPath = path.join(process.cwd(), "jetstream-activity.db");
+
+  const { max_scanned_at } = db.prepare(
+    `SELECT MAX(scanned_at) AS max_scanned_at FROM did_in_repo`
+  ).get() as { max_scanned_at: string };
+
+  const heavyCursor = db.prepare(
+    `SELECT did_scanned_cursor FROM plc_heavy_recompute_cursor WHERE id = 1`
+  ).get() as { did_scanned_cursor: string } | undefined;
+
+  if (!forceHeavy && heavyCursor && max_scanned_at <= heavyCursor.did_scanned_cursor) {
+    console.log(`  lang aggregation: skipped (did_in_repo unchanged since ${heavyCursor.did_scanned_cursor})`);
+    return;
+  }
 
   // ATTACH the activity DB as a read-only alias
   db.exec(`ATTACH DATABASE '${activityDbPath}' AS activity`);
@@ -249,6 +301,13 @@ export function aggregateLangs() {
   } finally {
     db.exec(`DETACH DATABASE activity`);
   }
+
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO plc_heavy_recompute_cursor (id, migrations_cursor, did_scanned_cursor, updated_at)
+    VALUES (1, COALESCE((SELECT migrations_cursor FROM plc_heavy_recompute_cursor WHERE id = 1), '1970-01-01'), ?, ?)
+    ON CONFLICT (id) DO UPDATE SET did_scanned_cursor = excluded.did_scanned_cursor, updated_at = excluded.updated_at
+  `).run(max_scanned_at, now);
 
   const rowCount = (db.prepare(`SELECT COUNT(*) AS n FROM pds_lang_summary`).get() as { n: number }).n;
   console.log(`Language aggregation complete: ${rowCount} (pds_url, lang) pairs`);

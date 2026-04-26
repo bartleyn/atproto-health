@@ -2,7 +2,8 @@
  * CLI runner for PLC aggregation.
  *
  * Usage:
- *   npm run aggregate:plc
+ *   npm run aggregate:plc           # incremental (skips heavy steps if nothing changed)
+ *   npm run aggregate:plc -- --force # force all steps even if nothing changed
  */
 
 import { aggregatePlc, aggregateLangs } from "./aggregate-plc";

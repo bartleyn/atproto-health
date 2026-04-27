@@ -136,7 +136,7 @@ export default async function LongevityPage({
             </Link>
           </div>
           <p className="text-xs text-gray-500 mb-4">
-            Repo-backed accounts only. Normalized to 100% — hover for actual counts. Top 10 PDSes by total volume.
+            did:plc repo-backed accounts only (did:web excluded). Normalized to 100% — hover for actual counts. Top 10 PDSes by total volume.
             {hideBsky && <span className="text-blue-500 ml-2">bsky.network hidden.</span>}
           </p>
           {activeCreations.length === 0 ? (

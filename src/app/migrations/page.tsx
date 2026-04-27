@@ -42,7 +42,7 @@ export default async function MigrationsPage() {
         <div>
           <h1 className="text-3xl font-bold text-white">PDS Migrations</h1>
           <p className="text-gray-400 mt-2">
-            did:plc account creations and migrations recorded in plc.directory
+            did:plc account creations and migrations recorded in plc.directory · did:web accounts are not tracked here
           </p>
           {timestamp && (
             <p className="text-xs text-gray-600 mt-1">
@@ -98,7 +98,7 @@ export default async function MigrationsPage() {
             Where do users end up?
           </h2>
           <p className="text-xs text-gray-500 mb-4">
-            Where accounts ultimately landed — collapsed origin → current PDS. Excludes bsky.network destinations.
+            Where did:plc accounts ultimately landed — collapsed origin → current PDS. Excludes bsky.network destinations.
             Hover for details. Click any node to highlight its trajectories forward and backward.
           </p>
           <MigrationChartsSection sankeyData={flows} weeklyData={weeklyMigrations} />
@@ -110,7 +110,7 @@ export default async function MigrationsPage() {
             Migration Flows
           </h2>
           <p className="text-xs text-gray-500 mb-4">
-            Actual per-hop migration steps — each column is one PDS hop. bsky.network shards collapsed.
+            Actual per-hop did:plc migration steps — each column is one PDS hop. bsky.network shards collapsed.
             Click a node to highlight all paths through it in both directions.
           </p>
           <MultiStepSankeyChart data={trajectories} height={500} />

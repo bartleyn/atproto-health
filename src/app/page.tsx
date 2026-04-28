@@ -1,8 +1,9 @@
 import { getDashboardData, getLatestFirehoseSample, type ConcentrationStats } from "@/lib/db/queries";
 import { SimpleBarChart, DonutChart, InfraSection } from "@/components/charts";
 import type { GithubTopicStats } from "@/lib/db/queries";
-import { getPdsLangSummary, getTopLangs, getLastScanTime } from "@/lib/db/plc-queries";
-import type { PdsLangLocation } from "@/components/world-map";
+import { getPdsLangSummary, getTopLangs, getLastScanTime, getTopPdsByScan } from "@/lib/db/plc-queries";
+import type { PdsLangLocation, NamespaceLocation } from "@/components/world-map";
+import { getCollectionPdsData } from "@/lib/db/activity-queries";
 
 export const dynamic = "force-dynamic";
 
@@ -42,6 +43,8 @@ export default async function Home({
   const bskyProviderLocs = providerLocations.filter(p => isBskyUrl(p.url));
 
   const lastScanTime = getLastScanTime();
+  const scanTopPds = getTopPdsByScan(15, hideBsky);
+  const collectionPdsData = getCollectionPdsData();
   const langRows = getPdsLangSummary();
   // bsky lang totals keyed by lang — sum across all individual shards.
   // Used by InfraSection to subtract bsky from totals when the bsky toggle is off.
@@ -70,6 +73,38 @@ export default async function Home({
     return [{ url: row.pds_url, city: geo.city, country: geo.country, lang: row.lang, dids: row.dids }];
   });
   const topLangs = getTopLangs(25);
+
+  // Build namespace locations: group collection_activity by (nsRoot, pds) then geo-join.
+  // nsRoot = first two NSID parts (e.g. "blue.flashes" from "blue.flashes.feed.post").
+  // Skip bsky internal collections — only third-party appviews are interesting here.
+  const namespaceLocations: NamespaceLocation[] = [];
+  const nsTotals = new Map<string, number>();
+  for (const row of collectionPdsData) {
+    if (row.collection.startsWith("app.bsky.") || row.collection.startsWith("chat.bsky.")) continue;
+    const parts = row.collection.split(".");
+    const ns = parts.slice(0, 2).join(".");
+    const geo = geoByUrl.get(normalizeUrl(row.pds_url));
+    if (!geo?.city) continue;
+    namespaceLocations.push({ ns, pds_url: row.pds_url, city: geo.city, country: geo.country, dids: row.unique_dids });
+    nsTotals.set(ns, (nsTotals.get(ns) ?? 0) + row.unique_dids);
+  }
+  const topNamespaces = [...nsTotals.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([ns, total_dids]) => ({ ns, total_dids }));
+
+  // Prefer scan-derived counts (always fresh) over stale collect:users data.
+  // Attach country from the geo collection via URL match.
+  const countryByUrl = new Map(providerLocations.map(p => [normalizeUrl(p.url), p.country]));
+  const resolvedTopPds = scanTopPds.length > 0
+    ? scanTopPds.map(p => ({
+        url: p.url,
+        repoCount: p.repoCount,
+        activeCount: p.activeCount,
+        country: countryByUrl.get(normalizeUrl(p.url)) ?? null,
+        version: null,
+        org: null,
+      }))
+    : topPds;
 
   if (!runInfo.dirRun) {
     return (
@@ -191,6 +226,8 @@ export default async function Home({
             langLocations={langLocations}
             topLangs={topLangs}
             bskyLangTotals={bskyLangTotals}
+            namespaceLocations={namespaceLocations}
+            topNamespaces={topNamespaces}
           />
         </div>
       )}
@@ -262,11 +299,11 @@ export default async function Home({
       </div>
 
       {/* Top PDSes by users */}
-      {topPds.length > 0 && (
+      {resolvedTopPds.length > 0 && (
         <div className="mb-12">
           <h2 className="text-lg font-semibold mb-1">Largest PDSes</h2>
           <p className="text-sm text-gray-500 mb-4">
-            Ranked by total repos · Bluesky shards aggregated by *.host.bsky.network pattern
+            Ranked by total repos from most recent scan · Bluesky shards aggregated
           </p>
           <div className="overflow-x-auto rounded-lg border border-gray-800">
             <table className="w-full text-sm">
@@ -279,27 +316,23 @@ export default async function Home({
                 </tr>
               </thead>
               <tbody>
-                {topPds.map((pds, i) => {
-                  return (
-                    <tr
-                      key={pds.url}
-                      className="border-b border-gray-800/50 hover:bg-gray-900/50"
-                    >
-                      <td className="px-4 py-2.5 text-gray-500 tabular-nums">
-                        {i + 1}
-                      </td>
-                      <td className="px-4 py-2.5 font-mono text-xs">
-                        {pds.url.replace(/^https?:\/\//, "").replace(/\/$/, "")}
-                      </td>
-                      <td className="px-4 py-2.5 text-right tabular-nums">
-                        {pds.repoCount.toLocaleString()}
-                      </td>
-                      <td className="px-4 py-2.5 text-gray-400">
-                        {pds.country ?? "—"}
-                      </td>
-                    </tr>
-                  );
-                })}
+                {resolvedTopPds.map((pds, i) => (
+                  <tr
+                    key={pds.url}
+                    className="border-b border-gray-800/50 hover:bg-gray-900/50"
+                  >
+                    <td className="px-4 py-2.5 text-gray-500 tabular-nums">{i + 1}</td>
+                    <td className="px-4 py-2.5 font-mono text-xs">
+                      {pds.url.replace(/^https?:\/\//, "").replace(/\/$/, "")}
+                    </td>
+                    <td className="px-4 py-2.5 text-right tabular-nums">
+                      {pds.repoCount.toLocaleString()}
+                    </td>
+                    <td className="px-4 py-2.5 text-gray-400">
+                      {pds.country ?? "—"}
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>

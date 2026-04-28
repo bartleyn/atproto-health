@@ -79,6 +79,19 @@ const THIRD_PARTY_PREFIXES = [
   "app.tomarigi.*",                   // Tomarigi
   "id.sifa.*",                        // Sifa
   "io.zzstoatzz.*",                   // zzstoatzz
+  "app.rocksky.*",                    // Rocksky music scrobbling
+  "uk.skyblur.*",                     // Skyblur social
+  "network.cosmik.*",                 // Cosmik social
+  "net.wafrn.*",                      // WAFRN fediverse bridge
+  "garden.goals.*",                   // Goal tracker
+  "at.margin.*",                      // Margin notes/collections
+  "buzz.bookhive.*",                  // BookHive book tracking
+  "dev.radl.*",                       // Radl goals/planning
+  "space.roomy.*",                    // Roomy spaces
+  "pub.leaflet.*",                    // Leaflet documents
+  "com.puzzmo.*",                     // Puzzmo game streaks
+  "blue.trilinesat.*",                // Trilinesat
+  "app.offprint.*",                   // Offprint
 ];
 
 const WANTED_COLLECTIONS = [

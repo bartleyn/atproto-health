@@ -20,12 +20,22 @@ export interface PdsLangLocation {
   dids: number;
 }
 
+export interface NamespaceLocation {
+  ns: string;
+  pds_url: string;
+  city: string | null;
+  country: string | null;
+  dids: number;
+}
+
 interface WorldMapProps {
   locations: CityCluster[];
   providerLocations?: PdsProviderLocation[];
   selectedProvider?: string | null;
   langLocations?: PdsLangLocation[];
   selectedLang?: string | null;
+  namespaceLocations?: NamespaceLocation[];
+  selectedNamespace?: string | null;
 }
 
 export function WorldMap({
@@ -34,6 +44,8 @@ export function WorldMap({
   selectedProvider,
   langLocations,
   selectedLang,
+  namespaceLocations,
+  selectedNamespace,
 }: WorldMapProps) {
   const [hovered, setHovered] = useState<string | null>(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
@@ -41,9 +53,9 @@ export function WorldMap({
 
   // Build highlight counts per cluster.
   // Key by city|country — rounding AVG lat/lon diverges from individual PDS coordinates.
-  // Only one filter (provider or lang) can be active at a time.
+  // Only one filter (provider, lang, or namespace) can be active at a time.
   const highlightCountByCluster = new Map<string, number>();
-  // Top PDS per cluster for the selected language (by dids). Bsky shards collapse to one entry using the real total.
+  // Top PDS per cluster for the selected language/namespace (by dids).
   const topPdsByCluster = new Map<string, { pds: string; dids: number }>();
 
   if (selectedProvider && providerLocations) {
@@ -64,9 +76,20 @@ export function WorldMap({
         topPdsByCluster.set(key, { pds: displayPds, dids: l.dids });
       }
     }
+  } else if (selectedNamespace && namespaceLocations) {
+    for (const l of namespaceLocations) {
+      if (l.ns !== selectedNamespace) continue;
+      const key = `${l.city ?? ""}|${l.country ?? ""}`;
+      highlightCountByCluster.set(key, (highlightCountByCluster.get(key) ?? 0) + l.dids);
+      const displayPds = l.pds_url.replace(/^https?:\/\//, "").replace(/\/$/, "");
+      const current = topPdsByCluster.get(key);
+      if (!current || l.dids > current.dids) {
+        topPdsByCluster.set(key, { pds: displayPds, dids: l.dids });
+      }
+    }
   }
 
-  const activeFilter = selectedProvider ?? selectedLang ?? null;
+  const activeFilter = selectedProvider ?? selectedLang ?? selectedNamespace ?? null;
   const highlightedClusterKeys = new Set(highlightCountByCluster.keys());
 
   return (
@@ -137,13 +160,17 @@ export function WorldMap({
                       parts.push(`${sizeCount.toLocaleString()} ${selectedLang} speaker${sizeCount !== 1 ? "s" : ""}`);
                       const top = topPdsByCluster.get(clusterKey);
                       if (top) parts.push(`${top.pds} (${top.dids.toLocaleString()})`);
+                    } else if (selectedNamespace) {
+                      parts.push(`${sizeCount.toLocaleString()} ${selectedNamespace} user${sizeCount !== 1 ? "s" : ""}`);
+                      const top = topPdsByCluster.get(clusterKey);
+                      if (top) parts.push(`${top.pds} (${top.dids.toLocaleString()})`);
                     } else {
                       parts.push(`${sizeCount} PDS${sizeCount !== 1 ? "es" : ""}`);
                     }
                     setHovered(parts.join(" · "));
                   }}
                   onMouseLeave={() => setHovered(null)}
-                  onClick={isHighlighted && selectedLang ? (e) => {
+                  onClick={(isHighlighted && (selectedLang || selectedNamespace)) ? (e) => {
                     e.stopPropagation();
                     const top = topPdsByCluster.get(clusterKey);
                     if (!top) return;
@@ -155,7 +182,7 @@ export function WorldMap({
                   } : undefined}
                 >
                   <circle
-                    style={isHighlighted && selectedLang && topPdsByCluster.has(clusterKey) ? { cursor: "pointer" } : undefined}
+                    style={isHighlighted && (selectedLang || selectedNamespace) && topPdsByCluster.has(clusterKey) ? { cursor: "pointer" } : undefined}
                     r={r}
                     fill={dimmed ? "#1e3a5f" : isHighlighted ? "#f59e0b" : "#3b82f6"}
                     fillOpacity={dimmed ? 0.25 : 0.75}
@@ -182,7 +209,7 @@ export function WorldMap({
           style={{ left: pinnedCluster.x + 12, top: pinnedCluster.y - 40 }}
         >
           <span className="text-amber-400">{pinnedCluster.pds}</span>
-          <span className="text-gray-500 ml-1.5">{pinnedCluster.dids.toLocaleString()} {selectedLang} speakers</span>
+          <span className="text-gray-500 ml-1.5">{pinnedCluster.dids.toLocaleString()} {selectedLang ?? selectedNamespace} {selectedLang ? "speakers" : "users"}</span>
         </div>
       )}
     </div>

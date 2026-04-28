@@ -17,6 +17,7 @@
     "collect:plc:creations": "npx tsx src/lib/collectors/run-plc-creations.ts",
     "aggregate:plc": "npx tsx src/lib/collectors/run-aggregate-plc.ts",
     "aggregate:active-plc": "npx tsx src/lib/collectors/aggregate-active-plc.ts",
+    "aggregate:activity-pds": "npx tsx src/lib/collectors/aggregate-activity-pds.ts",
     "seed:manual-geo": "npx tsx src/lib/collectors/seed-manual-geo.ts",
     "collect:skywatch": "npx tsx src/lib/collectors/skywatch-labels.ts",
     "collect:bsky-mod": "npx tsx src/lib/collectors/skywatch-labels.ts bsky-mod",

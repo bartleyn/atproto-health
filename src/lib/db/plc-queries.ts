@@ -475,6 +475,84 @@ export function getScannedPdsCount(): number {
   return row.cnt;
 }
 
+export interface ScannedTopPds {
+  url: string;
+  repoCount: number;
+  activeCount: number;
+  snapshot_date: string;
+}
+
+/** Top PDSes by repo count from the most recent scan:pds-status run.
+ *  Collapses bsky.network shards (SUM — genuinely separate backends) and
+ *  same-IP non-bsky aliases (MAX — same repos served under multiple hostnames). */
+export function getTopPdsByScan(limit = 15, hideBsky = false): ScannedTopPds[] {
+  const db = getPlcDb();
+
+  const rows = db.prepare(`
+    WITH latest AS (
+      SELECT RTRIM(pds_url, '/') AS norm_url, MAX(snapshot_date) AS snap_date
+      FROM pds_repo_status_snapshots
+      GROUP BY norm_url
+    )
+    SELECT
+      RTRIM(s.pds_url, '/') AS url,
+      s.ip_address,
+      s.total_scanned,
+      s.active,
+      l.snap_date AS snapshot_date
+    FROM pds_repo_status_snapshots s
+    JOIN latest l ON RTRIM(s.pds_url, '/') = l.norm_url AND s.snapshot_date = l.snap_date
+    WHERE s.total_scanned > 0
+  `).all() as { url: string; ip_address: string | null; total_scanned: number; active: number; snapshot_date: string }[];
+
+  const isBsky = (u: string) => u.includes(".host.bsky.network") || /bsky\.social/.test(u);
+  const hostname = (u: string) => u.replace(/^https?:\/\//, "");
+
+  // Bsky shards: sum across all shards (each has genuinely different repos).
+  let bskyRepos = 0, bskyActive = 0, bskyDate = "";
+  // Non-bsky: group by IP. URLs with no IP resolved stay as their own group.
+  const ipGroups = new Map<string, { url: string; repoCount: number; activeCount: number; snapshot_date: string }>();
+
+  for (const r of rows) {
+    if (isBsky(r.url)) {
+      bskyRepos  += r.total_scanned;
+      bskyActive += r.active;
+      if (r.snapshot_date > bskyDate) bskyDate = r.snapshot_date;
+      continue;
+    }
+    // Group key: IP if resolved, otherwise URL (each is its own group).
+    const key = r.ip_address ?? r.url;
+    const existing = ipGroups.get(key);
+    if (!existing) {
+      ipGroups.set(key, { url: r.url, repoCount: r.total_scanned, activeCount: r.active, snapshot_date: r.snapshot_date });
+    } else {
+      // Same backend: prefer the shortest hostname as canonical (least likely to be a subdomain alias).
+      if (hostname(r.url).length < hostname(existing.url).length) existing.url = r.url;
+      // Same repos on same backend — take the freshest/highest count.
+      if (r.total_scanned > existing.repoCount) {
+        existing.repoCount  = r.total_scanned;
+        existing.activeCount = r.active;
+      }
+      if (r.snapshot_date > existing.snapshot_date) existing.snapshot_date = r.snapshot_date;
+    }
+  }
+
+  const results: ScannedTopPds[] = [...ipGroups.values()].map(g => ({
+    url: g.url,
+    repoCount: g.repoCount,
+    activeCount: g.activeCount,
+    snapshot_date: g.snapshot_date,
+  }));
+
+  if (!hideBsky && bskyRepos > 0) {
+    results.push({ url: "https://bsky.social", repoCount: bskyRepos, activeCount: bskyActive, snapshot_date: bskyDate });
+  }
+
+  return results
+    .sort((a, b) => b.repoCount - a.repoCount)
+    .slice(0, limit);
+}
+
 export interface AccountCohortRow {
   cohort: string;
   count: number;

@@ -293,4 +293,7 @@ function migrate(db: Database.Database) {
     db.exec(`UPDATE did_in_repo SET first_scanned_at = scanned_at WHERE first_scanned_at IS NULL`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_did_in_repo_first_scanned_at ON did_in_repo(first_scanned_at)`);
   } catch { /* already exists */ }
+  try {
+    db.exec(`ALTER TABLE pds_repo_status_snapshots ADD COLUMN ip_address TEXT`);
+  } catch { /* already exists */ }
 }

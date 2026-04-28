@@ -87,6 +87,21 @@ function migrate(db: Database.Database) {
 
     CREATE INDEX IF NOT EXISTS idx_collection_activity_last_seen
       ON collection_activity(last_seen);
+
+    -- Pre-aggregated per-PDS activity summary (written by aggregate:activity-pds).
+    -- One row per (pds_url, window_days). bsky.network shards collapsed to 'bsky.network'.
+    -- Counts are unique DIDs that performed each action type within the window.
+    CREATE TABLE IF NOT EXISTS pds_activity_summary (
+      pds_url       TEXT    NOT NULL,
+      window_days   INTEGER NOT NULL DEFAULT 30,
+      active_dids   INTEGER NOT NULL,
+      poster_dids   INTEGER NOT NULL,
+      liker_dids    INTEGER NOT NULL,
+      reposter_dids INTEGER NOT NULL,
+      follower_dids INTEGER NOT NULL,
+      updated_at    TEXT    NOT NULL,
+      PRIMARY KEY (pds_url, window_days)
+    );
   `);
 
   // Add activity_types column to existing DBs that predate this migration

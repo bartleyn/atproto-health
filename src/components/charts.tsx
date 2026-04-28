@@ -5,7 +5,7 @@ import type { SankeyNode, SankeyLink } from "d3-sankey";
 import { useState, useRef, useEffect } from "react";
 import type { MigrationFlow, WeeklyMigrationRow, TimeseriesRow, TrajectoryEdge, PdsAgeRow, LangTotal } from "@/lib/db/plc-queries";
 import type { CityCluster, PdsProviderLocation, HostingProviderCount } from "@/lib/db/queries";
-import { WorldMap, type PdsLangLocation } from "@/components/world-map";
+import { WorldMap, type PdsLangLocation, type NamespaceLocation } from "@/components/world-map";
 
 import {
   BarChart,
@@ -457,13 +457,17 @@ interface InfraSectionProps {
   langLocations?: PdsLangLocation[];
   topLangs?: LangTotal[];
   bskyLangTotals?: Map<string, number>;
+  namespaceLocations?: NamespaceLocation[];
+  topNamespaces?: { ns: string; total_dids: number }[];
 }
 
-export function InfraSection({ providers, cdnBreakdown, locations, providerLocations, langLocations, topLangs, bskyLangTotals }: InfraSectionProps) {
+export function InfraSection({ providers, cdnBreakdown, locations, providerLocations, langLocations, topLangs, bskyLangTotals, namespaceLocations, topNamespaces }: InfraSectionProps) {
   const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
   const [selectedLang, setSelectedLang] = useState<string | null>(null);
-  const [insetTab, setInsetTab] = useState<"provider" | "lang">("provider");
+  const [selectedNamespace, setSelectedNamespace] = useState<string | null>(null);
+  const [insetTab, setInsetTab] = useState<"provider" | "lang" | "namespace">("provider");
   const [showBskyLang, setShowBskyLang] = useState(false);
+  const [showBskyNs, setShowBskyNs] = useState(false);
 
   const donutData = providers
     .filter((p) => !p.isCdn)
@@ -510,30 +514,57 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
 
   const hasLangData = filteredTopLangs && filteredTopLangs.length > 0;
 
+  // Filter namespace locations and recompute totals based on bsky toggle.
+  const activeNsLocations = namespaceLocations
+    ? showBskyNs ? namespaceLocations : namespaceLocations.filter(l => !isBskyUrl(l.pds_url))
+    : undefined;
+  const activeTopNamespaces = activeNsLocations
+    ? (() => {
+        const totals = new Map<string, number>();
+        for (const l of activeNsLocations) totals.set(l.ns, (totals.get(l.ns) ?? 0) + l.dids);
+        return [...totals.entries()].sort((a, b) => b[1] - a[1]).map(([ns, total_dids]) => ({ ns, total_dids }));
+      })()
+    : topNamespaces ?? [];
+
   function pickProvider(name: string | null) {
     setSelectedProvider(prev => prev === name ? null : name);
     setSelectedLang(null);
+    setSelectedNamespace(null);
     setInsetTab("provider");
   }
 
   function pickLang(lang: string | null) {
     setSelectedLang(prev => prev === lang ? null : lang);
     setSelectedProvider(null);
+    setSelectedNamespace(null);
     setInsetTab("lang");
   }
+
+  function pickNamespace(ns: string | null) {
+    setSelectedNamespace(prev => prev === ns ? null : ns);
+    setSelectedProvider(null);
+    setSelectedLang(null);
+    setInsetTab("namespace");
+  }
+
+  const hasNamespaceData = topNamespaces && topNamespaces.length > 0;
 
   const clearLabel = selectedProvider
     ? `${mappedCount} of ${totalCount} ${selectedProvider} PDSes mapped · clear`
     : selectedLang
     ? `${langMappedCount} PDSes with "${selectedLang}" speakers · clear`
+    : selectedNamespace
+    ? `${selectedNamespace} users · clear`
     : null;
 
   const subLabel = selectedProvider
     ? `amber = cities with ${selectedProvider} PDSes`
     : selectedLang
     ? `amber = cities with "${selectedLang}" speakers`
-    : hasLangData
-    ? "click a provider or language to highlight on map"
+    : selectedNamespace
+    ? `amber = cities with ${selectedNamespace} users`
+    : hasLangData || hasNamespaceData
+    ? "click a provider, language, or appview to highlight on map"
     : "click a provider to highlight on map";
 
   return (
@@ -543,7 +574,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
         <h2 className="text-base font-semibold">PDS Geographic Distribution</h2>
         {clearLabel && (
           <button
-            onClick={() => { setSelectedProvider(null); setSelectedLang(null); }}
+            onClick={() => { setSelectedProvider(null); setSelectedLang(null); setSelectedNamespace(null); }}
             className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
           >
             {clearLabel}
@@ -565,12 +596,14 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
           selectedProvider={selectedProvider}
           langLocations={activeLangLocations}
           selectedLang={selectedLang}
+          namespaceLocations={activeNsLocations}
+          selectedNamespace={selectedNamespace}
         />
 
         {/* Inset panel — visible on md+ only; hidden on mobile */}
         <div className="hidden md:block absolute bottom-3 left-3 w-52 bg-gray-950/90 border border-gray-700 rounded-lg p-3">
           {/* Tab toggle */}
-          {hasLangData && (
+          {(hasLangData || hasNamespaceData) && (
             <div className="flex gap-1 mb-2">
               <button
                 onClick={() => setInsetTab("provider")}
@@ -578,12 +611,22 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
               >
                 Providers
               </button>
-              <button
-                onClick={() => setInsetTab("lang")}
-                className={`flex-1 text-xs py-0.5 rounded transition-colors ${insetTab === "lang" ? "bg-gray-700 text-white" : "text-gray-500 hover:text-gray-300"}`}
-              >
-                Languages
-              </button>
+              {hasLangData && (
+                <button
+                  onClick={() => setInsetTab("lang")}
+                  className={`flex-1 text-xs py-0.5 rounded transition-colors ${insetTab === "lang" ? "bg-gray-700 text-white" : "text-gray-500 hover:text-gray-300"}`}
+                >
+                  Languages
+                </button>
+              )}
+              {hasNamespaceData && (
+                <button
+                  onClick={() => setInsetTab("namespace")}
+                  className={`flex-1 text-xs py-0.5 rounded transition-colors ${insetTab === "namespace" ? "bg-gray-700 text-white" : "text-gray-500 hover:text-gray-300"}`}
+                >
+                  AppViews
+                </button>
+              )}
             </div>
           )}
 
@@ -715,6 +758,81 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
                           />
                           <span className={`text-xs font-mono truncate ${selectedLang === row.lang ? "text-white font-medium" : "text-gray-400"}`}>
                             {row.lang}
+                          </span>
+                          <span className="text-xs text-gray-600 ml-auto flex-shrink-0 pl-1">{row.total_dids.toLocaleString()}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                );
+              })()}
+            </>
+          )}
+
+          {insetTab === "namespace" && hasNamespaceData && (
+            <>
+              <div className="flex items-center justify-between mb-0.5">
+                <p className="text-xs font-medium text-gray-300">AppViews</p>
+                <button
+                  onClick={() => { setShowBskyNs(v => !v); setSelectedNamespace(null); }}
+                  className={`text-xs px-1.5 py-0.5 rounded transition-colors ${showBskyNs ? "bg-blue-900/60 text-blue-300" : "text-gray-600 hover:text-gray-400"}`}
+                >
+                  {showBskyNs ? "bsky on" : "bsky off"}
+                </button>
+              </div>
+              <p className="text-xs text-gray-600 mb-2"># = unique users · click to highlight</p>
+              {(() => {
+                const nsDonutData = activeTopNamespaces.slice(0, 12).map(r => ({ name: r.ns, value: r.total_dids }));
+                return (
+                  <>
+                    <div className="flex justify-center">
+                      <PieChart width={176} height={140}>
+                        <Pie
+                          data={nsDonutData}
+                          cx="50%"
+                          cy="50%"
+                          innerRadius={34}
+                          outerRadius={58}
+                          dataKey="value"
+                          nameKey="name"
+                          stroke="#0a0f1a"
+                          strokeWidth={2}
+                          style={{ cursor: "pointer" }}
+                          onClick={(entry) => pickNamespace((entry.name as string) ?? null)}
+                        >
+                          {nsDonutData.map((entry, i) => {
+                            const dimmed = selectedNamespace && selectedNamespace !== entry.name;
+                            return (
+                              <Cell
+                                key={i}
+                                fill={dimmed ? "#374151" : COLORS[i % COLORS.length]}
+                                fillOpacity={dimmed ? 0.4 : 1}
+                                stroke={selectedNamespace === entry.name ? "#fff" : "#0a0f1a"}
+                                strokeWidth={2}
+                              />
+                            );
+                          })}
+                        </Pie>
+                        <Tooltip {...tooltipStyle} />
+                      </PieChart>
+                    </div>
+                    <div className="space-y-px max-h-28 overflow-y-auto mt-1">
+                      {activeTopNamespaces.slice(0, 20).map((row, i) => (
+                        <button
+                          key={row.ns}
+                          className="flex items-center gap-1.5 w-full text-left px-1 py-px rounded hover:bg-gray-800/60 transition-colors"
+                          onClick={() => pickNamespace(row.ns)}
+                        >
+                          <span
+                            className="w-2 h-2 rounded-full flex-shrink-0"
+                            style={{
+                              backgroundColor: selectedNamespace && selectedNamespace !== row.ns
+                                ? "#374151"
+                                : i < 12 ? COLORS[i % COLORS.length] : "#6366f1",
+                            }}
+                          />
+                          <span className={`text-xs font-mono truncate ${selectedNamespace === row.ns ? "text-white font-medium" : "text-gray-400"}`}>
+                            {row.ns}
                           </span>
                           <span className="text-xs text-gray-600 ml-auto flex-shrink-0 pl-1">{row.total_dids.toLocaleString()}</span>
                         </button>

@@ -13,6 +13,7 @@
  */
 
 import path from "path";
+import { promises as dns } from "dns";
 import Database from "better-sqlite3";
 import { getPlcDb } from "../db/plc-schema";
 
@@ -147,6 +148,25 @@ async function scanPds(
   }
 }
 
+// ── DNS resolution ────────────────────────────────────────────────────────────
+async function resolveIp(pdsUrl: string): Promise<string | null> {
+  try {
+    const hostname = new URL(pdsUrl).hostname;
+    const { address } = await dns.lookup(hostname, { family: 4 });
+    return address;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveAll(urls: string[]): Promise<Map<string, string | null>> {
+  const map = new Map<string, string | null>();
+  await Promise.all(urls.map(async url => {
+    map.set(url, await resolveIp(url));
+  }));
+  return map;
+}
+
 // ── Concurrency pool ──────────────────────────────────────────────────────────
 async function runWithConcurrency<T>(
   items: T[],
@@ -225,10 +245,16 @@ async function main() {
     console.log(`Resuming: ${alreadyDone.size.toLocaleString()} already done today, ${toScan.length.toLocaleString()} remaining\n`);
   }
 
+  // Resolve IPs for all PDSes to be scanned (used to detect same-backend aliases).
+  console.log(`Resolving IPs for ${toScan.length.toLocaleString()} PDSes...`);
+  const ipMap = await resolveAll(toScan);
+  const resolved = [...ipMap.values()].filter(Boolean).length;
+  console.log(`  ${resolved.toLocaleString()} of ${toScan.length.toLocaleString()} resolved\n`);
+
   const upsert = db.prepare(`
     INSERT INTO pds_repo_status_snapshots
-      (pds_url, snapshot_date, active, deactivated, deleted, takendown, suspended, other, total_scanned, is_sampled, did_plc_count, did_web_count, is_partial, scanned_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+      (pds_url, snapshot_date, active, deactivated, deleted, takendown, suspended, other, total_scanned, is_sampled, did_plc_count, did_web_count, is_partial, scanned_at, ip_address)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
     ON CONFLICT(pds_url, snapshot_date) DO UPDATE SET
       active = excluded.active, deactivated = excluded.deactivated,
       deleted = excluded.deleted, takendown = excluded.takendown,
@@ -237,7 +263,8 @@ async function main() {
       did_plc_count = excluded.did_plc_count,
       did_web_count = excluded.did_web_count,
       is_partial = excluded.is_partial,
-      scanned_at = excluded.scanned_at
+      scanned_at = excluded.scanned_at,
+      ip_address = excluded.ip_address
   `);
 
   const upsertDidStatus = db.prepare(`
@@ -330,7 +357,7 @@ async function main() {
       counts.active, counts.deactivated, counts.deleted,
       counts.takendown, counts.suspended, counts.other,
       counts.total, counts.didPlc, counts.didWeb,
-      partial ? 1 : 0, scannedAt
+      partial ? 1 : 0, scannedAt, ipMap.get(pdsUrl) ?? null
     );
 
     if (nonActive.length > 0) {

@@ -624,7 +624,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
                   onClick={() => setInsetTab("namespace")}
                   className={`flex-1 text-xs py-0.5 rounded transition-colors ${insetTab === "namespace" ? "bg-gray-700 text-white" : "text-gray-500 hover:text-gray-300"}`}
                 >
-                  AppViews
+                  Lexicons
                 </button>
               )}
             </div>
@@ -772,7 +772,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
           {insetTab === "namespace" && hasNamespaceData && (
             <>
               <div className="flex items-center justify-between mb-0.5">
-                <p className="text-xs font-medium text-gray-300">AppViews</p>
+                <p className="text-xs font-medium text-gray-300">Lexicons</p>
                 <button
                   onClick={() => { setShowBskyNs(v => !v); setSelectedNamespace(null); }}
                   className={`text-xs px-1.5 py-0.5 rounded transition-colors ${showBskyNs ? "bg-blue-900/60 text-blue-300" : "text-gray-600 hover:text-gray-400"}`}
@@ -780,7 +780,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
                   {showBskyNs ? "bsky on" : "bsky off"}
                 </button>
               </div>
-              <p className="text-xs text-gray-600 mb-2"># = unique users · click to highlight</p>
+              <p className="text-xs text-gray-600 mb-2"># = recent unique users (jetstream, no backfill) · click to highlight</p>
               {(() => {
                 const nsDonutData = activeTopNamespaces.slice(0, 12).map(r => ({ name: r.ns, value: r.total_dids }));
                 return (

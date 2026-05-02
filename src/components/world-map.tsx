@@ -65,27 +65,37 @@ export function WorldMap({
       highlightCountByCluster.set(key, (highlightCountByCluster.get(key) ?? 0) + 1);
     }
   } else if (selectedLang && langLocations) {
+    // Accumulate per cluster and per displayPds so all bsky.network shards sum together.
+    const clusterPdsDids = new Map<string, Map<string, number>>();
     for (const l of langLocations) {
       if (l.lang !== selectedLang) continue;
       const key = `${l.city ?? ""}|${l.country ?? ""}`;
       highlightCountByCluster.set(key, (highlightCountByCluster.get(key) ?? 0) + l.dids);
-      const isBskyShard = /bsky\.network|bsky\.social/.test(l.url);
-      const displayPds = isBskyShard ? "bsky.network" : l.url.replace(/^https?:\/\//, "");
-      const current = topPdsByCluster.get(key);
-      if (!current || l.dids > current.dids) {
-        topPdsByCluster.set(key, { pds: displayPds, dids: l.dids });
-      }
+      const displayPds = /bsky\.network|bsky\.social/.test(l.url) ? "bsky.network" : l.url.replace(/^https?:\/\//, "");
+      if (!clusterPdsDids.has(key)) clusterPdsDids.set(key, new Map());
+      const byPds = clusterPdsDids.get(key)!;
+      byPds.set(displayPds, (byPds.get(displayPds) ?? 0) + l.dids);
+    }
+    for (const [key, byPds] of clusterPdsDids) {
+      let topPds = "", topDids = 0;
+      for (const [pds, dids] of byPds) { if (dids > topDids) { topPds = pds; topDids = dids; } }
+      topPdsByCluster.set(key, { pds: topPds, dids: topDids });
     }
   } else if (selectedNamespace && namespaceLocations) {
+    const clusterPdsDids = new Map<string, Map<string, number>>();
     for (const l of namespaceLocations) {
       if (l.ns !== selectedNamespace) continue;
       const key = `${l.city ?? ""}|${l.country ?? ""}`;
       highlightCountByCluster.set(key, (highlightCountByCluster.get(key) ?? 0) + l.dids);
-      const displayPds = l.pds_url.replace(/^https?:\/\//, "").replace(/\/$/, "");
-      const current = topPdsByCluster.get(key);
-      if (!current || l.dids > current.dids) {
-        topPdsByCluster.set(key, { pds: displayPds, dids: l.dids });
-      }
+      const displayPds = /bsky\.network|bsky\.social/.test(l.pds_url) ? "bsky.network" : l.pds_url.replace(/^https?:\/\//, "").replace(/\/$/, "");
+      if (!clusterPdsDids.has(key)) clusterPdsDids.set(key, new Map());
+      const byPds = clusterPdsDids.get(key)!;
+      byPds.set(displayPds, (byPds.get(displayPds) ?? 0) + l.dids);
+    }
+    for (const [key, byPds] of clusterPdsDids) {
+      let topPds = "", topDids = 0;
+      for (const [pds, dids] of byPds) { if (dids > topDids) { topPds = pds; topDids = dids; } }
+      topPdsByCluster.set(key, { pds: topPds, dids: topDids });
     }
   }
 

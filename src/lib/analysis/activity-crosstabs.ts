@@ -3,7 +3,22 @@ import path from "path";
 import fs from "fs";
 
 const args = process.argv.slice(2);
-const daysBack = args[0] ? parseInt(args[0], 10) : 3;
+const daysBack = args[0] && !args[0].startsWith("--") ? parseInt(args[0], 10) : 3;
+
+// --only <query_name>  (repeatable) → run only named queries; omit to run all
+// Query names: activity_by_age, activity_by_label, stickiness, stickiness_by_age,
+//   active_days_dist, cohort_activation, action_rates, non_active, account_events,
+//   trump_weekly, lang_activity, migration_activity, engagement_depth, starterpacks,
+//   ns_retention, daily_actions_by_cohort
+const onlyFlags: string[] = [];
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === "--only" && args[i + 1]) {
+    onlyFlags.push(args[i + 1]);
+    i++;
+  }
+}
+const runAll = onlyFlags.length === 0;
+const shouldRun = (name: string) => runAll || onlyFlags.includes(name);
 
 const RUN_DATE = new Date().toISOString().slice(0, 10);
 const OUT_DIR = path.join(process.cwd(), "analysis-output", RUN_DATE);
@@ -52,6 +67,20 @@ const activityDb = new Database(path.join(process.cwd(), "jetstream-activity.db"
 const plcDb = new Database(path.join(process.cwd(), "plc-migrations.db"), { readonly: true });
 activityDb.exec(`ATTACH DATABASE '${plcDb.name}' as plc`);
 
+// 128 MB page cache + in-memory temp tables: keeps sort/hash work out of the
+// WAL files so analysis I/O doesn't compete with the live collector writes.
+activityDb.pragma("cache_size = -131072");
+activityDb.pragma("temp_store = MEMORY");
+
+// Materialise once; all queries join against this instead of repeating the CTE.
+activityDb.exec(`
+  CREATE TEMP TABLE excluded_dids AS
+    SELECT did FROM plc.did_repo_status
+    UNION
+    SELECT did FROM plc.skywatch_labels WHERE label IN ('spam', 'impersonation');
+  CREATE INDEX temp.idx_excluded_dids ON excluded_dids(did);
+`);
+
 // ── Shared SQL fragments ──────────────────────────────────────────────────────
 
 const newAcctCutoff = daysAgoStr(7);  // accounts created in the last 7 days
@@ -77,13 +106,22 @@ const ACTIVITY_COLS = `
 const windowStart = daysAgoStr(daysBack);
 console.log(`\nActivity crosstabs — activity window: ${windowStart} – ${RUN_DATE} (${daysBack} days)`);
 
+// Single read transaction: all queries see the same consistent DB snapshot.
+// BEGIN DEFERRED on a readonly WAL connection never blocks the live collector.
+activityDb.exec("BEGIN DEFERRED");
+try {
+
 // ── 1. Activity by age bucket ─────────────────────────────────────────────────
 
+if (shouldRun("activity_by_age")) {
 const activityByAge = activityDb.prepare(`
-  WITH active AS (
-    SELECT DISTINCT did, activity_types
-    FROM did_activity_daily
-    WHERE date >= date('now', '-' || ? || ' days')
+  WITH
+active AS (
+    SELECT DISTINCT d.did, d.activity_types
+    FROM did_activity_daily d
+    LEFT JOIN excluded_dids ex ON d.did = ex.did
+    WHERE d.date >= date('now', '-' || ? || ' days')
+      AND ex.did IS NULL
   ),
   buckets AS (
     SELECT
@@ -101,11 +139,14 @@ const activityByAge = activityDb.prepare(`
 `).all(daysBack) as Record<string, unknown>[];
 
 report("Activity by Age Bucket", `activity_by_age_${daysBack}d.csv`, activityByAge);
+}
 
 // ── 2. Activity by Skywatch label ─────────────────────────────────────────────
 
+if (shouldRun("activity_by_label")) {
 const activityByLabel = activityDb.prepare(`
-  WITH active AS (
+  WITH
+ active AS (
     SELECT DISTINCT did, activity_types
     FROM did_activity_daily
     WHERE date >= date('now', '-' || ? || ' days')
@@ -124,20 +165,27 @@ const activityByLabel = activityDb.prepare(`
 `).all(daysBack) as Record<string, unknown>[];
 
 report("Activity by Skywatch Label", `activity_by_label_${daysBack}d.csv`, activityByLabel);
+}
 
 // ── 3. Overall stickiness ─────────────────────────────────────────────────────
 
+if (shouldRun("stickiness")) {
 const stickiness = activityDb.prepare(`
-  WITH daily_counts AS (
-    SELECT date, COUNT(DISTINCT did) AS daily_uniques
-    FROM did_activity_daily
-    WHERE date >= date('now', '-' || ? || ' days')
-    GROUP BY date
+  WITH
+daily_counts AS (
+    SELECT d.date, COUNT(DISTINCT d.did) AS daily_uniques
+    FROM did_activity_daily d
+    LEFT JOIN excluded_dids ex ON d.did = ex.did
+    WHERE d.date >= date('now', '-' || ? || ' days')
+      AND ex.did IS NULL
+    GROUP BY d.date
   ),
   total_unique AS (
-    SELECT COUNT(DISTINCT did) AS total_uniques
-    FROM did_activity_daily
-    WHERE date >= date('now', '-' || ? || ' days')
+    SELECT COUNT(DISTINCT d.did) AS total_uniques
+    FROM did_activity_daily d
+    LEFT JOIN excluded_dids ex ON d.did = ex.did
+    WHERE d.date >= date('now', '-' || ? || ' days')
+      AND ex.did IS NULL
   )
   SELECT
     ROUND(AVG(daily_uniques), 0)                                                                   AS avg_daily_uniques,
@@ -149,18 +197,23 @@ const stickiness = activityDb.prepare(`
 `).get(daysBack, daysBack) as Record<string, unknown>;
 
 report("Stickiness", `stickiness_${daysBack}d.csv`, [stickiness]);
+}
 
 // ── 4. Stickiness by age bucket ───────────────────────────────────────────────
 
+if (shouldRun("stickiness_by_age")) {
 const stickinessByBucket = activityDb.prepare(`
-  WITH daily_by_bucket AS (
+  WITH
+daily_by_bucket AS (
     SELECT
       d.date,
       ${AGE_BUCKET} AS age_bucket,
       COUNT(DISTINCT d.did) AS daily_uniques
     FROM did_activity_daily d
     JOIN plc.plc_account_creations p ON d.did = p.did
+    LEFT JOIN excluded_dids ex ON d.did = ex.did
     WHERE d.date >= date('now', '-' || ? || ' days')
+      AND ex.did IS NULL
     GROUP BY d.date, age_bucket
   ),
   totals AS (
@@ -169,7 +222,9 @@ const stickinessByBucket = activityDb.prepare(`
       COUNT(DISTINCT d.did) AS total_uniques
     FROM did_activity_daily d
     JOIN plc.plc_account_creations p ON d.did = p.did
+    LEFT JOIN excluded_dids ex ON d.did = ex.did
     WHERE d.date >= date('now', '-' || ? || ' days')
+      AND ex.did IS NULL
     GROUP BY age_bucket
   )
   SELECT
@@ -186,18 +241,23 @@ const stickinessByBucket = activityDb.prepare(`
 `).all(daysBack, daysBack) as Record<string, unknown>[];
 
 report("Stickiness by Age Bucket", `stickiness_by_age_${daysBack}d.csv`, stickinessByBucket);
+}
 
 // ── 5. Active days distribution × age bucket ──────────────────────────────────
 
+if (shouldRun("active_days_dist")) {
 const activeDaysDist = activityDb.prepare(`
-  WITH user_days AS (
+  WITH
+user_days AS (
     SELECT
       d.did,
       ${AGE_BUCKET} AS age_bucket,
       COUNT(DISTINCT d.date) AS active_days
     FROM did_activity_daily d
     JOIN plc.plc_account_creations p ON d.did = p.did
+    LEFT JOIN excluded_dids ex ON d.did = ex.did
     WHERE d.date >= date('now', '-' || ? || ' days')
+      AND ex.did IS NULL
     GROUP BY d.did, age_bucket
   )
   SELECT
@@ -216,11 +276,14 @@ const activeDaysDist = activityDb.prepare(`
 `).all(daysBack) as Record<string, unknown>[];
 
 report(`Active Days Distribution x Age Bucket`, `active_days_by_age_${daysBack}d.csv`, activeDaysDist);
+}
 
 // ── 6. Cohort activation rate ─────────────────────────────────────────────────
 
+if (shouldRun("cohort_activation")) {
 const cohortActivationRate = activityDb.prepare(`
-  WITH total_by_bucket AS (
+  WITH
+ total_by_bucket AS (
     -- Use plc_account_creations as denominator: continuously updated by PLC collector,
     -- so it includes accounts created since the last scan:pds-status run.
     -- did_in_repo would undercount new cohorts whose PDSes haven't been scanned yet.
@@ -252,26 +315,32 @@ const cohortActivationRate = activityDb.prepare(`
 `).all(daysBack) as Record<string, unknown>[];
 
 report(`Cohort Activation Rate`, `cohort_activation_${daysBack}d.csv`, cohortActivationRate);
+}
 
 // ── 7. Action rates by cohort ─────────────────────────────────────────────────
 
+if (shouldRun("action_rates")) {
 const actionRatesByCohort = activityDb.prepare(`
-  WITH active_users AS (
+  WITH
+active_users AS (
     SELECT
-      did,
-      MAX(CASE WHEN activity_types & 1 THEN 1 ELSE 0 END) AS ever_posted,
-      MAX(CASE WHEN activity_types & 2 THEN 1 ELSE 0 END) AS ever_liked,
-      MAX(CASE WHEN activity_types & 4 THEN 1 ELSE 0 END) AS ever_reposted,
-      MAX(CASE WHEN activity_types & 8 THEN 1 ELSE 0 END) AS ever_followed
-    FROM did_activity_daily
-    WHERE date >= date('now', '-' || ? || ' days')
-    GROUP BY did
+      d.did,
+      MAX(CASE WHEN d.activity_types & 1 THEN 1 ELSE 0 END) AS ever_posted,
+      MAX(CASE WHEN d.activity_types & 2 THEN 1 ELSE 0 END) AS ever_liked,
+      MAX(CASE WHEN d.activity_types & 4 THEN 1 ELSE 0 END) AS ever_reposted,
+      MAX(CASE WHEN d.activity_types & 8 THEN 1 ELSE 0 END) AS ever_followed
+    FROM did_activity_daily d
+    LEFT JOIN excluded_dids ex ON d.did = ex.did
+    WHERE d.date >= date('now', '-' || ? || ' days')
+      AND ex.did IS NULL
+    GROUP BY d.did
   ),
   cohort_sizes AS (
     SELECT
       ${AGE_BUCKET} AS age_bucket,
       COUNT(*) AS cohort_size
     FROM plc.plc_account_creations p
+    JOIN plc.did_in_repo r ON p.did = r.did
     LEFT JOIN plc.did_repo_status s ON p.did = s.did
     WHERE s.did IS NULL
     GROUP BY age_bucket
@@ -304,6 +373,7 @@ const actionRatesByCohort = activityDb.prepare(`
 `).all(daysBack) as Record<string, unknown>[];
 
 report(`Action Rates by Cohort`, `action_rates_by_cohort_${daysBack}d.csv`, actionRatesByCohort);
+}
 
 // ── 8. Non-active account status by cohort ───────────────────────────────────
 
@@ -312,8 +382,10 @@ report(`Action Rates by Cohort`, `action_rates_by_cohort_${daysBack}d.csv`, acti
 // We define a shared fragment string and interpolate it into the SQL template.
 const AGE_BUCKET_PLC = AGE_BUCKET.replace(/\bp\./g, "p.");  // same expression, explicit alias
 
+if (shouldRun("non_active")) {
 const nonActiveByCohort = plcDb.prepare(`
-  WITH cohort_sizes AS (
+  WITH
+ cohort_sizes AS (
     SELECT
       ${AGE_BUCKET_PLC} AS age_bucket,
       COUNT(*) AS cohort_size
@@ -347,9 +419,11 @@ const nonActiveByCohort = plcDb.prepare(`
 `).all() as Record<string, unknown>[];
 
 report("Non-Active Account Status by Cohort", `non_active_by_cohort.csv`, nonActiveByCohort);
+}
 
 // ── 9. Account-level event trends ────────────────────────────────────────────
 
+if (shouldRun("account_events")) {
 const accountEventTrends = activityDb.prepare(`
   SELECT
     date,
@@ -365,30 +439,37 @@ const accountEventTrends = activityDb.prepare(`
 `).all(daysBack) as Record<string, unknown>[];
 
 report(`Account Event Trends`, `account_event_trends_${daysBack}d.csv`, accountEventTrends);
+}
 
 // ── 10. pds.trump.com weekly DID registrations (cumulative) ─────────────────
 
+if (shouldRun("trump_weekly")) {
 const trumpWeekly = plcDb.prepare(`
   SELECT
     week,
     count                                     AS new_dids,
     SUM(count) OVER (ORDER BY week)           AS cumulative_dids
   FROM plc_creation_weekly
-  WHERE pds_url LIKE '%trump%'
+  WHERE pds_url = 'https://pds.trump.com'
   ORDER BY week
 `).all() as Record<string, unknown>[];
 
 report("pds.trump.com Weekly DID Registrations", "trump_pds_weekly.csv", trumpWeekly);
+}
 
 // ── 11. Language × activity ───────────────────────────────────────────────────
 // Uses did_langs from activityDb (accumulated from post events) joined with
 // did_activity_daily. A DID can have multiple lang rows; it counts toward each.
 
+if (shouldRun("lang_activity")) {
 const langActivity = activityDb.prepare(`
-  WITH active AS (
-    SELECT DISTINCT did, activity_types
-    FROM did_activity_daily
-    WHERE date >= date('now', '-' || ? || ' days')
+  WITH
+active AS (
+    SELECT DISTINCT d.did, d.activity_types
+    FROM did_activity_daily d
+    LEFT JOIN excluded_dids ex ON d.did = ex.did
+    WHERE d.date >= date('now', '-' || ? || ' days')
+      AND ex.did IS NULL
   )
   SELECT
     dl.lang,
@@ -407,13 +488,16 @@ const langActivity = activityDb.prepare(`
 `).all(daysBack) as Record<string, unknown>[];
 
 report(`Language × Activity`, `lang_activity_${daysBack}d.csv`, langActivity);
+}
 
 // ── 12. Migration × activity ──────────────────────────────────────────────────
 // Migrated = has at least one row in plc_migrations. Compares activation rate,
 // active days, and action type rates between migrated and non-migrated cohorts.
 
+if (shouldRun("migration_activity")) {
 const migrationActivity = activityDb.prepare(`
-  WITH migrated_dids AS (
+  WITH
+ migrated_dids AS (
     SELECT DISTINCT did FROM plc.plc_migrations
   ),
   repo_base AS (
@@ -452,15 +536,18 @@ const migrationActivity = activityDb.prepare(`
 `).all(daysBack) as Record<string, unknown>[];
 
 report(`Migration × Activity`, `migration_activity_${daysBack}d.csv`, migrationActivity);
+}
 
 // ── 13. Engagement depth by cohort ───────────────────────────────────────────
 // For each active user, count how many distinct action types they used in the
 // window (0–4). Groups by cohort. Shows depth-of-engagement, not just presence.
 
+if (shouldRun("engagement_depth")) {
 const engagementDepth = activityDb.prepare(`
-  WITH user_depth AS (
+  WITH
+user_depth AS (
     SELECT
-      did,
+      d.did AS did,
       SUM(
         (activity_types & 1 > 0) +
         (activity_types & 2 > 0) +
@@ -473,9 +560,11 @@ const engagementDepth = activityDb.prepare(`
         MAX(activity_types & 4 > 0) +
         MAX(activity_types & 8 > 0)
       )                          AS distinct_types_used
-    FROM did_activity_daily
-    WHERE date >= date('now', '-' || ? || ' days')
-    GROUP BY did
+    FROM did_activity_daily d
+    LEFT JOIN excluded_dids ex ON d.did = ex.did
+    WHERE d.date >= date('now', '-' || ? || ' days')
+      AND ex.did IS NULL
+    GROUP BY d.did
   ),
   with_bucket AS (
     SELECT
@@ -499,11 +588,13 @@ const engagementDepth = activityDb.prepare(`
 `).all(daysBack) as Record<string, unknown>[];
 
 report(`Engagement Depth by Cohort`, `engagement_depth_${daysBack}d.csv`, engagementDepth);
+}
 
 // ── 14. Starterpack joins ranking ────────────────────────────────────────────
 // Simple cumulative join count per starterpack URI, sorted by total joins.
 // Data is sparse until the collector has been running longer.
 
+if (shouldRun("starterpacks")) {
 const starterpacks = activityDb.prepare(`
   SELECT
     starterpack_uri,
@@ -518,6 +609,7 @@ const starterpacks = activityDb.prepare(`
 `).all() as Record<string, unknown>[];
 
 report("Starterpack Joins Ranking", "starterpack_joins.csv", starterpacks);
+}
 
 // ── 15. AppView / namespace retention ───────────────────────────────────────
 // For each non-bsky namespace root (first 2 NSID parts), count unique lifetime
@@ -525,8 +617,10 @@ report("Starterpack Joins Ranking", "starterpack_joins.csv", starterpacks);
 // did_activity_daily within the window — showing whether appview users are
 // retained bsky users or have drifted off.
 
+if (shouldRun("ns_retention")) {
 const rawNsRetention = activityDb.prepare(`
-  WITH ns_users AS (
+  WITH
+ ns_users AS (
     SELECT collection, did
     FROM collection_activity
     WHERE collection NOT LIKE 'app.bsky.%' AND collection NOT LIKE 'chat.bsky.%'
@@ -571,5 +665,38 @@ report(
   `ns_retention_${daysBack}d.csv`,
   nsRetentionRows
 );
+}
+
+// ── 16. Daily unique likers / followers / posters by cohort ──────────────────
+// For each day in the window, shows how many unique DIDs in each age cohort
+// performed each action type. Useful for seeing intra-window trends per cohort.
+
+if (shouldRun("daily_actions_by_cohort")) {
+const dailyActionsByCohort = activityDb.prepare(`
+  SELECT
+    d.date,
+    ${AGE_BUCKET} AS age_bucket,
+    COUNT(DISTINCT d.did)                                          AS dau,
+    COUNT(DISTINCT CASE WHEN d.activity_types & 2 THEN d.did END) AS unique_likers,
+    COUNT(DISTINCT CASE WHEN d.activity_types & 8 THEN d.did END) AS unique_followers,
+    COUNT(DISTINCT CASE WHEN d.activity_types & 1 THEN d.did END) AS unique_posters
+  FROM did_activity_daily d
+  JOIN plc.plc_account_creations p ON d.did = p.did
+  LEFT JOIN excluded_dids ex ON d.did = ex.did
+  WHERE d.date >= date('now', '-' || ? || ' days')
+    AND ex.did IS NULL
+  GROUP BY d.date, age_bucket
+  ORDER BY age_bucket, d.date
+`).all(daysBack) as Record<string, unknown>[];
+
+report(
+  `Daily Unique Actions by Cohort (${windowStart}–${RUN_DATE})`,
+  `daily_actions_by_cohort_${daysBack}d.csv`,
+  dailyActionsByCohort
+);
+}
 
 console.log(`\nDone. CSVs written to ${OUT_DIR}/\n`);
+} finally {
+  activityDb.exec("COMMIT");
+}

@@ -102,6 +102,32 @@ function migrate(db: Database.Database) {
       updated_at    TEXT    NOT NULL,
       PRIMARY KEY (pds_url, window_days)
     );
+
+    -- Feed generators seen on the firehose (app.bsky.feed.generator creates/deletes).
+    -- One row per feed URI; display_name/description filled from the record at create time.
+    CREATE TABLE IF NOT EXISTS feed_generators (
+      uri          TEXT NOT NULL PRIMARY KEY,   -- at://did/app.bsky.feed.generator/rkey
+      creator_did  TEXT NOT NULL,
+      display_name TEXT,
+      description  TEXT,
+      first_seen   TEXT NOT NULL,               -- YYYY-MM-DD
+      deleted_at   TEXT                         -- set when a delete event arrives
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_feed_generators_creator
+      ON feed_generators(creator_did);
+
+    -- Daily like counts per feed generator (proxy for subscriptions/saves).
+    -- Only likes whose subject URI contains /app.bsky.feed.generator/ are counted.
+    CREATE TABLE IF NOT EXISTS feed_generator_likes_daily (
+      feed_uri  TEXT    NOT NULL,
+      date      TEXT    NOT NULL,   -- YYYY-MM-DD
+      likes     INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (feed_uri, date)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_feed_generator_likes_date
+      ON feed_generator_likes_daily(date);
   `);
 
   // Add activity_types column to existing DBs that predate this migration

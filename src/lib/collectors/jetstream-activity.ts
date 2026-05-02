@@ -141,16 +141,25 @@ let langTaggedSeen = 0;   // posts with at least one lang tag in this flush wind
 const collectionBuffer = new Map<string, number>();
 let collectionTrackingPaused = NO_COLLECTION_TRACKING;
 
+// Feed generator buffer: uri → { creatorDid, displayName, description, firstSeen }
+const feedGenBuffer = new Map<string, { creatorDid: string; displayName: string | null; description: string | null; firstSeen: string }>();
+// Feed generator deletes: set of URIs that received a delete event this flush window
+const feedGenDeleteBuffer = new Set<string>();
+// Feed like buffer: "feed_uri|date" → count (only likes targeting a feed generator)
+const feedLikeBuffer = new Map<string, number>();
+
 let lastCursor = 0;
 let totalActivityFlushed = 0;
 let totalDeletesFlushed = 0;
 let totalStarterpackFlushed = 0;
 let totalLangDIDsFlushed = 0;
 let totalCollectionsFlushed = 0;
+let totalFeedGensFlushed = 0;
+let totalFeedLikesFlushed = 0;
 let totalEvents = 0;
 
 function flush() {
-  if (activityBuffer.size === 0 && deleteBuffer.size === 0 && starterpackBuffer.size === 0 && langBuffer.size === 0 && collectionBuffer.size === 0) return;
+  if (activityBuffer.size === 0 && deleteBuffer.size === 0 && starterpackBuffer.size === 0 && langBuffer.size === 0 && collectionBuffer.size === 0 && feedGenBuffer.size === 0 && feedGenDeleteBuffer.size === 0 && feedLikeBuffer.size === 0) return;
 
   const db = getActivityDb();
 
@@ -201,12 +210,31 @@ function flush() {
     VALUES (1, ?, datetime('now'))
     ON CONFLICT (id) DO UPDATE SET cursor = excluded.cursor, updated_at = excluded.updated_at
   `);
+  const upsertFeedGen = db.prepare(`
+    INSERT INTO feed_generators (uri, creator_did, display_name, description, first_seen)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT (uri) DO UPDATE SET
+      display_name = coalesce(excluded.display_name, display_name),
+      description  = coalesce(excluded.description,  description),
+      deleted_at   = NULL
+  `);
+  const markFeedGenDeleted = db.prepare(`
+    UPDATE feed_generators SET deleted_at = datetime('now') WHERE uri = ?
+  `);
+  const upsertFeedLike = db.prepare(`
+    INSERT INTO feed_generator_likes_daily (feed_uri, date, likes)
+    VALUES (?, ?, ?)
+    ON CONFLICT (feed_uri, date) DO UPDATE SET likes = likes + excluded.likes
+  `);
 
   const activityRows    = [...activityBuffer.entries()];
   const deleteRows      = [...deleteBuffer.entries()];
   const starterpackRows = [...starterpackBuffer.entries()];
   const langRows        = [...langBuffer.entries()];
   const collectionRows  = collectionTrackingPaused ? [] : [...collectionBuffer.entries()];
+  const feedGenRows     = [...feedGenBuffer.entries()];
+  const feedGenDeletes  = [...feedGenDeleteBuffer];
+  const feedLikeRows    = [...feedLikeBuffer.entries()];
   const postsThisFlush  = langPostsSeen;
   const taggedThisFlush = langTaggedSeen;
   activityBuffer.clear();
@@ -214,6 +242,9 @@ function flush() {
   starterpackBuffer.clear();
   langBuffer.clear();
   collectionBuffer.clear();
+  feedGenBuffer.clear();
+  feedGenDeleteBuffer.clear();
+  feedLikeBuffer.clear();
   langPostsSeen  = 0;
   langTaggedSeen = 0;
 
@@ -238,6 +269,16 @@ function flush() {
       const pipe = key.indexOf("|");
       upsertCollection.run(key.slice(0, pipe), key.slice(pipe + 1), count);
     }
+    for (const [uri, meta] of feedGenRows) {
+      upsertFeedGen.run(uri, meta.creatorDid, meta.displayName, meta.description, meta.firstSeen);
+    }
+    for (const uri of feedGenDeletes) {
+      markFeedGenDeleted.run(uri);
+    }
+    for (const [key, count] of feedLikeRows) {
+      const pipe = key.lastIndexOf("|");
+      upsertFeedLike.run(key.slice(0, pipe), key.slice(pipe + 1), count);
+    }
     if (postsThisFlush > 0) upsertLangStats.run(postsThisFlush, taggedThisFlush);
     if (lastCursor > 0) saveCursor.run(lastCursor);
   })();
@@ -251,11 +292,13 @@ function flush() {
   totalStarterpackFlushed += starterpackRows.reduce((s, [, c]) => s + c, 0);
   totalLangDIDsFlushed    += langRows.length;
   totalCollectionsFlushed += collectionRows.length;
+  totalFeedGensFlushed    += feedGenRows.length;
+  totalFeedLikesFlushed   += feedLikeRows.reduce((s, [, c]) => s + c, 0);
   const tagPct = postsThisFlush > 0 ? ((taggedThisFlush / postsThisFlush) * 100).toFixed(1) : "—";
   const collectionNote = collectionTrackingPaused ? " [collection tracking PAUSED]" : ` collections=${collectionRows.length.toLocaleString()}`;
   console.log(
-    `[activity] Flushed activity=${activityRows.length.toLocaleString()} deletes=${deleteRows.length} types starterpack=${starterpackRows.length} uris lang=${langRows.length.toLocaleString()} did×lang (${tagPct}% tagged)${collectionNote} | ` +
-    `totals: activity=${totalActivityFlushed.toLocaleString()} deletes=${totalDeletesFlushed.toLocaleString()} starterpack=${totalStarterpackFlushed.toLocaleString()} lang_dids=${totalLangDIDsFlushed.toLocaleString()} collections=${totalCollectionsFlushed.toLocaleString()} | ` +
+    `[activity] Flushed activity=${activityRows.length.toLocaleString()} deletes=${deleteRows.length} types starterpack=${starterpackRows.length} uris lang=${langRows.length.toLocaleString()} did×lang (${tagPct}% tagged)${collectionNote} feeds=${feedGenRows.length} feed_likes=${feedLikeRows.reduce((s, [, c]) => s + c, 0)} | ` +
+    `totals: activity=${totalActivityFlushed.toLocaleString()} deletes=${totalDeletesFlushed.toLocaleString()} starterpack=${totalStarterpackFlushed.toLocaleString()} lang_dids=${totalLangDIDsFlushed.toLocaleString()} collections=${totalCollectionsFlushed.toLocaleString()} feed_gens=${totalFeedGensFlushed.toLocaleString()} feed_likes=${totalFeedLikesFlushed.toLocaleString()} | ` +
     `events=${totalEvents.toLocaleString()} | cursor=${lastCursor}`
   );
 }
@@ -380,9 +423,34 @@ function connect() {
               starterpackBuffer.set(spKey, (starterpackBuffer.get(spKey) ?? 0) + 1);
             }
           }
+
+          // Feed generator creates: capture URI + metadata from the record
+          if (collection === "app.bsky.feed.generator") {
+            const uri = `at://${evt.did}/app.bsky.feed.generator/${evt.commit.rkey}`;
+            feedGenBuffer.set(uri, {
+              creatorDid:  evt.did,
+              displayName: evt.commit.record?.displayName ?? null,
+              description: evt.commit.record?.description ?? null,
+              firstSeen:   date,
+            });
+          }
+
+          // Feed likes: only count likes whose subject is a feed generator
+          if (collection === "app.bsky.feed.like") {
+            const subjectUri = evt.commit.record?.subject?.uri;
+            if (typeof subjectUri === "string" && subjectUri.includes("/app.bsky.feed.generator/")) {
+              const lkey = `${subjectUri}|${date}`;
+              feedLikeBuffer.set(lkey, (feedLikeBuffer.get(lkey) ?? 0) + 1);
+            }
+          }
         } else if (evt.commit.operation === "delete") {
           // Record-level delete by collection
           recordDelete(`${date}|record:${evt.commit.collection}`);
+
+          // Feed generator deletes: mark the URI so we can tombstone the row
+          if (evt.commit.collection === "app.bsky.feed.generator") {
+            feedGenDeleteBuffer.add(`at://${evt.did}/app.bsky.feed.generator/${evt.commit.rkey}`);
+          }
         }
       } else if (evt.kind === "account") {
         const status = evt.account?.active === false

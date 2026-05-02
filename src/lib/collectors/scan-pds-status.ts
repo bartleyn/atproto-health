@@ -18,8 +18,8 @@ import Database from "better-sqlite3";
 import { getPlcDb } from "../db/plc-schema";
 
 const LIST_REPOS_LIMIT = 1000;
-const DEFAULT_CONCURRENCY = 3;
-const COURTESY_DELAY_MS = 100;
+const DEFAULT_CONCURRENCY = 5;
+const COURTESY_DELAY_MS = 75;
 const REQUEST_TIMEOUT_MS = 20_000;
 
 // ── CLI args ──────────────────────────────────────────────────────────────────
@@ -240,14 +240,47 @@ async function main() {
     (db.prepare(`SELECT pds_url FROM pds_repo_status_snapshots WHERE snapshot_date = ? AND is_partial = 0`).all(today) as { pds_url: string }[])
       .map(r => r.pds_url)
   );
-  const toScan = pdsList.filter(p => !alreadyDone.has(p));
-  if (alreadyDone.size > 0) {
-    console.log(`Resuming: ${alreadyDone.size.toLocaleString()} already done today, ${toScan.length.toLocaleString()} remaining\n`);
+
+  // Skip PDSes whose most recent completed scan returned 0 repos AND was within
+  // the last 7 days — re-check them weekly in case they come back online.
+  const emptyRecently = new Set(
+    (db.prepare(`
+      SELECT pds_url FROM (
+        SELECT pds_url, total_scanned, snapshot_date,
+          ROW_NUMBER() OVER (PARTITION BY pds_url ORDER BY snapshot_date DESC) AS rn
+        FROM pds_repo_status_snapshots WHERE is_partial = 0
+      )
+      WHERE rn = 1 AND total_scanned = 0
+        AND snapshot_date >= date('now', '-7 days')
+    `).all() as { pds_url: string }[]).map(r => r.pds_url)
+  );
+
+  const toScan = pdsList.filter(p => !alreadyDone.has(p) && !emptyRecently.has(p));
+  const skippedEmpty = pdsList.filter(p => !alreadyDone.has(p) && emptyRecently.has(p)).length;
+
+  if (alreadyDone.size > 0 || skippedEmpty > 0) {
+    console.log(`Resuming: ${alreadyDone.size.toLocaleString()} done today, ${skippedEmpty.toLocaleString()} skipped (empty <7d ago), ${toScan.length.toLocaleString()} remaining\n`);
   }
 
-  // Resolve IPs for all PDSes to be scanned (used to detect same-backend aliases).
-  console.log(`Resolving IPs for ${toScan.length.toLocaleString()} PDSes...`);
-  const ipMap = await resolveAll(toScan);
+  // Build IP map: reuse cached IPs from previous snapshots, only DNS-resolve unknowns.
+  const cachedIps = db.prepare(`
+    SELECT pds_url, ip_address FROM (
+      SELECT pds_url, ip_address,
+        ROW_NUMBER() OVER (PARTITION BY pds_url ORDER BY snapshot_date DESC) AS rn
+      FROM pds_repo_status_snapshots WHERE ip_address IS NOT NULL
+    ) WHERE rn = 1
+  `).all() as { pds_url: string; ip_address: string }[];
+
+  const ipMap = new Map<string, string | null>(cachedIps.map(r => [r.pds_url, r.ip_address]));
+  const needResolve = toScan.filter(url => !ipMap.has(url));
+
+  if (needResolve.length > 0) {
+    console.log(`Resolving IPs for ${needResolve.length.toLocaleString()} new PDSes (${toScan.length - needResolve.length} cached)...`);
+    const freshIps = await resolveAll(needResolve);
+    for (const [url, ip] of freshIps) ipMap.set(url, ip);
+  } else {
+    console.log(`IPs: all ${toScan.length.toLocaleString()} cached from previous scans`);
+  }
   const resolved = [...ipMap.values()].filter(Boolean).length;
   console.log(`  ${resolved.toLocaleString()} of ${toScan.length.toLocaleString()} resolved\n`);
 

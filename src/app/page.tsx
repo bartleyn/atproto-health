@@ -311,7 +311,7 @@ export default async function Home({
                 <tr className="border-b border-gray-800 text-gray-400 text-left">
                   <th className="px-4 py-3 font-medium">#</th>
                   <th className="px-4 py-3 font-medium">PDS</th>
-                  <th className="px-4 py-3 font-medium text-right">Total</th>
+                  <th className="px-4 py-3 font-medium text-right">Total (active &amp; inactive)</th>
                   <th className="px-4 py-3 font-medium">Country</th>
                 </tr>
               </thead>

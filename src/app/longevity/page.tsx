@@ -42,7 +42,7 @@ export default async function LongevityPage({
   const cohortBuckets = cohortData.map(r => ({ name: r.cohort, value: r.count }));
 
   // Summary stats — use unfiltered set so count/oldest/newest reflect all real PDSes
-  const indieOnly = pdsAgeDataAll.filter((r) => r.pds_url !== "bsky.network");
+  const indieOnly = pdsAgeDataAll;//.filter((r) => r.pds_url !== "bsky.network");
   const oldestIndie = indieOnly[0];
   const newestIndie = indieOnly[indieOnly.length - 1];
   const medianIdx = Math.floor(indieOnly.length / 2);

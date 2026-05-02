@@ -68,7 +68,7 @@ export default async function MigrationsPage() {
             <StatCard
               label="Total repos"
               value={fmt(scanStats.totalUsers)}
-              sub={`Across ${scanStats.total.toLocaleString()} scanned PDSes · from listRepos`}
+              sub={`Across ${scanStats.total.toLocaleString()} PLC-discovered PDSes · from listRepos`}
             />
           </div>
           {/* Row 2: migration details */}
@@ -84,13 +84,12 @@ export default async function MigrationsPage() {
               sub="PDS-to-PDS transfers, excluding internal bsky.network resharding"
             />
             <StatCard
-              label="Scanned PDSes"
+              label="PDSes (PLC-discovered)"
               value={fmt(scanStats.total)}
-              sub="PDSes that responded to the repo scanner"
+              sub="Unique PDSes found via PLC data that responded to listRepos"
             />
           </div>
         </section>
-
 
         {/* Migration Flows Sankey + weekly bar */}
         <section>
@@ -125,12 +124,7 @@ export default async function MigrationsPage() {
               only voluntary migrations between distinct operators counted.
               Max recorded: {journeyStats.maxMigrations} migrations by a single account.
             </p>
-            <div className="grid grid-cols-3 gap-4 mb-6">
-              <StatCard
-                label="Total real migrants"
-                value={journeyStats.totalMigrants.toLocaleString()}
-                sub="Accounts with ≥1 non-bsky-internal migration"
-              />
+            <div className="grid grid-cols-2 gap-4 mb-6">
               <StatCard
                 label="Migrated more than once"
                 value={`${journeyStats.pctMultiple.toFixed(1)}%`}

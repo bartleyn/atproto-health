@@ -36,6 +36,8 @@ function migrate(db: Database.Database) {
       ON plc_migrations(from_pds);
     CREATE INDEX IF NOT EXISTS idx_plc_migrations_to_pds
       ON plc_migrations(to_pds);
+    CREATE INDEX IF NOT EXISTS idx_plc_migrations_did
+      ON plc_migrations(did);
 
     CREATE TABLE IF NOT EXISTS plc_account_creations (
       did TEXT PRIMARY KEY,
@@ -231,10 +233,11 @@ function migrate(db: Database.Database) {
     -- Cached aggregate stats derived from did_in_repo (42M rows — too slow to query live).
     -- Recomputed by aggregate-plc.ts. Single row (id=1).
     CREATE TABLE IF NOT EXISTS plc_stats_cache (
-      id                    INTEGER PRIMARY KEY CHECK (id = 1),
-      total_dids            INTEGER NOT NULL DEFAULT 0,
+      id                     INTEGER PRIMARY KEY CHECK (id = 1),
+      total_dids             INTEGER NOT NULL DEFAULT 0,
       bsky_concentration_pct REAL    NOT NULL DEFAULT 0,
-      updated_at            TEXT    NOT NULL
+      unique_migrating_dids  INTEGER NOT NULL DEFAULT 0,
+      updated_at             TEXT    NOT NULL
     );
 
     -- Precomputed multi-step migration trajectory edges for the Sankey chart.
@@ -295,5 +298,8 @@ function migrate(db: Database.Database) {
   } catch { /* already exists */ }
   try {
     db.exec(`ALTER TABLE pds_repo_status_snapshots ADD COLUMN ip_address TEXT`);
+  } catch { /* already exists */ }
+  try {
+    db.exec(`ALTER TABLE plc_stats_cache ADD COLUMN unique_migrating_dids INTEGER NOT NULL DEFAULT 0`);
   } catch { /* already exists */ }
 }

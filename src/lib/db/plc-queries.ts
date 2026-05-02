@@ -163,7 +163,11 @@ export function getActiveCreationTimeseriesWeekly(hideBsky = false): TimeseriesR
     WITH
     collapsed AS (
       SELECT
-        CASE WHEN w.pds_url LIKE '%bsky.network' THEN '${BSKY_NETWORK_LABEL}' ELSE w.pds_url END AS pds_url,
+        CASE
+          WHEN w.pds_url LIKE '%bsky.network' THEN '${BSKY_NETWORK_LABEL}'
+          WHEN w.pds_url = 'https://myatproto.social' THEN 'https://blacksky.app'
+          ELSE w.pds_url
+        END AS pds_url,
         week AS period,
         SUM(w.count) AS count
       FROM active_creation_weekly w
@@ -340,11 +344,11 @@ export function getEcosystemStats(hideBsky = false): EcosystemStats {
   const db = getPlcDb();
   const bskyFilter = hideBsky ? `AND m.pds_url NOT LIKE '%bsky.network'` : "";
 
-  // Read total_dids from the stats cache (precomputed by aggregate-plc.ts).
-  // did_in_repo has 42M rows — a live COUNT(*) takes ~45s.
+  // Read from the stats cache (precomputed by aggregate-plc.ts).
+  // did_in_repo has 42M rows and plc_migrations 2M — live counts are too slow.
   const statsCache = db.prepare(`
-    SELECT total_dids, bsky_concentration_pct FROM plc_stats_cache WHERE id = 1
-  `).get() as { total_dids: number; bsky_concentration_pct: number } | undefined;
+    SELECT total_dids, bsky_concentration_pct, unique_migrating_dids FROM plc_stats_cache WHERE id = 1
+  `).get() as { total_dids: number; bsky_concentration_pct: number; unique_migrating_dids: number } | undefined;
   const totals = {
     total_dids: statsCache?.total_dids ?? 0,
     total_dids_ex_trump: statsCache?.total_dids ?? 0,
@@ -373,20 +377,13 @@ export function getEcosystemStats(hideBsky = false): EcosystemStats {
     WHERE pds_url != '${TRUMP_PDS}'
   `).get() as { earliest_creation: string; latest_creation: string };
 
-  const uniqueMigrators = db.prepare(`
-    SELECT COUNT(DISTINCT did) AS unique_migrating_dids
-    FROM plc_migrations
-    WHERE from_pds NOT LIKE '%bsky.social'
-  `).get() as { unique_migrating_dids: number };
-
-  // Read from stats cache — live query over 42M rows takes ~45s.
   const concentration = { bsky_pct: statsCache?.bsky_concentration_pct ?? 0 };
 
   return {
     total_dids: totals.total_dids ?? 0,
     total_dids_ex_trump: totals.total_dids_ex_trump ?? 0,
     total_migrations: migrations.total_migrations ?? 0,
-    unique_migrating_dids: uniqueMigrators?.unique_migrating_dids ?? 0,
+    unique_migrating_dids: statsCache?.unique_migrating_dids ?? 0,
     independent_pds_count: indep?.independent_pds_count ?? 0,
     independent_pds_account_pct: 0,
     bsky_concentration_pct: concentration?.bsky_pct ?? 0,

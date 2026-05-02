@@ -109,19 +109,19 @@ export function aggregatePlc() {
   const migrationsNew = !heavyCursor || max_migrated_at > heavyCursor.migrations_cursor;
   const didScanNew    = !heavyCursor || max_scanned_at  > heavyCursor.did_scanned_cursor;
 
-  if (!forceHeavy && !didScanNew) {
-    console.log(`  stats cache: skipped (did_in_repo unchanged since ${heavyCursor?.did_scanned_cursor})`);
+  if (!forceHeavy && !didScanNew && !migrationsNew) {
+    console.log(`  stats cache: skipped (did_in_repo and migrations unchanged)`);
   } else {
     // SQLite upsert (ON CONFLICT DO UPDATE) only works with INSERT … VALUES, not INSERT … SELECT.
     // Use INSERT OR REPLACE instead — same effect since this table always has exactly one row.
     step("stats cache", () => db.prepare(`
-      INSERT OR REPLACE INTO plc_stats_cache (id, total_dids, bsky_concentration_pct, updated_at)
+      INSERT OR REPLACE INTO plc_stats_cache (id, total_dids, bsky_concentration_pct, unique_migrating_dids, updated_at)
       SELECT
         1,
-        COUNT(*),
-        ROUND(100.0 * SUM(CASE WHEN pds_url LIKE '%bsky.network' OR pds_url = 'https://bsky.social' THEN 1 ELSE 0 END) / COUNT(*), 1),
+        (SELECT COUNT(*) FROM did_in_repo),
+        (SELECT ROUND(100.0 * SUM(CASE WHEN pds_url LIKE '%bsky.network' OR pds_url = 'https://bsky.social' THEN 1 ELSE 0 END) / COUNT(*), 1) FROM did_in_repo),
+        (SELECT COUNT(DISTINCT did) FROM plc_migrations WHERE from_pds NOT LIKE '%bsky.social'),
         ?
-      FROM did_in_repo
     `).run(now));
   }
 
@@ -169,8 +169,8 @@ export function aggregatePlc() {
           MAX(CASE WHEN rn_desc = 1 THEN to_pds   END) AS current_pds
         FROM ranked GROUP BY did
       ),
-      top_origins AS (SELECT origin_pds  FROM journeys GROUP BY origin_pds  HAVING COUNT(*) >= 5 ORDER BY COUNT(*) DESC LIMIT 10),
-      top_current AS (SELECT current_pds FROM journeys GROUP BY current_pds HAVING COUNT(*) >= 5 ORDER BY COUNT(*) DESC LIMIT 10),
+      top_origins AS (SELECT origin_pds  FROM journeys GROUP BY origin_pds  HAVING COUNT(*) >= 1 ORDER BY COUNT(*) DESC LIMIT 10),
+      top_current AS (SELECT current_pds FROM journeys GROUP BY current_pds HAVING COUNT(*) >= 1 ORDER BY COUNT(*) DESC LIMIT 10),
       labeled AS (
         SELECT
           CASE WHEN j.origin_pds  IN (SELECT origin_pds  FROM top_origins) THEN j.origin_pds  ELSE 'Other' END || '@0' AS source,
@@ -178,7 +178,7 @@ export function aggregatePlc() {
         FROM journeys j
       )
     SELECT source, target, COUNT(*) AS value
-    FROM labeled GROUP BY source, target HAVING COUNT(*) >= 5;
+    FROM labeled GROUP BY source, target HAVING COUNT(*) >= 1;
   `));
 
   // ── Per-hop migration edges ────────────────────────────────────────────────
@@ -220,17 +220,36 @@ export function aggregatePlc() {
       top_pdses AS (
         SELECT pds FROM (
           SELECT from_pds AS pds FROM ranked UNION ALL SELECT to_pds AS pds FROM ranked
-        ) GROUP BY pds HAVING COUNT(*) >= 10 ORDER BY COUNT(*) DESC LIMIT 12
+        ) GROUP BY pds HAVING COUNT(*) >= 11 ORDER BY COUNT(*) DESC LIMIT 15
+      ),
+      -- Actual final destination per DID (to_pds of their last migration)
+      final_pds_per_did AS (
+        SELECT r.did, r.to_pds AS final_pds
+        FROM ranked r
+        JOIN (SELECT did, MAX(step) AS ms FROM ranked GROUP BY did) m
+          ON r.did = m.did AND r.step = m.ms
       ),
       labeled AS (
+        -- Intermediate hops: steps 0-4 connect to the next column
         SELECT
           CASE WHEN from_pds IN (SELECT pds FROM top_pdses) THEN from_pds ELSE 'Other' END || '@' || step       AS source,
           CASE WHEN to_pds   IN (SELECT pds FROM top_pdses) THEN to_pds   ELSE 'Other' END || '@' || (step + 1) AS target
         FROM ranked
-        WHERE step < 4
+        WHERE step < 5
+
+        UNION ALL
+
+        -- Step 5 → "Current" (@6): route to each DID's ACTUAL final PDS so that
+        -- accounts with 7+ migrations still land in Current at their true destination.
+        SELECT
+          CASE WHEN r.from_pds  IN (SELECT pds FROM top_pdses) THEN r.from_pds  ELSE 'Other' END || '@5' AS source,
+          CASE WHEN f.final_pds IN (SELECT pds FROM top_pdses) THEN f.final_pds ELSE 'Other' END || '@6' AS target
+        FROM ranked r
+        JOIN final_pds_per_did f ON r.did = f.did
+        WHERE r.step = 5
       )
     SELECT source, target, COUNT(*) AS value
-    FROM labeled GROUP BY source, target HAVING COUNT(*) >= 5;
+    FROM labeled GROUP BY source, target HAVING COUNT(*) >= 1;
   `));
 
   // ── Update heavy recompute cursor ─────────────────────────────────────────

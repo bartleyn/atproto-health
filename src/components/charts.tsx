@@ -2,9 +2,10 @@
 
 import { sankey, sankeyLinkHorizontal, sankeyJustify, sankeyLeft } from "d3-sankey";
 import type { SankeyNode, SankeyLink } from "d3-sankey";
-import { useState, useRef, useEffect } from "react";
-import type { MigrationFlow, WeeklyMigrationRow, TimeseriesRow, TrajectoryEdge, PdsAgeRow, LangTotal } from "@/lib/db/plc-queries";
+import { useState, useRef, useEffect, useMemo } from "react";
+import type { MigrationFlow, WeeklyMigrationRow, TimeseriesRow, TrajectoryEdge, PdsAgeRow, LangTotal, PdsLangRow } from "@/lib/db/plc-queries";
 import type { CityCluster, PdsProviderLocation, HostingProviderCount } from "@/lib/db/queries";
+import type { CollectionPdsRow } from "@/lib/db/activity-queries";
 import { WorldMap, type PdsLangLocation, type NamespaceLocation } from "@/components/world-map";
 
 import {
@@ -449,6 +450,14 @@ export function DonutChart({ data, maxSlices = 10, selectedName, onSliceClick }:
 
 // ── Infrastructure + Map Section ───────────────────────────────────────────────
 
+interface RankRow {
+  pds_url: string;
+  traitDids: number;
+  total?: number;
+  proportion?: number;
+  composition: Array<{ label: string; dids: number }>;
+}
+
 interface InfraSectionProps {
   providers: HostingProviderCount[];
   cdnBreakdown: { behindCdn: number; directHosting: number; unknown: number };
@@ -458,9 +467,11 @@ interface InfraSectionProps {
   topLangs?: LangTotal[];
   namespaceLocations?: NamespaceLocation[];
   topNamespaces?: { ns: string; total_dids: number }[];
+  pdsLangRows?: PdsLangRow[];
+  pdsCollectionRows?: CollectionPdsRow[];
 }
 
-export function InfraSection({ providers, cdnBreakdown, locations, providerLocations, langLocations, topLangs, namespaceLocations, topNamespaces }: InfraSectionProps) {
+export function InfraSection({ providers, cdnBreakdown, locations, providerLocations, langLocations, topLangs, namespaceLocations, topNamespaces, pdsLangRows, pdsCollectionRows }: InfraSectionProps) {
   const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
   const [selectedLang, setSelectedLang] = useState<string | null>(null);
   const [selectedNamespace, setSelectedNamespace] = useState<string | null>(null);
@@ -526,6 +537,51 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
   }
 
   const hasNamespaceData = topNamespaces && topNamespaces.length > 0;
+
+  const langPdsRanking = useMemo((): RankRow[] | null => {
+    if (!selectedLang || !pdsLangRows?.length) return null;
+    const pdsMap = new Map<string, { langs: Map<string, number>; total: number }>();
+    for (const r of pdsLangRows) {
+      if (!pdsMap.has(r.pds_url)) pdsMap.set(r.pds_url, { langs: new Map(), total: 0 });
+      const entry = pdsMap.get(r.pds_url)!;
+      entry.langs.set(r.lang, r.dids);
+      entry.total += r.dids;
+    }
+    return [...pdsMap.entries()]
+      .filter(([, d]) => d.langs.has(selectedLang))
+      .map(([pds_url, d]) => ({
+        pds_url,
+        traitDids: d.langs.get(selectedLang)!,
+        total: d.total,
+        proportion: d.langs.get(selectedLang)! / d.total,
+        composition: [...d.langs.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([label, dids]) => ({ label, dids })),
+      }))
+      .sort((a, b) => b.proportion! - a.proportion!)
+      .slice(0, 15);
+  }, [selectedLang, pdsLangRows]);
+
+  const nsPdsRanking = useMemo((): RankRow[] | null => {
+    if (!selectedNamespace || !pdsCollectionRows?.length) return null;
+    const nsByPds = new Map<string, Map<string, number>>();
+    for (const r of pdsCollectionRows) {
+      if (r.collection.startsWith("app.bsky.") || r.collection.startsWith("chat.bsky.")) continue;
+      const ns = r.collection.split(".").slice(0, 2).join(".");
+      if (!nsByPds.has(r.pds_url)) nsByPds.set(r.pds_url, new Map());
+      const byNs = nsByPds.get(r.pds_url)!;
+      byNs.set(ns, (byNs.get(ns) ?? 0) + r.unique_dids);
+    }
+    const result: RankRow[] = [];
+    for (const [pds_url, byNs] of nsByPds) {
+      const traitDids = byNs.get(selectedNamespace) ?? 0;
+      if (traitDids === 0) continue;
+      result.push({
+        pds_url,
+        traitDids,
+        composition: [...byNs.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([label, dids]) => ({ label, dids })),
+      });
+    }
+    return result.sort((a, b) => b.traitDids - a.traitDids).slice(0, 15);
+  }, [selectedNamespace, pdsCollectionRows]);
 
   const clearLabel = selectedProvider
     ? `${mappedCount} of ${totalCount} ${selectedProvider} PDSes mapped · clear`
@@ -882,6 +938,83 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
             </div>
           </>
         )}
+      </div>
+
+      {/* PDS ranking table — shown when a language or namespace is selected */}
+      {langPdsRanking && (
+        <PdsRankTable rows={langPdsRanking} traitLabel={selectedLang!} mode="lang" />
+      )}
+      {nsPdsRanking && (
+        <PdsRankTable rows={nsPdsRanking} traitLabel={selectedNamespace!} mode="ns" />
+      )}
+    </div>
+  );
+}
+
+function PdsRankTable({ rows, traitLabel, mode }: {
+  rows: RankRow[];
+  traitLabel: string;
+  mode: "lang" | "ns";
+}) {
+  if (rows.length === 0) return null;
+  const displayUrl = (url: string) => url.replace(/^https?:\/\//, "").replace(/\/$/, "");
+  return (
+    <div className="mt-6">
+      <h3 className="text-sm font-semibold mb-0.5">
+        PDSes by &ldquo;{traitLabel}&rdquo; {mode === "lang" ? "language share" : "lexicon users"}
+      </h3>
+      <p className="text-xs text-gray-500 mb-3">
+        {mode === "lang"
+          ? "Ranked by proportion of active speakers · composition bar shows top-5 language breakdown"
+          : "Ranked by unique users · composition bar shows top-5 lexicon breakdown"}
+      </p>
+      <div className="overflow-x-auto rounded-lg border border-gray-800">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b border-gray-800 text-gray-400 text-left">
+              <th className="px-3 py-2 font-medium w-8">#</th>
+              <th className="px-3 py-2 font-medium">PDS</th>
+              <th className="px-3 py-2 font-medium text-right">{mode === "lang" ? "Speakers" : "Users"}</th>
+              {mode === "lang" && <th className="px-3 py-2 font-medium text-right w-12">%</th>}
+              <th className="px-3 py-2 font-medium">Composition</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, i) => {
+              const compTotal = row.composition.reduce((s, c) => s + c.dids, 0);
+              return (
+                <tr key={row.pds_url} className="border-b border-gray-800/50 hover:bg-gray-900/50">
+                  <td className="px-3 py-2.5 text-gray-500 tabular-nums">{i + 1}</td>
+                  <td className="px-3 py-2.5 font-mono max-w-[180px] truncate">{displayUrl(row.pds_url)}</td>
+                  <td className="px-3 py-2.5 text-right tabular-nums">{row.traitDids.toLocaleString()}</td>
+                  {mode === "lang" && (
+                    <td className="px-3 py-2.5 text-right tabular-nums text-gray-300">
+                      {row.proportion !== undefined ? `${Math.round(row.proportion * 100)}%` : "—"}
+                    </td>
+                  )}
+                  <td className="px-3 py-2.5">
+                    <div className="flex h-2.5 rounded overflow-hidden w-36 gap-px mb-1">
+                      {row.composition.map((c, ci) => (
+                        <div
+                          key={c.label}
+                          title={`${c.label}: ${c.dids.toLocaleString()}`}
+                          style={{ width: `${(c.dids / compTotal) * 100}%`, backgroundColor: COLORS[ci % COLORS.length] }}
+                        />
+                      ))}
+                    </div>
+                    <div className="flex gap-2 flex-wrap">
+                      {row.composition.slice(0, 3).map((c, ci) => (
+                        <span key={c.label} className="text-gray-500 font-mono" style={{ color: COLORS[ci % COLORS.length] }}>
+                          {c.label}
+                        </span>
+                      ))}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
     </div>
   );

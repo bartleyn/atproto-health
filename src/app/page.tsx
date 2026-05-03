@@ -219,6 +219,8 @@ export default async function Home({
             topLangs={topLangs}
             namespaceLocations={namespaceLocations}
             topNamespaces={topNamespaces}
+            pdsLangRows={langRows}
+            pdsCollectionRows={collectionPdsData}
           />
         </div>
       )}

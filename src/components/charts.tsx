@@ -79,6 +79,7 @@ export function SimpleBarChart({
 
   if (layout === "horizontal") {
     return (
+      <div className="overflow-x-auto"><div style={{ minWidth: 360 }}>
       <ResponsiveContainer width="100%" height={300}>
         <BarChart data={data} margin={{ bottom: xLabel ? 40 : 4, left: yLabel ? 20 : 0, right: 8 }}>
           <XAxis
@@ -103,6 +104,7 @@ export function SimpleBarChart({
           <Bar dataKey="value" fill={color} radius={[4, 4, 0, 0]} />
         </BarChart>
       </ResponsiveContainer>
+      </div></div>
     );
   }
 
@@ -234,6 +236,8 @@ export function StackedAreaChart({ data, allPeriods, selectedPds, onPdsClick }: 
 
   return (
     <div ref={containerRef} style={{ width: "100%" }}>
+    <div className="overflow-x-auto">
+    <div style={{ minWidth: 520 }}>
     <ResponsiveContainer width="100%" height={400}>
       <ComposedChart data={chartData} margin={{ top: 8, right: isMobile ? 36 : 56, bottom: 0, left: isMobile ? 4 : 16 }}>
         <XAxis
@@ -304,6 +308,8 @@ export function StackedAreaChart({ data, allPeriods, selectedPds, onPdsClick }: 
         />
       </ComposedChart>
     </ResponsiveContainer>
+    </div>
+    </div>
     </div>
   );
 }
@@ -868,24 +874,32 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
         </div>
       </div>
 
-      {/* Provider/Language filter — mobile only (stacked below map) */}
+      {/* Provider/Language/Lexicon filter — mobile only (stacked below map) */}
       <div className="block md:hidden mt-4 pt-4 border-t border-gray-800">
-        {hasLangData && (
-          <div className="flex gap-1 mb-3">
-            <button
-              onClick={() => setInsetTab("provider")}
-              className={`flex-1 text-xs py-1 rounded transition-colors ${insetTab === "provider" ? "bg-gray-700 text-white" : "text-gray-500 hover:text-gray-300"}`}
-            >
-              Providers
-            </button>
+        <div className="flex gap-1 mb-3">
+          <button
+            onClick={() => setInsetTab("provider")}
+            className={`flex-1 text-xs py-1 rounded transition-colors ${insetTab === "provider" ? "bg-gray-700 text-white" : "text-gray-500 hover:text-gray-300"}`}
+          >
+            Providers
+          </button>
+          {hasLangData && (
             <button
               onClick={() => setInsetTab("lang")}
               className={`flex-1 text-xs py-1 rounded transition-colors ${insetTab === "lang" ? "bg-gray-700 text-white" : "text-gray-500 hover:text-gray-300"}`}
             >
               Languages
             </button>
-          </div>
-        )}
+          )}
+          {hasNamespaceData && (
+            <button
+              onClick={() => setInsetTab("namespace")}
+              className={`flex-1 text-xs py-1 rounded transition-colors ${insetTab === "namespace" ? "bg-gray-700 text-white" : "text-gray-500 hover:text-gray-300"}`}
+            >
+              Lexicons
+            </button>
+          )}
+        </div>
 
         {insetTab === "provider" && (
           <>
@@ -931,6 +945,41 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
                   />
                   <span className={`text-xs font-mono truncate ${selectedLang === row.lang ? "text-white font-medium" : "text-gray-400"}`}>
                     {row.lang}
+                  </span>
+                  <span className="text-xs text-gray-600 ml-auto flex-shrink-0">{row.total_dids.toLocaleString()}</span>
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+
+        {insetTab === "namespace" && hasNamespaceData && (
+          <>
+            <p className="text-xs font-medium text-gray-300 mb-1">Lexicons</p>
+            <p className="text-xs text-gray-500 mb-3"># = recent unique users · click to highlight</p>
+            <DonutChart
+              data={activeTopNamespaces.slice(0, 12).map(r => ({ name: r.ns, value: r.total_dids }))}
+              maxSlices={12}
+              selectedName={selectedNamespace}
+              onSliceClick={pickNamespace}
+            />
+            <div className="grid grid-cols-2 gap-1 mt-3">
+              {activeTopNamespaces.map((row, i) => (
+                <button
+                  key={row.ns}
+                  className="flex items-center gap-1.5 text-left px-2 py-1 rounded hover:bg-gray-800/60 transition-colors"
+                  onClick={() => pickNamespace(row.ns)}
+                >
+                  <span
+                    className="w-2 h-2 rounded-full flex-shrink-0"
+                    style={{
+                      backgroundColor: selectedNamespace && selectedNamespace !== row.ns
+                        ? "#374151"
+                        : i < 12 ? COLORS[i % COLORS.length] : "#6366f1",
+                    }}
+                  />
+                  <span className={`text-xs font-mono truncate ${selectedNamespace === row.ns ? "text-white font-medium" : "text-gray-400"}`}>
+                    {row.ns}
                   </span>
                   <span className="text-xs text-gray-600 ml-auto flex-shrink-0">{row.total_dids.toLocaleString()}</span>
                 </button>
@@ -1461,6 +1510,8 @@ function CreationWeeklyBarChart({ data, selectedPds, onPdsClick }: CreationWeekl
   };
 
   return (
+    <div className="overflow-x-auto">
+    <div style={{ minWidth: 480 }}>
     <ResponsiveContainer width="100%" height={220}>
       <BarChart data={chartData} margin={{ top: 4, right: 16, bottom: 0, left: 16 }} barCategoryGap="10%">
         <XAxis
@@ -1496,6 +1547,8 @@ function CreationWeeklyBarChart({ data, selectedPds, onPdsClick }: CreationWeekl
         })}
       </BarChart>
     </ResponsiveContainer>
+    </div>
+    </div>
   );
 }
 
@@ -1588,7 +1641,7 @@ export function MultiStepSankeyChart({ data, height = 480 }: MultiStepSankeyProp
   const sankeyLayout = sankey<N, L>()
     .nodeAlign(sankeyLeft)
     .nodeWidth(14)
-    .nodePadding(10)
+    .nodePadding(16)
     .extent([[0, 0], [innerW, innerH]]);
 
   const { nodes, links } = sankeyLayout({
@@ -1657,7 +1710,7 @@ export function MultiStepSankeyChart({ data, height = 480 }: MultiStepSankeyProp
     setTooltip(t => t ? { ...t, x: e.clientX - rect.left, y: e.clientY - rect.top } : null);
   };
 
-  const svgWidth = Math.max(width, 560);
+  const svgWidth = Math.max(width, 820);
 
   return (
     <div ref={containerRef} style={{ width: "100%" }}>
@@ -1815,6 +1868,7 @@ export function PdsAgeChart({ data }: { data: PdsAgeRow[] }) {
   };
 
   return (
+    <div className="overflow-x-auto"><div style={{ minWidth: 520 }}>
     <ResponsiveContainer width="100%" height={420}>
       <ScatterChart margin={{ top: 10, right: 20, bottom: 60, left: 80 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
@@ -1857,5 +1911,6 @@ export function PdsAgeChart({ data }: { data: PdsAgeRow[] }) {
         ))}
       </ScatterChart>
     </ResponsiveContainer>
+    </div></div>
   );
 }

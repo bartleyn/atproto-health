@@ -958,6 +958,20 @@ function PdsRankTable({ rows, traitLabel, mode }: {
 }) {
   if (rows.length === 0) return null;
   const displayUrl = (url: string) => url.replace(/^https?:\/\//, "").replace(/\/$/, "");
+
+  // Stable color assignment: collect all labels across all rows, sort by total dids, assign colors in that order.
+  const labelTotals = new Map<string, number>();
+  for (const row of rows) {
+    for (const c of row.composition) {
+      labelTotals.set(c.label, (labelTotals.get(c.label) ?? 0) + c.dids);
+    }
+  }
+  const colorMap = new Map(
+    [...labelTotals.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([label], i) => [label, COLORS[i % COLORS.length]])
+  );
+
   return (
     <div className="mt-6">
       <h3 className="text-sm font-semibold mb-0.5">
@@ -994,17 +1008,17 @@ function PdsRankTable({ rows, traitLabel, mode }: {
                   )}
                   <td className="px-3 py-2.5">
                     <div className="flex h-2.5 rounded overflow-hidden w-36 gap-px mb-1">
-                      {row.composition.map((c, ci) => (
+                      {row.composition.map((c) => (
                         <div
                           key={c.label}
                           title={`${c.label}: ${c.dids.toLocaleString()}`}
-                          style={{ width: `${(c.dids / compTotal) * 100}%`, backgroundColor: COLORS[ci % COLORS.length] }}
+                          style={{ width: `${(c.dids / compTotal) * 100}%`, backgroundColor: colorMap.get(c.label) }}
                         />
                       ))}
                     </div>
                     <div className="flex gap-2 flex-wrap">
-                      {row.composition.slice(0, 3).map((c, ci) => (
-                        <span key={c.label} className="text-gray-500 font-mono" style={{ color: COLORS[ci % COLORS.length] }}>
+                      {row.composition.slice(0, 3).map((c) => (
+                        <span key={c.label} className="text-gray-500 font-mono" style={{ color: colorMap.get(c.label) }}>
                           {c.label}
                         </span>
                       ))}

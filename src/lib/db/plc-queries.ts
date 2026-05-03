@@ -594,7 +594,9 @@ export function getPdsLangSummary(hideBsky = false): PdsLangRow[] {
     ? `WHERE pds_url NOT LIKE '%bsky.network%' AND pds_url != 'https://bsky.social'`
     : "";
   return db.prepare(`
-    SELECT pds_url, lang, dids, post_count
+    SELECT
+      CASE WHEN pds_url = 'https://myatproto.social' THEN 'https://blacksky.app' ELSE pds_url END AS pds_url,
+      lang, dids, post_count
     FROM pds_lang_summary
     ${bskyFilter}
     ORDER BY pds_url, dids DESC

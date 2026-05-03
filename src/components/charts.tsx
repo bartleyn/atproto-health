@@ -556,7 +556,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
         proportion: d.langs.get(selectedLang)! / d.total,
         composition: [...d.langs.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([label, dids]) => ({ label, dids })),
       }))
-      .sort((a, b) => b.proportion! - a.proportion!)
+      .sort((a, b) => (b.total! - a.total!) || (b.proportion! - a.proportion!))
       .slice(0, 15);
   }, [selectedLang, pdsLangRows]);
 
@@ -951,11 +951,16 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
   );
 }
 
+type SortKey = "traitDids" | "total" | "proportion";
+
 function PdsRankTable({ rows, traitLabel, mode }: {
   rows: RankRow[];
   traitLabel: string;
   mode: "lang" | "ns";
 }) {
+  const [sortKey, setSortKey] = useState<SortKey>(mode === "lang" ? "total" : "traitDids");
+  const [sortDir, setSortDir] = useState<"desc" | "asc">("desc");
+
   if (rows.length === 0) return null;
   const displayUrl = (url: string) => url.replace(/^https?:\/\//, "").replace(/\/$/, "");
 
@@ -971,6 +976,20 @@ function PdsRankTable({ rows, traitLabel, mode }: {
       .sort((a, b) => b[1] - a[1])
       .map(([label], i) => [label, COLORS[i % COLORS.length]])
   );
+
+  const sorted = [...rows].sort((a, b) => {
+    const av = sortKey === "proportion" ? (a.proportion ?? 0) : sortKey === "total" ? (a.total ?? 0) : a.traitDids;
+    const bv = sortKey === "proportion" ? (b.proportion ?? 0) : sortKey === "total" ? (b.total ?? 0) : b.traitDids;
+    return sortDir === "desc" ? bv - av : av - bv;
+  });
+
+  function toggleSort(key: SortKey) {
+    if (sortKey === key) setSortDir(d => d === "desc" ? "asc" : "desc");
+    else { setSortKey(key); setSortDir("desc"); }
+  }
+
+  const sortIcon = (key: SortKey) =>
+    sortKey !== key ? " ↕" : sortDir === "desc" ? " ↓" : " ↑";
 
   return (
     <div className="mt-6">
@@ -988,13 +1007,24 @@ function PdsRankTable({ rows, traitLabel, mode }: {
             <tr className="border-b border-gray-800 text-gray-400 text-left">
               <th className="px-3 py-2 font-medium w-8">#</th>
               <th className="px-3 py-2 font-medium">PDS</th>
-              <th className="px-3 py-2 font-medium text-right">{mode === "lang" ? "Speakers" : "Users"}</th>
-              {mode === "lang" && <th className="px-3 py-2 font-medium text-right w-12">%</th>}
+              <th className="px-3 py-2 font-medium text-right cursor-pointer hover:text-gray-200 select-none" onClick={() => toggleSort("traitDids")}>
+                {mode === "lang" ? "Speakers" : "Users"}{sortIcon("traitDids")}
+              </th>
+              {mode === "lang" && (
+                <>
+                  <th className="px-3 py-2 font-medium text-right cursor-pointer hover:text-gray-200 select-none" onClick={() => toggleSort("total")}>
+                    Total{sortIcon("total")}
+                  </th>
+                  <th className="px-3 py-2 font-medium text-right cursor-pointer hover:text-gray-200 select-none w-12" onClick={() => toggleSort("proportion")}>
+                    %{sortIcon("proportion")}
+                  </th>
+                </>
+              )}
               <th className="px-3 py-2 font-medium">Composition</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((row, i) => {
+            {sorted.map((row, i) => {
               const compTotal = row.composition.reduce((s, c) => s + c.dids, 0);
               return (
                 <tr key={row.pds_url} className="border-b border-gray-800/50 hover:bg-gray-900/50">
@@ -1002,9 +1032,14 @@ function PdsRankTable({ rows, traitLabel, mode }: {
                   <td className="px-3 py-2.5 font-mono max-w-[180px] truncate">{displayUrl(row.pds_url)}</td>
                   <td className="px-3 py-2.5 text-right tabular-nums">{row.traitDids.toLocaleString()}</td>
                   {mode === "lang" && (
-                    <td className="px-3 py-2.5 text-right tabular-nums text-gray-300">
-                      {row.proportion !== undefined ? `${Math.round(row.proportion * 100)}%` : "—"}
-                    </td>
+                    <>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-gray-500">
+                        {row.total !== undefined ? row.total.toLocaleString() : "—"}
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-gray-300">
+                        {row.proportion !== undefined ? `${Math.round(row.proportion * 100)}%` : "—"}
+                      </td>
+                    </>
                   )}
                   <td className="px-3 py-2.5">
                     <div className="flex h-2.5 rounded overflow-hidden w-36 gap-px mb-1">

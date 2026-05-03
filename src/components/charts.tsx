@@ -1052,9 +1052,9 @@ function PdsRankTable({ rows, traitLabel, mode }: {
                       ))}
                     </div>
                     <div className="flex gap-2 flex-wrap">
-                      {row.composition.slice(0, 3).map((c) => (
-                        <span key={c.label} className="text-gray-500 font-mono" style={{ color: colorMap.get(c.label) }}>
-                          {c.label}
+                      {row.composition.map((c) => (
+                        <span key={c.label} className="font-mono" style={{ color: colorMap.get(c.label) }}>
+                          {c.label} <span className="opacity-60">{Math.round((c.dids / compTotal) * 100)}%</span>
                         </span>
                       ))}
                     </div>

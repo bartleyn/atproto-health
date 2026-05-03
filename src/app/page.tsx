@@ -44,16 +44,8 @@ export default async function Home({
 
   const lastScanTime = getLastScanTime();
   const scanTopPds = getTopPdsByScan(15, hideBsky);
-  const collectionPdsData = getCollectionPdsData();
-  const langRows = getPdsLangSummary();
-  // bsky lang totals keyed by lang — sum across all individual shards.
-  // Used by InfraSection to subtract bsky from totals when the bsky toggle is off.
-  const bskyLangTotals = new Map<string, number>();
-  for (const r of langRows) {
-    if (isBskyUrl(r.pds_url)) {
-      bskyLangTotals.set(r.lang, (bskyLangTotals.get(r.lang) ?? 0) + r.dids);
-    }
-  }
+  const collectionPdsData = getCollectionPdsData(hideBsky);
+  const langRows = getPdsLangSummary(hideBsky);
   const langLocations: PdsLangLocation[] = langRows.flatMap(row => {
     // Legacy collapsed entry (pre-re-aggregation): distribute evenly across unique bsky cities.
     // Distributing per-city (not per-shard) avoids inflating cities that have many shards.
@@ -72,7 +64,7 @@ export default async function Home({
     if (!geo?.city) return [];
     return [{ url: row.pds_url, city: geo.city, country: geo.country, lang: row.lang, dids: row.dids }];
   });
-  const topLangs = getTopLangs(25);
+  const topLangs = getTopLangs(25, hideBsky);
 
   // Build namespace locations: group collection_activity by (nsRoot, pds) then geo-join.
   // nsRoot = first two NSID parts (e.g. "blue.flashes" from "blue.flashes.feed.post").
@@ -225,7 +217,6 @@ export default async function Home({
             providerLocations={providerLocations}
             langLocations={langLocations}
             topLangs={topLangs}
-            bskyLangTotals={bskyLangTotals}
             namespaceLocations={namespaceLocations}
             topNamespaces={topNamespaces}
           />

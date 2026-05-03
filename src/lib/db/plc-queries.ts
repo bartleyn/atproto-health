@@ -588,11 +588,15 @@ export interface PdsLangRow {
 
 // All (pds_url, lang) pairs from the precomputed summary table.
 // pds_lang_summary is populated by aggregate-plc.ts; returns [] if not yet run.
-export function getPdsLangSummary(): PdsLangRow[] {
+export function getPdsLangSummary(hideBsky = false): PdsLangRow[] {
   const db = getPlcDb();
+  const bskyFilter = hideBsky
+    ? `WHERE pds_url NOT LIKE '%bsky.network%' AND pds_url != 'https://bsky.social'`
+    : "";
   return db.prepare(`
     SELECT pds_url, lang, dids, post_count
     FROM pds_lang_summary
+    ${bskyFilter}
     ORDER BY pds_url, dids DESC
   `).all() as PdsLangRow[];
 }
@@ -603,13 +607,16 @@ export interface LangTotal {
   pds_count: number;
 }
 
-// Top languages by distinct-DID count. Includes bsky.network row.
-// Callers can filter by pds_url to get community-only or all-inclusive totals.
-export function getTopLangs(limit = 25): LangTotal[] {
+// Top languages by distinct-DID count.
+export function getTopLangs(limit = 25, hideBsky = false): LangTotal[] {
   const db = getPlcDb();
+  const bskyFilter = hideBsky
+    ? `WHERE pds_url NOT LIKE '%bsky.network%' AND pds_url != 'https://bsky.social'`
+    : "";
   return db.prepare(`
     SELECT lang, SUM(dids) AS total_dids, COUNT(DISTINCT pds_url) AS pds_count
     FROM pds_lang_summary
+    ${bskyFilter}
     GROUP BY lang
     ORDER BY total_dids DESC
     LIMIT ?

@@ -53,15 +53,19 @@ export interface CollectionPdsRow {
 
 // Returns per-(collection, pds_url) unique DID counts by cross-joining
 // collection_activity with plc_did_pds. Used for the namespace map overlay.
-export function getCollectionPdsData(): CollectionPdsRow[] {
+export function getCollectionPdsData(hideBsky = false): CollectionPdsRow[] {
   try {
     const db = getActivityDb();
     const plcPath = path.join(process.cwd(), "plc-migrations.db");
     try { db.exec(`ATTACH DATABASE '${plcPath}' AS plc`); } catch { /* already attached */ }
+    const bskyFilter = hideBsky
+      ? `AND p.pds_url NOT LIKE '%bsky.network%' AND p.pds_url != 'https://bsky.social'`
+      : "";
     return db.prepare(`
       SELECT ca.collection, p.pds_url, COUNT(DISTINCT ca.did) AS unique_dids
       FROM collection_activity ca
       JOIN plc.plc_did_pds p ON ca.did = p.did
+      WHERE 1=1 ${bskyFilter}
       GROUP BY ca.collection, p.pds_url
     `).all() as CollectionPdsRow[];
   } catch {

@@ -456,18 +456,15 @@ interface InfraSectionProps {
   providerLocations: PdsProviderLocation[];
   langLocations?: PdsLangLocation[];
   topLangs?: LangTotal[];
-  bskyLangTotals?: Map<string, number>;
   namespaceLocations?: NamespaceLocation[];
   topNamespaces?: { ns: string; total_dids: number }[];
 }
 
-export function InfraSection({ providers, cdnBreakdown, locations, providerLocations, langLocations, topLangs, bskyLangTotals, namespaceLocations, topNamespaces }: InfraSectionProps) {
+export function InfraSection({ providers, cdnBreakdown, locations, providerLocations, langLocations, topLangs, namespaceLocations, topNamespaces }: InfraSectionProps) {
   const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
   const [selectedLang, setSelectedLang] = useState<string | null>(null);
   const [selectedNamespace, setSelectedNamespace] = useState<string | null>(null);
   const [insetTab, setInsetTab] = useState<"provider" | "lang" | "namespace">("provider");
-  const [showBskyLang, setShowBskyLang] = useState(false);
-  const [showBskyNs, setShowBskyNs] = useState(false);
 
   const donutData = providers
     .filter((p) => !p.isCdn)
@@ -481,24 +478,8 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
     ? (providers.find(p => p.provider === selectedProvider)?.count ?? 0)
     : 0;
 
-  const isBskyUrl = (u: string) => /bsky\.network|bsky\.social/.test(u);
-
-  // Filter lang locations for map highlighting based on bsky toggle.
-  const activeLangLocations = langLocations
-    ? showBskyLang ? langLocations : langLocations.filter(l => !isBskyUrl(l.url))
-    : undefined;
-  // Compute per-language totals: full count when bsky on, subtract known bsky count when off.
-  const filteredTopLangs = topLangs
-    ? topLangs
-        .map(r => ({
-          ...r,
-          total_dids: showBskyLang
-            ? r.total_dids
-            : r.total_dids - (bskyLangTotals?.get(r.lang) ?? 0),
-        }))
-        .filter(r => r.total_dids > 0)
-        .sort((a, b) => b.total_dids - a.total_dids)
-    : undefined;
+  const activeLangLocations = langLocations;
+  const filteredTopLangs = topLangs;
 
   const langMappedCount = selectedLang && activeLangLocations
     ? new Set(activeLangLocations.filter(l => l.lang === selectedLang).map(l => l.url)).size
@@ -514,10 +495,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
 
   const hasLangData = filteredTopLangs && filteredTopLangs.length > 0;
 
-  // Filter namespace locations and recompute totals based on bsky toggle.
-  const activeNsLocations = namespaceLocations
-    ? showBskyNs ? namespaceLocations : namespaceLocations.filter(l => !isBskyUrl(l.pds_url))
-    : undefined;
+  const activeNsLocations = namespaceLocations;
   const activeTopNamespaces = activeNsLocations
     ? (() => {
         const totals = new Map<string, number>();
@@ -698,12 +676,6 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
             <>
               <div className="flex items-center justify-between mb-0.5">
                 <p className="text-xs font-medium text-gray-300">Languages</p>
-                <button
-                  onClick={() => setShowBskyLang(v => !v)}
-                  className={`text-xs px-1.5 py-0.5 rounded transition-colors ${showBskyLang ? "bg-blue-900/60 text-blue-300" : "text-gray-600 hover:text-gray-400"}`}
-                >
-                  {showBskyLang ? "bsky on" : "bsky off"}
-                </button>
               </div>
               <p className="text-xs text-gray-600 mb-2"># = active speakers (from jetstream data)</p>
               {(() => {
@@ -773,12 +745,6 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
             <>
               <div className="flex items-center justify-between mb-0.5">
                 <p className="text-xs font-medium text-gray-300">Lexicons</p>
-                <button
-                  onClick={() => { setShowBskyNs(v => !v); setSelectedNamespace(null); }}
-                  className={`text-xs px-1.5 py-0.5 rounded transition-colors ${showBskyNs ? "bg-blue-900/60 text-blue-300" : "text-gray-600 hover:text-gray-400"}`}
-                >
-                  {showBskyNs ? "bsky on" : "bsky off"}
-                </button>
               </div>
               <p className="text-xs text-gray-600 mb-2"># = recent unique users (jetstream, no backfill) · click to highlight</p>
               {(() => {
@@ -884,12 +850,6 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
           <>
             <div className="flex items-center justify-between mb-1">
               <p className="text-xs font-medium text-gray-300">Languages</p>
-              <button
-                onClick={() => setShowBskyLang(v => !v)}
-                className={`text-xs px-1.5 py-0.5 rounded transition-colors ${showBskyLang ? "bg-blue-900/60 text-blue-300" : "text-gray-600 hover:text-gray-400"}`}
-              >
-                {showBskyLang ? "bsky on" : "bsky off"}
-              </button>
             </div>
             <p className="text-xs text-gray-500 mb-3"># = active speakers · click to highlight</p>
             <DonutChart

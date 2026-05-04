@@ -44,7 +44,7 @@ export default async function Home({
   const bskyProviderLocs = providerLocations.filter(p => isBskyUrl(p.url));
 
   const lastScanTime = getLastScanTime();
-  const allTopPds = getTopPdsByScan(200, hideBsky);
+  const allTopPds = getTopPdsByScan(Infinity, hideBsky);
   const scanTopPds = allTopPds.slice(0, 15);
   const bskyShardCounts = getBskyShardCounts();
   const collectionPdsData = getCollectionPdsData(hideBsky);

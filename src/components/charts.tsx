@@ -492,9 +492,9 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
   const [selectedNamespace, setSelectedNamespace] = useState<string | null>(null);
   const [insetTab, setInsetTab] = useState<"provider" | "lang" | "namespace">("provider");
 
-  const donutData = providers
-    .filter((p) => !p.isCdn)
-    .slice(0, 11)
+  const allNonCdnProviders = providers.filter((p) => !p.isCdn);
+  const donutData = allNonCdnProviders
+    .slice(0, 25)
     .map((p) => ({ name: p.provider, value: p.count }));
 
   const mappedCount = selectedProvider
@@ -786,24 +786,37 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
               </div>
               {/* Compact scrollable legend */}
               <div className="space-y-px max-h-28 overflow-y-auto mt-1">
-                {donutData.map((entry, i) => (
+                {allNonCdnProviders.slice(0, 25).map((p, i) => (
                   <button
-                    key={entry.name}
+                    key={p.provider}
                     className="flex items-center gap-1.5 w-full text-left px-1 py-px rounded hover:bg-gray-800/60 transition-colors"
-                    onClick={() => pickProvider(entry.name)}
+                    onClick={() => pickProvider(p.provider)}
                   >
                     <span
                       className="w-2 h-2 rounded-full flex-shrink-0"
                       style={{
-                        backgroundColor: selectedProvider && selectedProvider !== entry.name
+                        backgroundColor: selectedProvider && selectedProvider !== p.provider
                           ? "#374151"
                           : COLORS[i % COLORS.length],
                       }}
                     />
-                    <span className={`text-xs truncate ${selectedProvider === entry.name ? "text-white font-medium" : "text-gray-400"}`}>
-                      {entry.name}
+                    <span className={`text-xs truncate ${selectedProvider === p.provider ? "text-white font-medium" : "text-gray-400"}`}>
+                      {p.provider}
                     </span>
-                    <span className="text-xs text-gray-600 ml-auto flex-shrink-0 pl-1">{entry.value}</span>
+                    <span className="text-xs text-gray-600 ml-auto flex-shrink-0 pl-1">{p.count}</span>
+                  </button>
+                ))}
+                {providers.filter(p => p.isCdn).map(p => (
+                  <button
+                    key={p.provider}
+                    className="flex items-center gap-1.5 w-full text-left px-1 py-px rounded hover:bg-gray-800/60 transition-colors"
+                    onClick={() => pickProvider(p.provider)}
+                  >
+                    <span className="w-2 h-2 rounded-sm flex-shrink-0 bg-gray-600 opacity-60" />
+                    <span className={`text-xs truncate ${selectedProvider === p.provider ? "text-white font-medium" : "text-gray-500"}`}>
+                      {p.provider}
+                    </span>
+                    <span className="text-xs text-gray-600 ml-auto flex-shrink-0 pl-1">{p.count}</span>
                   </button>
                 ))}
               </div>
@@ -989,6 +1002,19 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
               selectedName={selectedProvider}
               onSliceClick={pickProvider}
             />
+            {providers.filter(p => p.isCdn).length > 0 && (
+              <div className="flex flex-wrap gap-2 mt-2">
+                {providers.filter(p => p.isCdn).map(p => (
+                  <button
+                    key={p.provider}
+                    onClick={() => pickProvider(p.provider)}
+                    className={`text-xs px-2 py-0.5 rounded border transition-colors ${selectedProvider === p.provider ? "border-gray-400 text-white bg-gray-700" : "border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-600"}`}
+                  >
+                    {p.provider} · {p.count}
+                  </button>
+                ))}
+              </div>
+            )}
           </>
         )}
 

@@ -44,7 +44,9 @@ async function main() {
   try {
     // 1. Fetch PDS directory (source of truth for both collect and scan)
     const directory = await fetchPdsDirectory();
-    const allUrls = directory.map((e) => e.url);
+    // Normalize URLs: strip trailing slashes and force https — matches scan-pds-status format
+    const normalizeUrl = (u: string) => u.replace(/\/+$/, "").replace(/^http:\/\//, "https://");
+    const allUrls = directory.map((e) => normalizeUrl(e.url));
 
     // Upsert PDS instances
     const upsertPds = db.prepare(`INSERT INTO pds_instances (url) VALUES (?) ON CONFLICT(url) DO NOTHING`);
@@ -204,8 +206,9 @@ async function main() {
     db.transaction(() => {
       for (const entry of directory) {
         const pdsRow = getPdsId.get(entry.url) as { id: number };
-        const geo = geoResults?.get(entry.url);
-        const detail = detailResults?.get(entry.url);
+        const normUrl = normalizeUrl(entry.url);
+        const geo = geoResults?.get(normUrl);
+        const detail = detailResults?.get(normUrl);
 
         insertSnapshot.run(
           pdsRow.id, run.id,

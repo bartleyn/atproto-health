@@ -1575,7 +1575,7 @@ export function MigrationChartsSection({ sankeyData, weeklyData }: MigrationChar
     <div className="space-y-6">
       <SankeyChart
         data={sankeyData}
-        height={500}
+        height={650}
         selectedSink={selectedSink}
         onSinkClick={setSelectedSink}
       />

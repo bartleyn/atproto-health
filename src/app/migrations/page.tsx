@@ -106,7 +106,7 @@ export default async function MigrationsPage() {
           subtitle="Actual per-hop did:plc migration steps — each column is one PDS hop. bsky.network shards collapsed. Click a node to highlight all paths through it in both directions."
           storageKey="migrations-multistep"
         >
-          <MultiStepSankeyChart data={trajectories} height={500} />
+          <MultiStepSankeyChart data={trajectories} height={650} />
         </CollapsibleSection>
 
         {/* Journey length distribution */}

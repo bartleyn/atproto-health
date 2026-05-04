@@ -221,6 +221,7 @@ const PROVIDER_NORMALIZE_SQL = `
     WHEN org LIKE '%Microsoft%' OR org LIKE '%Azure%' THEN 'Azure'
     WHEN org LIKE '%Linode%' OR org LIKE '%Akamai%' THEN 'Akamai/Linode'
     WHEN org LIKE '%Vultr%' THEN 'Vultr'
+    WHEN org LIKE '%i3Dnet%' OR org LIKE '%i3D.net%' THEN 'i3D.net'
     WHEN org LIKE '%Scaleway%' THEN 'Scaleway'
     WHEN org LIKE '%Oracle%' THEN 'Oracle Cloud'
     WHEN org LIKE '%Contabo%' THEN 'Contabo'

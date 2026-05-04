@@ -11,6 +11,7 @@ import {
 } from "@/lib/db/plc-queries";
 import { getOverviewStats } from "@/lib/db/queries";
 import { MigrationChartsSection, MultiStepSankeyChart, SimpleBarChart } from "@/components/charts";
+import { CollapsibleSection } from "@/components/collapsible-section";
 
 function StatCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
@@ -56,8 +57,7 @@ export default async function MigrationsPage() {
         </div>
 
         {/* Summary stats */}
-        <section>
-          <h2 className="text-xl font-semibold text-gray-200 mb-4">Ecosystem Summary</h2>
+        <CollapsibleSection title="Ecosystem Summary" storageKey="migrations-summary">
           {/* Row 1: the headline — concentration and scale */}
           <div className="grid grid-cols-2 gap-4 mb-4">
             <StatCard
@@ -89,41 +89,33 @@ export default async function MigrationsPage() {
               sub="Unique PDSes found via PLC data that responded to listRepos"
             />
           </div>
-        </section>
+        </CollapsibleSection>
 
         {/* Migration Flows Sankey + weekly bar */}
-        <section>
-          <h2 className="text-xl font-semibold text-gray-200 mb-1">
-            Where do users end up?
-          </h2>
-          <p className="text-xs text-gray-500 mb-4">
-            Where did:plc accounts ultimately landed — collapsed origin → current PDS. Excludes bsky.network destinations.
-            Hover for details. Click any node to highlight its trajectories forward and backward.
-          </p>
+        <CollapsibleSection
+          title="Where do users end up?"
+          subtitle="Where did:plc accounts ultimately landed — collapsed origin → current PDS. Excludes bsky.network destinations. Hover for details. Click any node to highlight its trajectories forward and backward."
+          storageKey="migrations-sankey"
+        >
           <MigrationChartsSection sankeyData={flows} weeklyData={weeklyMigrations} />
-        </section>
+        </CollapsibleSection>
 
         {/* Migration Trajectories */}
-        <section>
-          <h2 className="text-xl font-semibold text-gray-200 mb-1">
-            Migration Flows
-          </h2>
-          <p className="text-xs text-gray-500 mb-4">
-            Actual per-hop did:plc migration steps — each column is one PDS hop. bsky.network shards collapsed.
-            Click a node to highlight all paths through it in both directions.
-          </p>
+        <CollapsibleSection
+          title="Migration Flows"
+          subtitle="Actual per-hop did:plc migration steps — each column is one PDS hop. bsky.network shards collapsed. Click a node to highlight all paths through it in both directions."
+          storageKey="migrations-multistep"
+        >
           <MultiStepSankeyChart data={trajectories} height={500} />
-        </section>
+        </CollapsibleSection>
 
         {/* Journey length distribution */}
         {journeyStats.totalMigrants > 0 && (
-          <section>
-            <h2 className="text-xl font-semibold text-gray-200 mb-1">Migration Journey Length</h2>
-            <p className="text-xs text-gray-500 mb-4">
-              How many times did each account migrate? Excludes bsky.network internal resharding —
-              only voluntary migrations between distinct operators counted.
-              Max recorded: {journeyStats.maxMigrations} migrations by a single account.
-            </p>
+          <CollapsibleSection
+            title="Migration Journey Length"
+            subtitle={`How many times did each account migrate? Excludes bsky.network internal resharding — only voluntary migrations between distinct operators counted. Max recorded: ${journeyStats.maxMigrations} migrations by a single account.`}
+            storageKey="migrations-journey"
+          >
             <div className="grid grid-cols-2 gap-4 mb-6">
               <StatCard
                 label="Migrated more than once"
@@ -148,7 +140,7 @@ export default async function MigrationsPage() {
                 logScale
               />
             </div>
-          </section>
+          </CollapsibleSection>
         )}
 
       </div>

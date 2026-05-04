@@ -722,14 +722,14 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
           {(hasLangData || hasNamespaceData) && (
             <div className="flex gap-1 mb-2">
               <button
-                onClick={() => setInsetTab("provider")}
+                onClick={() => { setInsetTab("provider"); setSelectedLang(null); setSelectedNamespace(null); }}
                 className={`flex-1 text-xs py-0.5 rounded transition-colors ${insetTab === "provider" ? "bg-gray-700 text-white" : "text-gray-500 hover:text-gray-300"}`}
               >
                 Providers
               </button>
               {hasLangData && (
                 <button
-                  onClick={() => setInsetTab("lang")}
+                  onClick={() => { setInsetTab("lang"); setSelectedProvider(null); setSelectedNamespace(null); }}
                   className={`flex-1 text-xs py-0.5 rounded transition-colors ${insetTab === "lang" ? "bg-gray-700 text-white" : "text-gray-500 hover:text-gray-300"}`}
                 >
                   Languages
@@ -737,7 +737,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
               )}
               {hasNamespaceData && (
                 <button
-                  onClick={() => setInsetTab("namespace")}
+                  onClick={() => { setInsetTab("namespace"); setSelectedProvider(null); setSelectedLang(null); }}
                   className={`flex-1 text-xs py-0.5 rounded transition-colors ${insetTab === "namespace" ? "bg-gray-700 text-white" : "text-gray-500 hover:text-gray-300"}`}
                 >
                   Lexicons
@@ -967,14 +967,14 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
       <div className="block md:hidden mt-4 pt-4 border-t border-gray-800">
         <div className="flex gap-1 mb-3">
           <button
-            onClick={() => setInsetTab("provider")}
+            onClick={() => { setInsetTab("provider"); setSelectedLang(null); setSelectedNamespace(null); }}
             className={`flex-1 text-xs py-1 rounded transition-colors ${insetTab === "provider" ? "bg-gray-700 text-white" : "text-gray-500 hover:text-gray-300"}`}
           >
             Providers
           </button>
           {hasLangData && (
             <button
-              onClick={() => setInsetTab("lang")}
+              onClick={() => { setInsetTab("lang"); setSelectedProvider(null); setSelectedNamespace(null); }}
               className={`flex-1 text-xs py-1 rounded transition-colors ${insetTab === "lang" ? "bg-gray-700 text-white" : "text-gray-500 hover:text-gray-300"}`}
             >
               Languages
@@ -982,7 +982,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
           )}
           {hasNamespaceData && (
             <button
-              onClick={() => setInsetTab("namespace")}
+              onClick={() => { setInsetTab("namespace"); setSelectedProvider(null); setSelectedLang(null); }}
               className={`flex-1 text-xs py-1 rounded transition-colors ${insetTab === "namespace" ? "bg-gray-700 text-white" : "text-gray-500 hover:text-gray-300"}`}
             >
               Lexicons

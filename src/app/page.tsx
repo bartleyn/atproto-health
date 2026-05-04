@@ -2,7 +2,7 @@ import { getDashboardData, getLatestFirehoseSample, type ConcentrationStats } fr
 import { SimpleBarChart, DonutChart, InfraSection } from "@/components/charts";
 import { CollapsibleSection } from "@/components/collapsible-section";
 import type { GithubTopicStats } from "@/lib/db/queries";
-import { getPdsLangSummary, getTopLangs, getLastScanTime, getTopPdsByScan } from "@/lib/db/plc-queries";
+import { getPdsLangSummary, getTopLangs, getLastScanTime, getTopPdsByScan, getBskyShardCounts } from "@/lib/db/plc-queries";
 import type { PdsLangLocation, NamespaceLocation } from "@/components/world-map";
 import { getCollectionPdsData } from "@/lib/db/activity-queries";
 
@@ -44,7 +44,9 @@ export default async function Home({
   const bskyProviderLocs = providerLocations.filter(p => isBskyUrl(p.url));
 
   const lastScanTime = getLastScanTime();
-  const scanTopPds = getTopPdsByScan(15, hideBsky);
+  const allTopPds = getTopPdsByScan(200, hideBsky);
+  const scanTopPds = allTopPds.slice(0, 15);
+  const bskyShardCounts = getBskyShardCounts();
   const collectionPdsData = getCollectionPdsData(hideBsky);
   const langRows = getPdsLangSummary(hideBsky);
   const langLocations: PdsLangLocation[] = langRows.flatMap(row => {
@@ -98,6 +100,16 @@ export default async function Home({
         org: null,
       }))
     : topPds;
+
+  // Larger set for the infra map table (provider filter needs more than 15 entries).
+  const infraTopPds = allTopPds.length > 0
+    ? allTopPds.map(p => ({
+        url: p.url,
+        repoCount: p.repoCount,
+        activeCount: p.activeCount,
+        country: countryByUrl.get(normalizeUrl(p.url)) ?? null,
+      }))
+    : topPds.map(p => ({ url: p.url, repoCount: p.repoCount, activeCount: p.activeCount, country: p.country }));
 
   if (!runInfo.dirRun) {
     return (
@@ -216,6 +228,8 @@ export default async function Home({
             cdnBreakdown={cdnBreakdown}
             locations={locations}
             providerLocations={providerLocations}
+            topPdsList={infraTopPds}
+            bskyShardCounts={bskyShardCounts}
             langLocations={langLocations}
             topLangs={topLangs}
             namespaceLocations={namespaceLocations}

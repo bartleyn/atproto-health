@@ -556,6 +556,25 @@ export function getTopPdsByScan(limit = 15, hideBsky = false): ScannedTopPds[] {
     .slice(0, limit);
 }
 
+/** Per-shard repo counts for bsky.network shards, keyed by normalized URL.
+ *  Used by the infra map table to sum only the shards belonging to a selected provider. */
+export function getBskyShardCounts(): Map<string, number> {
+  const db = getPlcDb();
+  const rows = db.prepare(`
+    WITH latest AS (
+      SELECT RTRIM(pds_url, '/') AS norm_url, MAX(snapshot_date) AS snap_date
+      FROM pds_repo_status_snapshots
+      WHERE pds_url LIKE '%.host.bsky.network%'
+      GROUP BY norm_url
+    )
+    SELECT RTRIM(s.pds_url, '/') AS url, MAX(s.total_scanned) AS repo_count
+    FROM pds_repo_status_snapshots s
+    JOIN latest l ON RTRIM(s.pds_url, '/') = l.norm_url AND s.snapshot_date = l.snap_date
+    GROUP BY RTRIM(s.pds_url, '/')
+  `).all() as { url: string; repo_count: number }[];
+  return new Map(rows.map(r => [r.url, r.repo_count]));
+}
+
 export interface AccountCohortRow {
   cohort: string;
   count: number;

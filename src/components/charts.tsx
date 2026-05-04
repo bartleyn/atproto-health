@@ -464,11 +464,20 @@ interface RankRow {
   composition: Array<{ label: string; dids: number }>;
 }
 
+interface TopPdsEntry {
+  url: string;
+  activeCount: number | null;
+  repoCount: number;
+  country: string | null;
+}
+
 interface InfraSectionProps {
   providers: HostingProviderCount[];
   cdnBreakdown: { behindCdn: number; directHosting: number; unknown: number };
   locations: CityCluster[];
   providerLocations: PdsProviderLocation[];
+  topPdsList?: TopPdsEntry[];
+  bskyShardCounts?: Map<string, number>;
   langLocations?: PdsLangLocation[];
   topLangs?: LangTotal[];
   namespaceLocations?: NamespaceLocation[];
@@ -477,7 +486,7 @@ interface InfraSectionProps {
   pdsCollectionRows?: CollectionPdsRow[];
 }
 
-export function InfraSection({ providers, cdnBreakdown, locations, providerLocations, langLocations, topLangs, namespaceLocations, topNamespaces, pdsLangRows, pdsCollectionRows }: InfraSectionProps) {
+export function InfraSection({ providers, cdnBreakdown, locations, providerLocations, topPdsList = [], bskyShardCounts, langLocations, topLangs, namespaceLocations, topNamespaces, pdsLangRows, pdsCollectionRows }: InfraSectionProps) {
   const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
   const [selectedLang, setSelectedLang] = useState<string | null>(null);
   const [selectedNamespace, setSelectedNamespace] = useState<string | null>(null);
@@ -588,6 +597,73 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
     }
     return result.sort((a, b) => b.traitDids - a.traitDids).slice(0, 15);
   }, [selectedNamespace, pdsCollectionRows]);
+
+  // Compact table rows below the map — reacts to active tab + selection.
+  // Provider tab: always shown (filtered to provider or top overall).
+  // Lang/NS tabs: shown only when nothing selected (PdsRankTable handles the selection case).
+  const tableRows = useMemo(() => {
+    const normUrl = (u: string) => u.replace(/\/$/, "");
+    const isBskyShard = (u: string) => u.includes(".host.bsky.network") || /bsky\.social/.test(u);
+
+    if (insetTab === "provider") {
+      if (selectedProvider) {
+        const topMap = new Map(topPdsList.map(p => [normUrl(p.url), p]));
+        const provRows = providerLocations.filter(p => p.provider === selectedProvider);
+
+        // Aggregate bsky shards on this provider into one entry; keep others individual.
+        const result = new Map<string, { url: string; country: string | null; count: number | null }>();
+        let bskyShardTotal = 0;
+        let bskyCountry: string | null = null;
+        let hasBskyShards = false;
+        for (const p of provRows) {
+          if (isBskyShard(p.url)) {
+            bskyShardTotal += bskyShardCounts?.get(normUrl(p.url)) ?? 0;
+            bskyCountry ??= p.country;
+            hasBskyShards = true;
+          } else {
+            const key = normUrl(p.url);
+            result.set(key, { url: p.url, country: p.country, count: topMap.get(key)?.repoCount ?? null });
+          }
+        }
+        if (hasBskyShards) {
+          result.set("https://bsky.social", { url: "https://bsky.social", country: bskyCountry, count: bskyShardTotal || null });
+        }
+        return [...result.values()]
+          .sort((a, b) => (b.count ?? 0) - (a.count ?? 0))
+          .slice(0, 15);
+      }
+      return topPdsList.slice(0, 10).map(p => ({ url: p.url, country: p.country, count: p.repoCount }));
+    }
+    if (insetTab === "lang" && !selectedLang && langLocations?.length) {
+      const byKey = new Map<string, { url: string; country: string | null; count: number }>();
+      for (const l of langLocations) {
+        const key = isBskyShard(l.url) ? "https://bsky.social" : l.url;
+        const e = byKey.get(key);
+        if (!e) byKey.set(key, { url: key, country: l.country, count: l.dids });
+        else e.count += l.dids;
+      }
+      return [...byKey.values()].sort((a, b) => b.count - a.count).slice(0, 10);
+    }
+    if (insetTab === "namespace" && !selectedNamespace && namespaceLocations?.length) {
+      const byKey = new Map<string, { url: string; country: string | null; count: number }>();
+      for (const l of namespaceLocations) {
+        const key = isBskyShard(l.pds_url) ? "https://bsky.social" : l.pds_url;
+        const e = byKey.get(key);
+        if (!e) byKey.set(key, { url: key, country: l.country, count: l.dids });
+        else e.count += l.dids;
+      }
+      return [...byKey.values()].sort((a, b) => b.count - a.count).slice(0, 10);
+    }
+    return [];
+  }, [insetTab, selectedProvider, selectedLang, selectedNamespace, topPdsList, bskyShardCounts, providerLocations, langLocations, namespaceLocations]);
+
+  const tableLabel = insetTab === "lang"
+    ? { title: "Top PDSes by recent users posting on bsky.app with a tagged language", col: "Users" }
+    : insetTab === "namespace"
+    ? { title: "Top PDSes by recent users using a non-bsky.app lexicon", col: "Users" }
+    : selectedProvider
+    ? { title: `Top ${selectedProvider} PDSes`, col: "Total repos" }
+    : { title: "Top PDSes by total repos", col: "Total repos" };
 
   const clearLabel = selectedProvider
     ? `${mappedCount} of ${totalCount} ${selectedProvider} PDSes mapped · clear`
@@ -988,6 +1064,32 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
           </>
         )}
       </div>
+
+      {/* Compact top-PDSes table — reacts to tab + selection */}
+      {tableRows.length > 0 && (
+        <div className="mt-4 pt-4 border-t border-gray-800">
+          <div className="flex items-baseline justify-between mb-2">
+            <p className="text-xs font-medium text-gray-300">{tableLabel.title}</p>
+            <p className="text-xs text-gray-600">{tableLabel.col}</p>
+          </div>
+          <table className="w-full text-xs">
+            <tbody>
+              {tableRows.map((row, i) => (
+                <tr key={row.url} className="border-b border-gray-800/40 last:border-0">
+                  <td className="py-1 pr-2 text-gray-600 w-5 tabular-nums">{i + 1}</td>
+                  <td className="py-1 pr-2 text-gray-300 font-mono truncate max-w-0 w-full">
+                    {row.url.replace(/^https?:\/\//, "")}
+                  </td>
+                  <td className="py-1 pr-2 text-gray-500 whitespace-nowrap">{row.country ?? "—"}</td>
+                  <td className="py-1 text-gray-400 tabular-nums text-right whitespace-nowrap">
+                    {row.count != null ? row.count.toLocaleString() : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {/* PDS ranking table — shown when a language or namespace is selected */}
       {langPdsRanking && (

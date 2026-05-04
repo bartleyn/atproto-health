@@ -2,7 +2,9 @@
  * Scans each PDS via com.atproto.sync.listRepos and records a snapshot of
  * repo statuses (active / deactivated / deleted / takendown / suspended).
  *
- * Run periodically to build a timeseries of active account counts per PDS.
+ * NOTE: npm run collect now also writes pds_repo_status_snapshots / did_in_repo
+ * for directory PDSes. Use this script when you need to scan PDSes derived from
+ * PLC (broader set) or need flags like --include-bsky / --include-trump.
  *
  * Usage:
  *   npx tsx src/lib/collectors/scan-pds-status.ts
@@ -16,11 +18,9 @@ import path from "path";
 import { promises as dns } from "dns";
 import Database from "better-sqlite3";
 import { getPlcDb } from "../db/plc-schema";
+import { scanPdsRepos, type RepoInfo, type StatusCounts, type NonActiveRepo } from "./pds-repos";
 
-const LIST_REPOS_LIMIT = 1000;
 const DEFAULT_CONCURRENCY = 5;
-const COURTESY_DELAY_MS = 75;
-const REQUEST_TIMEOUT_MS = 20_000;
 
 // ── CLI args ──────────────────────────────────────────────────────────────────
 const args = process.argv.slice(2);
@@ -33,120 +33,6 @@ const CONCURRENCY  = concIdx >= 0 ? parseInt(args[concIdx + 1], 10) : DEFAULT_CO
 
 function isBskyShard(url: string) { return url.includes(".host.bsky.network"); }
 function isTrump(url: string)     { return url.includes("pds.trump.com"); }
-
-// ── listRepos paging ──────────────────────────────────────────────────────────
-interface RepoInfo {
-  did: string;
-  active: boolean;
-  status?: "deactivated" | "deleted" | "takendown" | "suspended" | string;
-}
-
-interface ListReposResponse {
-  cursor?: string;
-  repos: RepoInfo[];
-}
-
-const PAGE_RETRIES = 3;
-const RETRY_DELAY_MS = 2_000;
-
-async function fetchPage(url: string): Promise<ListReposResponse | null> {
-  for (let attempt = 1; attempt <= PAGE_RETRIES; attempt++) {
-    try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
-      if (res.status === 404 || res.status === 501) return null; // unsupported
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return await res.json() as ListReposResponse;
-    } catch (err) {
-      if (attempt === PAGE_RETRIES) throw err;
-      await new Promise(r => setTimeout(r, RETRY_DELAY_MS * attempt));
-    }
-  }
-  throw new Error("unreachable");
-}
-
-async function* listAllRepos(pdsUrl: string): AsyncGenerator<RepoInfo> {
-  let cursor: string | undefined;
-  const base = pdsUrl.replace(/\/$/, "");
-
-  while (true) {
-    const params = new URLSearchParams({ limit: String(LIST_REPOS_LIMIT) });
-    if (cursor) params.set("cursor", cursor);
-
-    const url = `${base}/xrpc/com.atproto.sync.listRepos?${params}`;
-    const body = await fetchPage(url);
-    if (!body) return; // PDS doesn't support listRepos
-
-    for (const repo of body.repos) yield repo;
-
-    if (!body.cursor || body.repos.length < LIST_REPOS_LIMIT) break;
-    cursor = body.cursor;
-    await new Promise(r => setTimeout(r, COURTESY_DELAY_MS));
-  }
-}
-
-// ── Status counting ───────────────────────────────────────────────────────────
-interface StatusCounts {
-  active: number;
-  deactivated: number;
-  deleted: number;
-  takendown: number;
-  suspended: number;
-  other: number;
-  total: number;
-  didPlc: number;
-  didWeb: number;
-}
-
-interface NonActiveRepo {
-  did: string;
-  status: string;
-}
-
-interface ScanResult {
-  counts: StatusCounts;
-  nonActive: NonActiveRepo[];
-  partial: boolean; // true if scan errored mid-way
-}
-
-async function scanPds(
-  pdsUrl: string,
-  onRepo?: (repo: RepoInfo) => void,
-): Promise<ScanResult> {
-  const counts: StatusCounts = {
-    active: 0, deactivated: 0, deleted: 0,
-    takendown: 0, suspended: 0, other: 0, total: 0,
-    didPlc: 0, didWeb: 0,
-  };
-  const nonActive: NonActiveRepo[] = [];
-
-  try {
-    for await (const repo of listAllRepos(pdsUrl)) {
-      onRepo?.(repo);
-      counts.total++;
-      if (repo.did.startsWith("did:plc:"))      counts.didPlc++;
-      else if (repo.did.startsWith("did:web:")) counts.didWeb++;
-      if (repo.active) {
-        counts.active++;
-      } else {
-        const status = repo.status ?? "other";
-        switch (status) {
-          case "deactivated": counts.deactivated++; break;
-          case "deleted":     counts.deleted++;     break;
-          case "takendown":   counts.takendown++;   break;
-          case "suspended":   counts.suspended++;   break;
-          default:            counts.other++;        break;
-        }
-        nonActive.push({ did: repo.did, status });
-      }
-    }
-    return { counts, nonActive, partial: false };
-  } catch (err) {
-    if (counts.total > 0) {
-      throw Object.assign(err as Error, { partialCounts: counts, partialNonActive: nonActive });
-    }
-    throw err;
-  }
-}
 
 // ── DNS resolution ────────────────────────────────────────────────────────────
 async function resolveIp(pdsUrl: string): Promise<string | null> {
@@ -319,13 +205,13 @@ async function main() {
 
   const DID_BATCH_SIZE = 10_000;
 
-  const writeDidBatch = db.transaction((pdsUrl: string, scannedAt: string, batch: RepoInfo[]) => {
+  const writeDidBatch = db.transaction((pdsUrl: string, batch: RepoInfo[]) => {
     for (const r of batch) {
       upsertDidInRepo.run(r.did, pdsUrl, scannedAt, scannedAt);
     }
   });
 
-  const writeNonActive = db.transaction((pdsUrl: string, scannedAt: string, nonActive: NonActiveRepo[]) => {
+  const writeNonActive = db.transaction((pdsUrl: string, nonActive: NonActiveRepo[]) => {
     for (const r of nonActive) {
       upsertDidStatus.run(r.did, r.status, pdsUrl, scannedAt);
     }
@@ -348,7 +234,7 @@ async function main() {
 
     const flushBatch = () => {
       if (repoBatch.length > 0) {
-        writeDidBatch(pdsUrl, scannedAt, repoBatch);
+        writeDidBatch(pdsUrl, repoBatch);
         totalDidInRepo += repoBatch.length;
         repoBatch = [];
       }
@@ -360,25 +246,22 @@ async function main() {
     };
 
     try {
-      const result = await scanPds(pdsUrl, onRepo);
+      const result = await scanPdsRepos(pdsUrl, onRepo);
       counts = result.counts;
       nonActive = result.nonActive;
-    } catch (err: any) {
-      if (err?.partialCounts?.total > 0) {
-        counts = err.partialCounts;
-        nonActive = err.partialNonActive ?? [];
-        partial = true;
+      partial = result.partial;
+      if (partial) {
         errors++;
         if (errors <= 20) {
-          console.error(`  ⚠ ${pdsUrl}: partial scan (${counts!.total.toLocaleString()} repos) — ${err.message}`);
+          console.error(`  ⚠ ${pdsUrl}: partial scan (${counts.total.toLocaleString()} repos)`);
         }
-      } else {
-        errors++;
-        if (errors <= 20) {
-          console.error(`  ✗ ${pdsUrl}: ${err}`);
-        }
-        return;
       }
+    } catch (err: any) {
+      errors++;
+      if (errors <= 20) {
+        console.error(`  ✗ ${pdsUrl}: ${err}`);
+      }
+      return;
     }
 
     flushBatch(); // write any remaining DIDs
@@ -394,7 +277,7 @@ async function main() {
     );
 
     if (nonActive.length > 0) {
-      writeNonActive(pdsUrl, scannedAt, nonActive);
+      writeNonActive(pdsUrl, nonActive);
       totalNonActive += nonActive.length;
     }
 

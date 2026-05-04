@@ -490,16 +490,22 @@ export function getTopPdsByScan(limit = 15, hideBsky = false): ScannedTopPds[] {
       SELECT RTRIM(pds_url, '/') AS norm_url, MAX(snapshot_date) AS snap_date
       FROM pds_repo_status_snapshots
       GROUP BY norm_url
+    ),
+    best AS (
+      -- Deduplicate trailing-slash vs non-trailing-slash variants: keep the row
+      -- with the highest total_scanned for each normalized URL.
+      SELECT
+        RTRIM(s.pds_url, '/') AS url,
+        s.ip_address,
+        MAX(s.total_scanned) AS total_scanned,
+        s.active,
+        l.snap_date AS snapshot_date
+      FROM pds_repo_status_snapshots s
+      JOIN latest l ON RTRIM(s.pds_url, '/') = l.norm_url AND s.snapshot_date = l.snap_date
+      WHERE s.total_scanned > 0
+      GROUP BY RTRIM(s.pds_url, '/')
     )
-    SELECT
-      RTRIM(s.pds_url, '/') AS url,
-      s.ip_address,
-      s.total_scanned,
-      s.active,
-      l.snap_date AS snapshot_date
-    FROM pds_repo_status_snapshots s
-    JOIN latest l ON RTRIM(s.pds_url, '/') = l.norm_url AND s.snapshot_date = l.snap_date
-    WHERE s.total_scanned > 0
+    SELECT url, ip_address, total_scanned, active, snapshot_date FROM best
   `).all() as { url: string; ip_address: string | null; total_scanned: number; active: number; snapshot_date: string }[];
 
   const isBsky = (u: string) => u.includes(".host.bsky.network") || /bsky\.social/.test(u);

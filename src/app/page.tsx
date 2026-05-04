@@ -1,5 +1,6 @@
 import { getDashboardData, getLatestFirehoseSample, type ConcentrationStats } from "@/lib/db/queries";
 import { SimpleBarChart, DonutChart, InfraSection } from "@/components/charts";
+import { CollapsibleSection } from "@/components/collapsible-section";
 import type { GithubTopicStats } from "@/lib/db/queries";
 import { getPdsLangSummary, getTopLangs, getLastScanTime, getTopPdsByScan } from "@/lib/db/plc-queries";
 import type { PdsLangLocation, NamespaceLocation } from "@/components/world-map";
@@ -209,7 +210,7 @@ export default async function Home({
 
       {/* Infrastructure map + provider donut (linked) */}
       {locations.length > 0 && (
-        <div className="mb-12">
+        <CollapsibleSection title="Infrastructure" storageKey="home-infra">
           <InfraSection
             providers={providers}
             cdnBreakdown={cdnBreakdown}
@@ -222,10 +223,11 @@ export default async function Home({
             pdsLangRows={langRows}
             pdsCollectionRows={collectionPdsData}
           />
-        </div>
+        </CollapsibleSection>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-12">
+      <CollapsibleSection title="Distribution Breakdown" storageKey="home-distributions">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-4">
         {/* Geographic distribution */}
         <ChartCard title="PDS by Country" subtitle={`${countries.length} countries`}>
           <SimpleBarChart
@@ -290,14 +292,11 @@ export default async function Home({
           />
         </ChartCard>
       </div>
+      </CollapsibleSection>
 
       {/* Top PDSes by users */}
       {resolvedTopPds.length > 0 && (
-        <div className="mb-12">
-          <h2 className="text-lg font-semibold mb-1">Largest PDSes</h2>
-          <p className="text-sm text-gray-500 mb-4">
-            Ranked by total repos from most recent scan · Bluesky shards aggregated
-          </p>
+        <CollapsibleSection title="Largest PDSes" subtitle="Ranked by total repos from most recent scan · Bluesky shards aggregated" storageKey="home-top-pds">
           <div className="overflow-x-auto rounded-lg border border-gray-800">
             <table className="w-full text-sm">
               <thead>
@@ -329,11 +328,19 @@ export default async function Home({
               </tbody>
             </table>
           </div>
-        </div>
+        </CollapsibleSection>
       )}
 
       {/* Federation health */}
-      {firehose && <FederationSection sample={firehose} />}
+      {firehose && (
+        <CollapsibleSection
+          title="Cross-PDS Interactions"
+          subtitle={`Measures how often interactions cross PDS boundaries · aggregated from ${firehose.sampleCount} firehose sample${firehose.sampleCount !== 1 ? "s" : ""} over the last ${firehose.windowDays} days`}
+          storageKey="home-federation"
+        >
+          <FederationSection sample={firehose} />
+        </CollapsibleSection>
+      )}
 
       {/* GitHub ecosystem stats */}
       
@@ -392,17 +399,11 @@ function FederationSection({ sample }: { sample: NonNullable<ReturnType<typeof g
 
 
   return (
-    <div className="mb-12">
-      <h2 className="text-lg font-semibold mb-1">Cross-PDS Interactions</h2>
-      <p className="text-sm text-gray-500 mb-4">
-        Measures how often interactions (likes, replies, reposts, follows) cross PDS boundaries.
-        Aggregated from {sample.sampleCount} firehose sample{sample.sampleCount !== 1 ? "s" : ""} over the last {sample.windowDays} days
-        ({sample.totalEvents.toLocaleString()} total events · {sample.eventsPerSecond} evt/s avg · {Math.round(sample.durationMs / 1000 / 60)} min total sampled)
-        {" \u00b7 "}
-        last sampled {new Date(sample.sampledAt + "Z").toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
-      </p>
-      <p className="text-xs text-gray-600 mb-4">
-        Includes Fediverse bridge traffic (e.g. Bridgy Fed) as independent traffic.
+    <div>
+      <p className="text-xs text-gray-500 mb-4">
+        {sample.totalEvents.toLocaleString()} events · {sample.eventsPerSecond} evt/s avg · {Math.round(sample.durationMs / 1000 / 60)} min sampled
+        {" · "}last sampled {new Date(sample.sampledAt + "Z").toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
+        {" · "}includes Fediverse bridge traffic (e.g. Bridgy Fed)
       </p>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">

@@ -19,7 +19,7 @@ export interface PdsDetails {
   partial: boolean;
 }
 
-interface DescribeServerResponse {
+export interface DescribeServerResponse {
   did?: string;
   availableUserDomains?: string[];
   inviteCodeRequired?: boolean;
@@ -49,7 +49,7 @@ async function safeJsonParse<T>(res: Response): Promise<T | null> {
   }
 }
 
-async function describeServer(pdsUrl: string): Promise<DescribeServerResponse | null> {
+export async function describeServer(pdsUrl: string): Promise<DescribeServerResponse | null> {
   try {
     const url = `${pdsUrl.replace(/\/$/, "")}/xrpc/com.atproto.server.describeServer`;
     const res = await fetchWithTimeout(url, XRPC_TIMEOUT_MS);

@@ -71,6 +71,8 @@ activityDb.exec(`ATTACH DATABASE '${plcDb.name}' as plc`);
 // WAL files so analysis I/O doesn't compete with the live collector writes.
 activityDb.pragma("cache_size = -131072");
 activityDb.pragma("temp_store = MEMORY");
+// Memory-map the DB file so the OS page cache serves reads without syscall overhead.
+activityDb.pragma("mmap_size = 2147483648");  // 2 GB
 
 // Materialise once; all queries join against this instead of repeating the CTE.
 activityDb.exec(`
@@ -80,6 +82,27 @@ activityDb.exec(`
     SELECT did FROM plc.skywatch_labels WHERE label IN ('spam', 'impersonation');
   CREATE INDEX temp.idx_excluded_dids ON excluded_dids(did);
 `);
+
+// Pre-materialise the active-user window so each query doesn't re-scan 33M rows.
+// active_window_clean: unique (did, activity_types) pairs for the window, spam/bots excluded.
+// active_window_all: same but no exclusion filter (for label-analysis queries).
+console.log(`Pre-materialising active-user window (${windowStart} – ${RUN_DATE})…`);
+activityDb.exec(`
+  CREATE TEMP TABLE active_window_clean AS
+    SELECT DISTINCT d.did, d.activity_types
+    FROM did_activity_daily d
+    LEFT JOIN excluded_dids ex ON d.did = ex.did
+    WHERE d.date >= '${windowStart}'
+      AND ex.did IS NULL;
+  CREATE INDEX temp.idx_active_window_clean_did ON active_window_clean(did);
+
+  CREATE TEMP TABLE active_window_all AS
+    SELECT DISTINCT did, activity_types
+    FROM did_activity_daily
+    WHERE date >= '${windowStart}';
+  CREATE INDEX temp.idx_active_window_all_did ON active_window_all(did);
+`);
+console.log(`  done.\n`);
 
 // ── Shared SQL fragments ──────────────────────────────────────────────────────
 
@@ -116,18 +139,11 @@ try {
 if (shouldRun("activity_by_age")) {
 const activityByAge = activityDb.prepare(`
   WITH
-active AS (
-    SELECT DISTINCT d.did, d.activity_types
-    FROM did_activity_daily d
-    LEFT JOIN excluded_dids ex ON d.did = ex.did
-    WHERE d.date >= date('now', '-' || ? || ' days')
-      AND ex.did IS NULL
-  ),
   buckets AS (
     SELECT
       ${AGE_BUCKET} AS age_bucket,
       a.activity_types
-    FROM active a
+    FROM active_window_clean a
     JOIN plc.plc_account_creations p ON a.did = p.did
   )
   SELECT age_bucket, ${ACTIVITY_COLS}
@@ -136,7 +152,7 @@ active AS (
   SELECT '~ TOTAL', ${ACTIVITY_COLS}
   FROM buckets
   ORDER BY age_bucket
-`).all(daysBack) as Record<string, unknown>[];
+`).all() as Record<string, unknown>[];
 
 report("Activity by Age Bucket", `activity_by_age_${daysBack}d.csv`, activityByAge);
 }

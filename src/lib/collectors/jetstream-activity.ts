@@ -25,6 +25,7 @@
 
 import WebSocket from "ws";
 import { getActivityDb } from "../db/activity-schema";
+import { getPlcDb } from "../db/plc-schema";
 
 // Bitmask assignments for activity_types column.
 // Bits 13+ are synthetic — derived from record content, not the collection name alone.
@@ -148,6 +149,11 @@ const feedGenDeleteBuffer = new Set<string>();
 // Feed like buffer: "feed_uri|date" → count (only likes targeting a feed generator)
 const feedLikeBuffer = new Map<string, number>();
 
+// did:web PDS discovery: DIDs seen in the stream that need did document resolution
+const didWebSeen = new Set<string>();
+// Cache of DIDs we've already successfully resolved so we don't re-hit them every flush
+const didWebResolved = new Set<string>();
+
 let lastCursor = 0;
 let totalActivityFlushed = 0;
 let totalDeletesFlushed = 0;
@@ -157,6 +163,75 @@ let totalCollectionsFlushed = 0;
 let totalFeedGensFlushed = 0;
 let totalFeedLikesFlushed = 0;
 let totalEvents = 0;
+
+// Resolve a did:web DID document and return the #atproto_pds service endpoint.
+// did:web:example.com → https://example.com/.well-known/did.json
+// did:web:example.com:path:seg → https://example.com/path/seg/did.json
+async function resolveDidWebPds(did: string): Promise<string | null> {
+  try {
+    const encoded = did.slice("did:web:".length);
+    const parts = encoded.split(":");
+    const host = decodeURIComponent(parts[0]);
+    const docPath = parts.length > 1
+      ? parts.slice(1).map(decodeURIComponent).join("/") + "/did.json"
+      : ".well-known/did.json";
+    const url = `https://${host}/${docPath}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) return null;
+    const doc = await res.json() as { service?: { id: string; serviceEndpoint: string }[] };
+    return doc?.service?.find(s => s.id === "#atproto_pds")?.serviceEndpoint ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// Resolve any newly-seen did:web DIDs and write discovered PDS URLs to plcDb.
+// Runs async alongside each flush; does not block the main event loop.
+async function resolveAndStoreDidWebs() {
+  if (didWebSeen.size === 0) return;
+
+  const toResolve = [...didWebSeen].filter(d => !didWebResolved.has(d));
+  didWebSeen.clear();
+  if (toResolve.length === 0) return;
+
+  const plcDb = getPlcDb();
+
+  // Check which ones we've already stored with a successful resolution
+  const alreadyStored = new Set(
+    (plcDb.prepare(`SELECT did FROM did_web_pds WHERE pds_url IS NOT NULL`).all() as { did: string }[])
+      .map(r => r.did)
+  );
+  const fresh = toResolve.filter(d => !alreadyStored.has(d));
+  // Warm the resolved cache
+  for (const d of alreadyStored) didWebResolved.add(d);
+  if (fresh.length === 0) return;
+
+  const upsert = plcDb.prepare(`
+    INSERT INTO did_web_pds (did, pds_url, first_seen, last_seen, resolved_at)
+    VALUES (?, ?, datetime('now'), datetime('now'), datetime('now'))
+    ON CONFLICT (did) DO UPDATE SET
+      pds_url     = COALESCE(excluded.pds_url, pds_url),
+      last_seen   = excluded.last_seen,
+      resolved_at = CASE WHEN excluded.pds_url IS NOT NULL THEN excluded.resolved_at ELSE resolved_at END
+  `);
+
+  const CONCURRENCY = 5;
+  let discovered = 0;
+  for (let i = 0; i < fresh.length; i += CONCURRENCY) {
+    const batch = fresh.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(batch.map(async did => ({ did, pdsUrl: await resolveDidWebPds(did) })));
+    plcDb.transaction(() => {
+      for (const { did, pdsUrl } of results) {
+        upsert.run(did, pdsUrl);
+        if (pdsUrl) { didWebResolved.add(did); discovered++; }
+      }
+    })();
+  }
+
+  if (discovered > 0) {
+    console.log(`[activity] Discovered ${discovered} new did:web PDS${discovered > 1 ? "es" : ""} (${fresh.length} DIDs resolved)`);
+  }
+}
 
 function flush() {
   if (activityBuffer.size === 0 && deleteBuffer.size === 0 && starterpackBuffer.size === 0 && langBuffer.size === 0 && collectionBuffer.size === 0 && feedGenBuffer.size === 0 && feedGenDeleteBuffer.size === 0 && feedLikeBuffer.size === 0) return;
@@ -375,6 +450,11 @@ function connect() {
       lastCursor = evt.time_us;
       totalEvents++;
 
+      // did:web PDS discovery: capture every did:web DID seen in the stream
+      if (typeof evt.did === "string" && evt.did.startsWith("did:web:") && !didWebResolved.has(evt.did)) {
+        didWebSeen.add(evt.did);
+      }
+
       if (evt.kind === "commit") {
         if (evt.commit.operation === "create") {
           // Activity: track which collection types were seen per (did, date)
@@ -491,6 +571,7 @@ async function main() {
   setInterval(() => {
     flush();
     pruneOldRows();
+    resolveAndStoreDidWebs().catch(err => console.error("[activity] did:web resolution error:", err));
   }, FLUSH_INTERVAL_MS);
 
   for (const sig of ["SIGINT", "SIGTERM"]) {

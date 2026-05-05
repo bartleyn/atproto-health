@@ -273,6 +273,20 @@ function migrate(db: Database.Database) {
 
     CREATE INDEX IF NOT EXISTS idx_pds_lang_summary_lang
       ON pds_lang_summary(lang);
+
+    -- did:web DIDs discovered via the Jetstream event stream.
+    -- Populated by jetstream-activity.ts as it sees did:web:* DIDs in any event.
+    -- pds_url is null until the did document is successfully resolved.
+    CREATE TABLE IF NOT EXISTS did_web_pds (
+      did         TEXT PRIMARY KEY,
+      pds_url     TEXT,             -- resolved #atproto_pds service endpoint
+      first_seen  TEXT NOT NULL,   -- ISO timestamp when first observed in the stream
+      last_seen   TEXT NOT NULL,   -- ISO timestamp of most recent observation
+      resolved_at TEXT              -- ISO timestamp of last successful did document resolution
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_did_web_pds_pds_url
+      ON did_web_pds(pds_url);
   `);
 
   // Additive migrations for existing databases
@@ -302,4 +316,16 @@ function migrate(db: Database.Database) {
   try {
     db.exec(`ALTER TABLE plc_stats_cache ADD COLUMN unique_migrating_dids INTEGER NOT NULL DEFAULT 0`);
   } catch { /* already exists */ }
+
+  // Geo + server fields migrated from atproto-health.db pds_snapshots
+  for (const col of [
+    "country TEXT", "country_code TEXT", "region TEXT", "city TEXT",
+    "latitude REAL", "longitude REAL", "isp TEXT", "org TEXT",
+    "as_number TEXT", "hosting_provider TEXT",
+    "version TEXT", "invite_code_required INTEGER", "is_online INTEGER",
+  ]) {
+    try {
+      db.exec(`ALTER TABLE pds_repo_status_snapshots ADD COLUMN ${col}`);
+    } catch { /* already exists */ }
+  }
 }

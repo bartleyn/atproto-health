@@ -83,27 +83,6 @@ activityDb.exec(`
   CREATE INDEX temp.idx_excluded_dids ON excluded_dids(did);
 `);
 
-// Pre-materialise the active-user window so each query doesn't re-scan 33M rows.
-// active_window_clean: unique (did, activity_types) pairs for the window, spam/bots excluded.
-// active_window_all: same but no exclusion filter (for label-analysis queries).
-console.log(`Pre-materialising active-user window (${windowStart} – ${RUN_DATE})…`);
-activityDb.exec(`
-  CREATE TEMP TABLE active_window_clean AS
-    SELECT DISTINCT d.did, d.activity_types
-    FROM did_activity_daily d
-    LEFT JOIN excluded_dids ex ON d.did = ex.did
-    WHERE d.date >= '${windowStart}'
-      AND ex.did IS NULL;
-  CREATE INDEX temp.idx_active_window_clean_did ON active_window_clean(did);
-
-  CREATE TEMP TABLE active_window_all AS
-    SELECT DISTINCT did, activity_types
-    FROM did_activity_daily
-    WHERE date >= '${windowStart}';
-  CREATE INDEX temp.idx_active_window_all_did ON active_window_all(did);
-`);
-console.log(`  done.\n`);
-
 // ── Shared SQL fragments ──────────────────────────────────────────────────────
 
 const newAcctCutoff = daysAgoStr(7);  // accounts created in the last 7 days
@@ -128,6 +107,27 @@ const ACTIVITY_COLS = `
 
 const windowStart = daysAgoStr(daysBack);
 console.log(`\nActivity crosstabs — activity window: ${windowStart} – ${RUN_DATE} (${daysBack} days)`);
+
+// Pre-materialise the active-user window so each query doesn't re-scan 33M rows.
+// active_window_clean: unique (did, activity_types) pairs for the window, spam/bots excluded.
+// active_window_all: same but no exclusion filter (for label-analysis queries).
+console.log(`Pre-materialising active-user window…`);
+activityDb.exec(`
+  CREATE TEMP TABLE active_window_clean AS
+    SELECT DISTINCT d.did, d.activity_types
+    FROM did_activity_daily d
+    LEFT JOIN excluded_dids ex ON d.did = ex.did
+    WHERE d.date >= '${windowStart}'
+      AND ex.did IS NULL;
+  CREATE INDEX temp.idx_active_window_clean_did ON active_window_clean(did);
+
+  CREATE TEMP TABLE active_window_all AS
+    SELECT DISTINCT did, activity_types
+    FROM did_activity_daily
+    WHERE date >= '${windowStart}';
+  CREATE INDEX temp.idx_active_window_all_did ON active_window_all(did);
+`);
+console.log(`  done.\n`);
 
 // Single read transaction: all queries see the same consistent DB snapshot.
 // BEGIN DEFERRED on a readonly WAL connection never blocks the live collector.
@@ -162,14 +162,9 @@ report("Activity by Age Bucket", `activity_by_age_${daysBack}d.csv`, activityByA
 if (shouldRun("activity_by_label")) {
 const activityByLabel = activityDb.prepare(`
   WITH
- active AS (
-    SELECT DISTINCT did, activity_types
-    FROM did_activity_daily
-    WHERE date >= date('now', '-' || ? || ' days')
-  ),
   labeled AS (
     SELECT sl.label, a.activity_types
-    FROM active a
+    FROM active_window_all a
     JOIN plc.skywatch_labels sl ON a.did = sl.did
   )
   SELECT label, ${ACTIVITY_COLS}
@@ -178,7 +173,7 @@ const activityByLabel = activityDb.prepare(`
   SELECT '~ TOTAL', ${ACTIVITY_COLS}
   FROM labeled
   ORDER BY total DESC
-`).all(daysBack) as Record<string, unknown>[];
+`).all() as Record<string, unknown>[];
 
 report("Activity by Skywatch Label", `activity_by_label_${daysBack}d.csv`, activityByLabel);
 }
@@ -188,20 +183,17 @@ report("Activity by Skywatch Label", `activity_by_label_${daysBack}d.csv`, activ
 if (shouldRun("stickiness")) {
 const stickiness = activityDb.prepare(`
   WITH
-daily_counts AS (
+  -- Re-join with the raw table for per-day counts; covering index makes this fast.
+  daily_counts AS (
     SELECT d.date, COUNT(DISTINCT d.did) AS daily_uniques
     FROM did_activity_daily d
     LEFT JOIN excluded_dids ex ON d.did = ex.did
-    WHERE d.date >= date('now', '-' || ? || ' days')
+    WHERE d.date >= '${windowStart}'
       AND ex.did IS NULL
     GROUP BY d.date
   ),
   total_unique AS (
-    SELECT COUNT(DISTINCT d.did) AS total_uniques
-    FROM did_activity_daily d
-    LEFT JOIN excluded_dids ex ON d.did = ex.did
-    WHERE d.date >= date('now', '-' || ? || ' days')
-      AND ex.did IS NULL
+    SELECT COUNT(DISTINCT did) AS total_uniques FROM active_window_clean
   )
   SELECT
     ROUND(AVG(daily_uniques), 0)                                                                   AS avg_daily_uniques,
@@ -210,7 +202,7 @@ daily_counts AS (
     ROUND(1.0 * AVG(daily_uniques) / total_uniques, 3)                                             AS ratio,
     ROUND(SQRT(AVG(daily_uniques * daily_uniques) - AVG(daily_uniques) * AVG(daily_uniques)) / total_uniques, 4) AS stddev_ratio
   FROM daily_counts, total_unique
-`).get(daysBack, daysBack) as Record<string, unknown>;
+`).get() as Record<string, unknown>;
 
 report("Stickiness", `stickiness_${daysBack}d.csv`, [stickiness]);
 }
@@ -220,7 +212,7 @@ report("Stickiness", `stickiness_${daysBack}d.csv`, [stickiness]);
 if (shouldRun("stickiness_by_age")) {
 const stickinessByBucket = activityDb.prepare(`
   WITH
-daily_by_bucket AS (
+  daily_by_bucket AS (
     SELECT
       d.date,
       ${AGE_BUCKET} AS age_bucket,
@@ -228,19 +220,16 @@ daily_by_bucket AS (
     FROM did_activity_daily d
     JOIN plc.plc_account_creations p ON d.did = p.did
     LEFT JOIN excluded_dids ex ON d.did = ex.did
-    WHERE d.date >= date('now', '-' || ? || ' days')
+    WHERE d.date >= '${windowStart}'
       AND ex.did IS NULL
     GROUP BY d.date, age_bucket
   ),
   totals AS (
     SELECT
       ${AGE_BUCKET} AS age_bucket,
-      COUNT(DISTINCT d.did) AS total_uniques
-    FROM did_activity_daily d
-    JOIN plc.plc_account_creations p ON d.did = p.did
-    LEFT JOIN excluded_dids ex ON d.did = ex.did
-    WHERE d.date >= date('now', '-' || ? || ' days')
-      AND ex.did IS NULL
+      COUNT(DISTINCT a.did) AS total_uniques
+    FROM active_window_clean a
+    JOIN plc.plc_account_creations p ON a.did = p.did
     GROUP BY age_bucket
   )
   SELECT
@@ -254,7 +243,7 @@ daily_by_bucket AS (
   JOIN totals t ON d.age_bucket = t.age_bucket
   GROUP BY d.age_bucket
   ORDER BY d.age_bucket
-`).all(daysBack, daysBack) as Record<string, unknown>[];
+`).all() as Record<string, unknown>[];
 
 report("Stickiness by Age Bucket", `stickiness_by_age_${daysBack}d.csv`, stickinessByBucket);
 }
@@ -314,10 +303,9 @@ const cohortActivationRate = activityDb.prepare(`
   active_by_bucket AS (
     SELECT
       ${AGE_BUCKET} AS age_bucket,
-      COUNT(DISTINCT d.did) AS active_users
-    FROM did_activity_daily d
-    JOIN plc.plc_account_creations p ON d.did = p.did
-    WHERE d.date >= date('now', '-' || ? || ' days')
+      COUNT(DISTINCT a.did) AS active_users
+    FROM active_window_clean a
+    JOIN plc.plc_account_creations p ON a.did = p.did
     GROUP BY age_bucket
   )
   SELECT
@@ -328,7 +316,7 @@ const cohortActivationRate = activityDb.prepare(`
   FROM total_by_bucket t
   LEFT JOIN active_by_bucket a USING (age_bucket)
   ORDER BY t.age_bucket
-`).all(daysBack) as Record<string, unknown>[];
+`).all() as Record<string, unknown>[];
 
 report(`Cohort Activation Rate`, `cohort_activation_${daysBack}d.csv`, cohortActivationRate);
 }
@@ -479,14 +467,6 @@ report("pds.trump.com Weekly DID Registrations", "trump_pds_weekly.csv", trumpWe
 
 if (shouldRun("lang_activity")) {
 const langActivity = activityDb.prepare(`
-  WITH
-active AS (
-    SELECT DISTINCT d.did, d.activity_types
-    FROM did_activity_daily d
-    LEFT JOIN excluded_dids ex ON d.did = ex.did
-    WHERE d.date >= date('now', '-' || ? || ' days')
-      AND ex.did IS NULL
-  )
   SELECT
     dl.lang,
     COUNT(DISTINCT dl.did)                                                AS active_users,
@@ -497,11 +477,11 @@ active AS (
     SUM(CASE WHEN a.activity_types & 4 THEN 1 ELSE 0 END)                AS reposted_in_window,
     SUM(CASE WHEN a.activity_types & 8 THEN 1 ELSE 0 END)                AS followed_in_window
   FROM did_langs dl
-  JOIN active a ON dl.did = a.did
+  JOIN active_window_clean a ON dl.did = a.did
   GROUP BY dl.lang
   ORDER BY active_users DESC
   LIMIT 40
-`).all(daysBack) as Record<string, unknown>[];
+`).all() as Record<string, unknown>[];
 
 report(`Language × Activity`, `lang_activity_${daysBack}d.csv`, langActivity);
 }
@@ -642,8 +622,7 @@ const rawNsRetention = activityDb.prepare(`
     WHERE collection NOT LIKE 'app.bsky.%' AND collection NOT LIKE 'chat.bsky.%'
   ),
   active_in_window AS (
-    SELECT DISTINCT did FROM did_activity_daily
-    WHERE date >= date('now', '-' || ? || ' days')
+    SELECT DISTINCT did FROM active_window_all
   )
   SELECT
     nu.collection,
@@ -653,7 +632,7 @@ const rawNsRetention = activityDb.prepare(`
   LEFT JOIN active_in_window a ON nu.did = a.did
   GROUP BY nu.collection
   HAVING lifetime_users >= 2
-`).all(daysBack) as { collection: string; lifetime_users: number; active_in_window: number }[];
+`).all() as { collection: string; lifetime_users: number; active_in_window: number }[];
 
 // Aggregate to namespace root (first 2 NSID parts) in JS
 const nsRootMap = new Map<string, { lifetime_users: number; active_in_window: number }>();

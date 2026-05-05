@@ -65,6 +65,10 @@ const activityDb = new Database(path.join(process.cwd(), "jetstream-activity.db"
 const plcDb = new Database(path.join(process.cwd(), "plc-migrations.db"), { readonly: true });
 activityDb.exec(`ATTACH DATABASE '${plcDb.name}' as plc`);
 
+activityDb.pragma("cache_size = -131072");   // 128 MB page cache
+activityDb.pragma("temp_store = MEMORY");
+activityDb.pragma("mmap_size = 2147483648"); // 2 GB mmap
+
 // Earliest and latest dates with activity data — used to bound cohort window
 const { min_date, max_date } = activityDb.prepare(
   `SELECT MIN(date) AS min_date, MAX(date) AS max_date FROM did_activity_daily`

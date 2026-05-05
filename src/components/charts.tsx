@@ -1763,7 +1763,10 @@ export function MultiStepSankeyChart({ data, height = 480 }: MultiStepSankeyProp
   const pdsColorMap = new Map(pdsNames.map((pds, i) => [pds, COLORS[i % COLORS.length]]));
 
   const margin = { top: 36, right: 180, bottom: 10, left: 120 };
-  const innerW = width - margin.left - margin.right;
+  const numCols = stepLabels.length;
+  const minColSpacing = 320;
+  const svgWidth = Math.max(width, margin.left + margin.right + numCols * minColSpacing);
+  const innerW = svgWidth - margin.left - margin.right;
   const innerH = height - margin.top - margin.bottom;
 
   const sankeyLayout = sankey<N, L>()
@@ -1837,8 +1840,6 @@ export function MultiStepSankeyChart({ data, height = 480 }: MultiStepSankeyProp
     if (!rect) return;
     setTooltip(t => t ? { ...t, x: e.clientX - rect.left, y: e.clientY - rect.top } : null);
   };
-
-  const svgWidth = Math.max(width, 820);
 
   return (
     <div ref={containerRef} style={{ width: "100%" }}>

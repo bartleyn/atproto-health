@@ -14,9 +14,7 @@
  *   npx tsx src/lib/collectors/scan-pds-status.ts --concurrency 5
  */
 
-import path from "path";
 import { promises as dns } from "dns";
-import Database from "better-sqlite3";
 import { getPlcDb } from "../db/plc-schema";
 import { scanPdsRepos, type RepoInfo, type StatusCounts, type NonActiveRepo } from "./pds-repos";
 
@@ -84,7 +82,7 @@ async function main() {
     pdsList = onlyList;
     console.log(`Mode: specific PDSes (${pdsList.length})\n`);
   } else {
-    // Start with PLC-derived PDS list (PDSes that actual accounts point to)
+    // PDS sources: did:plc accounts (plc_did_pds) + did:web accounts (did_web_pds)
     const plcRows = db
       .prepare(`SELECT pds_url FROM plc_did_pds GROUP BY pds_url ORDER BY COUNT(*) DESC`)
       .all() as { pds_url: string }[];
@@ -93,22 +91,16 @@ async function main() {
       pdsSet.set(r.pds_url.replace(/\/+$/, "").replace(/^http:\/\//, "https://"), 0);
     }
 
-    // Also union in PDSes from the main atproto-health.db directory so both
-    // pipelines scan the same set and produce aligned total account counts.
-    const mainDbPath = path.join(process.cwd(), "atproto-health.db");
-    try {
-      const mainDb = new Database(mainDbPath, { readonly: true, timeout: 5000 });
-      const mainRows = mainDb.prepare(`SELECT url FROM pds_instances`).all() as { url: string }[];
-      mainDb.close();
-      let added = 0;
-      for (const r of mainRows) {
-        const url = r.url.replace(/\/+$/, "").replace(/^http:\/\//, "https://");
-        if (!pdsSet.has(url)) { pdsSet.set(url, 0); added++; }
-      }
-      console.log(`PDS sources: ${plcRows.length.toLocaleString()} from PLC + ${added.toLocaleString()} additional from atproto-health.db directory`);
-    } catch {
-      console.log(`PDS sources: ${plcRows.length.toLocaleString()} from PLC (atproto-health.db not found, skipping directory merge)`);
+    const didWebRows = db
+      .prepare(`SELECT DISTINCT pds_url FROM did_web_pds WHERE pds_url IS NOT NULL`)
+      .all() as { pds_url: string }[];
+    let didWebAdded = 0;
+    for (const r of didWebRows) {
+      const url = r.pds_url.replace(/\/+$/, "").replace(/^http:\/\//, "https://");
+      if (!pdsSet.has(url)) { pdsSet.set(url, 0); didWebAdded++; }
     }
+
+    console.log(`PDS sources: ${plcRows.length.toLocaleString()} from PLC did:plc + ${didWebAdded.toLocaleString()} additional from did:web discovery`);
 
     pdsList = [...pdsSet.keys()].filter(url => {
       if (isBskyShard(url) && !includeBsky)  return false;

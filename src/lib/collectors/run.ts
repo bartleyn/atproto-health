@@ -10,8 +10,8 @@
 import { promises as dns } from "dns";
 import { getDb } from "../db/schema";
 import { getPlcDb } from "../db/plc-schema";
-import { fetchPdsDirectory } from "./pds-directory";
-import { geolocatePdses } from "./geo-ip";
+import { fetchPdsDirectory, type PdsDirectoryEntry } from "./pds-directory";
+import { geolocatePdses, type GeoIpResult } from "./geo-ip";
 import { fetchAllPdsDetails, type PdsDetails, type RepoInfo } from "./pds-details";
 
 const args = new Set(process.argv.slice(2));
@@ -105,12 +105,38 @@ async function main() {
         console.log(`Resuming: ${alreadyDone.size} done today, ${emptyRecently.size} skipped (empty <7d), ${toScan.length} remaining\n`);
       }
 
+      // Build lookup maps for geo + directory data available in onPdsDone
+      const directoryMap = new Map<string, PdsDirectoryEntry>(
+        directory.map((e) => [normalizeUrl(e.url), e])
+      );
+
+      // For usersOnly runs (no geoResults), load last known geo from plcDb
+      type CachedGeo = { country: string | null; country_code: string | null; region: string | null;
+        city: string | null; latitude: number | null; longitude: number | null;
+        isp: string | null; org: string | null; as_number: string | null; };
+      let cachedGeoMap = new Map<string, CachedGeo>();
+      if (!geoResults) {
+        const rows = plcDb.prepare(`
+          SELECT pds_url, country, country_code, region, city, latitude, longitude, isp, org, as_number
+          FROM (
+            SELECT pds_url, country, country_code, region, city, latitude, longitude, isp, org, as_number,
+              ROW_NUMBER() OVER (PARTITION BY pds_url ORDER BY snapshot_date DESC) AS rn
+            FROM pds_repo_status_snapshots WHERE country IS NOT NULL
+          ) WHERE rn = 1
+        `).all() as ({ pds_url: string } & CachedGeo)[];
+        cachedGeoMap = new Map(rows.map(r => [r.pds_url, r]));
+      }
+
       // Prepare plcDb write statements
       const upsertSnapshot = plcDb.prepare(`
         INSERT INTO pds_repo_status_snapshots
           (pds_url, snapshot_date, active, deactivated, deleted, takendown, suspended, other,
-           total_scanned, is_sampled, did_plc_count, did_web_count, is_partial, scanned_at, ip_address)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+           total_scanned, is_sampled, did_plc_count, did_web_count, is_partial, scanned_at, ip_address,
+           country, country_code, region, city, latitude, longitude, isp, org, as_number, hosting_provider,
+           version, invite_code_required, is_online)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?)
         ON CONFLICT(pds_url, snapshot_date) DO UPDATE SET
           active = excluded.active, deactivated = excluded.deactivated,
           deleted = excluded.deleted, takendown = excluded.takendown,
@@ -118,7 +144,14 @@ async function main() {
           total_scanned = excluded.total_scanned,
           did_plc_count = excluded.did_plc_count, did_web_count = excluded.did_web_count,
           is_partial = excluded.is_partial, scanned_at = excluded.scanned_at,
-          ip_address = excluded.ip_address
+          ip_address = excluded.ip_address,
+          country = excluded.country, country_code = excluded.country_code,
+          region = excluded.region, city = excluded.city,
+          latitude = excluded.latitude, longitude = excluded.longitude,
+          isp = excluded.isp, org = excluded.org, as_number = excluded.as_number,
+          hosting_provider = excluded.hosting_provider,
+          version = excluded.version, invite_code_required = excluded.invite_code_required,
+          is_online = excluded.is_online
       `);
 
       const upsertDidInRepo = plcDb.prepare(`
@@ -169,11 +202,27 @@ async function main() {
         if (!details.statusCounts || details.statusCounts.total === 0) return;
 
         const c = details.statusCounts;
+        const rawGeo = geoResults?.get(pdsUrl);
+        const cachedGeo = cachedGeoMap.get(pdsUrl);
+        const countryCode = rawGeo?.countryCode ?? cachedGeo?.country_code ?? null;
+        const lat = rawGeo?.lat ?? cachedGeo?.latitude ?? null;
+        const lon = rawGeo?.lon ?? cachedGeo?.longitude ?? null;
+        const asNumber = rawGeo?.asNumber ?? cachedGeo?.as_number ?? null;
+        const country = rawGeo?.country ?? cachedGeo?.country ?? null;
+        const region = rawGeo?.region ?? cachedGeo?.region ?? null;
+        const city = rawGeo?.city ?? cachedGeo?.city ?? null;
+        const isp = rawGeo?.isp ?? cachedGeo?.isp ?? null;
+        const org = rawGeo?.org ?? cachedGeo?.org ?? null;
+        const dirEntry = directoryMap.get(pdsUrl);
         upsertSnapshot.run(
           pdsUrl, today,
           c.active, c.deactivated, c.deleted, c.takendown, c.suspended, c.other,
           c.total, c.didPlc, c.didWeb,
           details.partial ? 1 : 0, scannedAt, ipMap.get(pdsUrl) ?? null,
+          country, countryCode, region, city, lat, lon, isp, org, asNumber, org,
+          dirEntry?.version ?? null,
+          dirEntry?.inviteCodeRequired ? 1 : 0,
+          dirEntry?.isOnline ? 1 : 0,
         );
 
         if (details.nonActive.length > 0) {

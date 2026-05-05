@@ -9,7 +9,7 @@ import {
   getPlcDataTimestamp,
   getScannedPdsCount,
 } from "@/lib/db/plc-queries";
-import { getOverviewStats } from "@/lib/db/queries";
+import { getOverviewStats } from "@/lib/db/plc-queries";
 import { MigrationChartsSection, MultiStepSankeyChart, SimpleBarChart } from "@/components/charts";
 import { CollapsibleSection } from "@/components/collapsible-section";
 

@@ -200,18 +200,18 @@ export default async function Home({
 
       {/* Overview stats */}
       <p className="text-xs text-gray-500 mb-3">
-        PDS directory sourced from{" "}
+        PDS directory based on{" "}
         <a href="https://github.com/mary-ext/atproto-scraping" target="_blank" rel="noopener noreferrer" className="underline hover:text-gray-300">
           mary-ext/atproto-scraping
         </a>
-        . Online/offline reflects that scraper&apos;s last health check. Open Reg indicates no invite code required to register.
+        , supplemented with additional PDSes discovered via the AT Protocol PLC log. Online/offline and Open Reg reflect our own periodic scans.
       </p>
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-4">
         <StatCard label="Total PDSes" value={stats.total} />
         <StatCard label="Online" value={stats.online} accent="green" />
         <StatCard label="Offline" value={stats.offline} accent="red" />
         <StatCard label="Open Reg" value={stats.openReg} accent="blue" />
-        <StatCard label="Invite Only" value={stats.inviteOnly} />
+        <StatCard label="Not Open" value={stats.inviteOnly} />
         <StatCard label="Countries" value={stats.countries} accent="purple" />
       </div>
 

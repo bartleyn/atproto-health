@@ -24,8 +24,14 @@ function migrate(db: Database.Database) {
       PRIMARY KEY (did, date)
     );
 
-    CREATE INDEX IF NOT EXISTS idx_did_activity_daily_date
-      ON did_activity_daily(date);
+    -- Covering index: date range scan + did + activity_types without heap lookups.
+    -- Also supports COUNT(DISTINCT did) queries with no table access at all.
+    CREATE INDEX IF NOT EXISTS idx_did_activity_daily_covering
+      ON did_activity_daily(date, did, activity_types);
+
+    -- Secondary index for retention queries that join on (did, date).
+    CREATE INDEX IF NOT EXISTS idx_did_activity_daily_did
+      ON did_activity_daily(did, date);
 
     CREATE TABLE IF NOT EXISTS delete_events_daily (
       date       TEXT NOT NULL,
@@ -136,4 +142,9 @@ function migrate(db: Database.Database) {
   } catch {
     // column already exists
   }
+
+  // Replace narrow (date) index with covering index on existing DBs
+  db.exec(`DROP INDEX IF EXISTS idx_did_activity_daily_date`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_did_activity_daily_covering ON did_activity_daily(date, did, activity_types)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_did_activity_daily_did ON did_activity_daily(did, date)`);
 }

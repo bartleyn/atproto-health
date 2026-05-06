@@ -354,11 +354,13 @@ export function getEcosystemStats(hideBsky = false): EcosystemStats {
     total_dids_ex_trump: statsCache?.total_dids ?? 0,
   };
 
-  // Match the Sankey filter: verified PDSes only, exclude internal bsky resharding.
-  // Includes returns to bsky.network. When hideBsky, also exclude bsky as source or destination.
+  // Exclude bsky.social and internal bsky.network resharding from migration events.
+  // bsky.social migrations would dominate the count and aren't meaningful for tracking ecosystem movement.
   const bskyMigrationFilter = hideBsky
-    ? `AND from_pds NOT LIKE '%bsky.network' AND to_pds NOT LIKE '%bsky.network'`
-    : `AND NOT (from_pds LIKE '%bsky.network' AND to_pds LIKE '%bsky.network')`;
+    ? `AND from_pds NOT LIKE '%bsky.network' AND to_pds NOT LIKE '%bsky.network'
+       AND from_pds != 'https://bsky.social' AND to_pds != 'https://bsky.social'`
+    : `AND NOT (from_pds LIKE '%bsky.network' AND to_pds LIKE '%bsky.network')
+       AND from_pds != 'https://bsky.social' AND to_pds != 'https://bsky.social'`;
   const migrations = db.prepare(`
     SELECT SUM(count) AS total_migrations FROM plc_migration_monthly
     WHERE (from_pds IN (SELECT pds_url FROM pds_repo_status_snapshots) OR from_pds LIKE '%bsky.network')
@@ -754,6 +756,14 @@ function latestSnapshotCte(hideBsky: boolean) {
         FROM pds_repo_status_snapshots WHERE latitude IS NOT NULL OR org IS NOT NULL
       ) WHERE rn = 1
     ),
+    latest_version AS (
+      SELECT RTRIM(pds_url, '/') AS norm_url, version
+      FROM (
+        SELECT pds_url, version,
+               ROW_NUMBER() OVER (PARTITION BY RTRIM(pds_url, '/') ORDER BY snapshot_date DESC) AS rn
+        FROM pds_repo_status_snapshots WHERE version IS NOT NULL
+      ) WHERE rn = 1
+    ),
     dir_pds AS (
       SELECT RTRIM(pds_url, '/') AS norm_url
       FROM pds_repo_status_snapshots
@@ -765,7 +775,8 @@ function latestSnapshotCte(hideBsky: boolean) {
         r.id, r.pds_url, r.snapshot_date, r.active, r.deactivated, r.deleted,
         r.takendown, r.suspended, r.other, r.total_scanned, r.is_sampled,
         r.did_plc_count, r.did_web_count, r.is_partial, r.scanned_at, r.ip_address,
-        r.version, r.invite_code_required, r.is_online,
+        COALESCE(r.version, v.version)           AS version,
+        r.invite_code_required, r.is_online,
         COALESCE(r.country,      g.country)      AS country,
         COALESCE(r.country_code, g.country_code) AS country_code,
         COALESCE(r.region,       g.region)       AS region,
@@ -778,6 +789,7 @@ function latestSnapshotCte(hideBsky: boolean) {
         CASE WHEN d.norm_url IS NOT NULL THEN 1 ELSE 0 END AS in_directory
       FROM pds_raw r
       LEFT JOIN latest_geo g ON RTRIM(r.pds_url, '/') = g.norm_url
+      LEFT JOIN latest_version v ON RTRIM(r.pds_url, '/') = v.norm_url
       LEFT JOIN dir_pds d ON RTRIM(r.pds_url, '/') = d.norm_url
     )
   `;
@@ -920,6 +932,7 @@ export function getVersionDistribution(hideBsky = false): VersionCount[] {
     ${latestSnapshotCte(hideBsky)}
     SELECT COALESCE(version, 'unknown') as version, COUNT(*) as count
     FROM pds_latest
+    WHERE in_directory = 1
     GROUP BY version ORDER BY count DESC
   `).all() as VersionCount[];
 }

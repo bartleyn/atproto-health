@@ -68,7 +68,7 @@ export default async function MigrationsPage() {
             <StatCard
               label="Total repos"
               value={fmt(scanStats.totalUsers)}
-              sub={`Across ${scanStats.total.toLocaleString()} PLC-discovered PDSes · from listRepos`}
+              sub={`Across ${scanStats.total.toLocaleString()} tracked PDSes · from listRepos`}
             />
           </div>
           {/* Row 2: migration details */}
@@ -81,12 +81,12 @@ export default async function MigrationsPage() {
             <StatCard
               label="Total migration events"
               value={fmt(stats.total_migrations)}
-              sub="PDS-to-PDS transfers, excluding internal bsky.network resharding"
+              sub="Independent PDS transfers only · excludes bsky.social and internal bsky.network resharding"
             />
             <StatCard
-              label="PDSes (PLC-discovered)"
+              label="PDSes tracked"
               value={fmt(scanStats.total)}
-              sub="Unique PDSes found via PLC data that responded to listRepos"
+              sub="From directory scans, PLC discovery, and did:web"
             />
           </div>
         </CollapsibleSection>

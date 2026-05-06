@@ -34,6 +34,25 @@ const CONCURRENCY  = concIdx >= 0 ? parseInt(args[concIdx + 1], 10) : DEFAULT_CO
 function isBskyShard(url: string) { return url.includes(".host.bsky.network"); }
 function isTrump(url: string)     { return url.includes("pds.trump.com"); }
 
+// ── Version fetch ─────────────────────────────────────────────────────────────
+async function fetchVersion(pdsUrl: string): Promise<string | null> {
+  try {
+    const url = `${pdsUrl.replace(/\/$/, "")}/xrpc/_health`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      if (!res.ok) return null;
+      const body = await res.json() as { version?: string };
+      return body.version ?? null;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return null;
+  }
+}
+
 // ── DNS resolution ────────────────────────────────────────────────────────────
 async function resolveIp(pdsUrl: string): Promise<string | null> {
   try {
@@ -167,8 +186,8 @@ async function main() {
   const upsert = db.prepare(`
     INSERT INTO pds_repo_status_snapshots
       (pds_url, snapshot_date, active, deactivated, deleted, takendown, suspended, other, total_scanned, is_sampled, did_plc_count, did_web_count, is_partial, scanned_at, ip_address,
-       invite_code_required, is_online)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
+       invite_code_required, is_online, version)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(pds_url, snapshot_date) DO UPDATE SET
       active = excluded.active, deactivated = excluded.deactivated,
       deleted = excluded.deleted, takendown = excluded.takendown,
@@ -180,7 +199,8 @@ async function main() {
       scanned_at = excluded.scanned_at,
       ip_address = excluded.ip_address,
       invite_code_required = excluded.invite_code_required,
-      is_online = excluded.is_online
+      is_online = excluded.is_online,
+      version = COALESCE(excluded.version, version)
   `);
 
   const upsertDidStatus = db.prepare(`
@@ -243,13 +263,14 @@ async function main() {
     };
 
     let inviteCodeRequired: number | null = null;
-
+    let version: string | null = null;
     let isOnline = 0;
 
     try {
-      const [result, desc] = await Promise.all([
+      const [result, desc, ver] = await Promise.all([
         scanPdsRepos(pdsUrl, onRepo),
         describeServer(pdsUrl),
+        fetchVersion(pdsUrl),
       ]);
       counts = result.counts;
       nonActive = result.nonActive;
@@ -257,6 +278,7 @@ async function main() {
       if (desc?.inviteCodeRequired !== undefined) {
         inviteCodeRequired = desc.inviteCodeRequired ? 1 : 0;
       }
+      version = ver;
       isOnline = 1; // got a response from the PDS
       if (partial) {
         errors++;
@@ -270,7 +292,7 @@ async function main() {
         console.error(`  ✗ ${pdsUrl}: ${err}`);
       }
       // Write an offline row so the dashboard reflects current status
-      upsert.run(pdsUrl, today, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, scannedAt, ipMap.get(pdsUrl) ?? null, inviteCodeRequired, 0);
+      upsert.run(pdsUrl, today, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, scannedAt, ipMap.get(pdsUrl) ?? null, inviteCodeRequired, 0, version);
       return;
     }
 
@@ -282,7 +304,7 @@ async function main() {
       counts?.takendown ?? 0, counts?.suspended ?? 0, counts?.other ?? 0,
       counts?.total ?? 0, counts?.didPlc ?? 0, counts?.didWeb ?? 0,
       partial ? 1 : 0, scannedAt, ipMap.get(pdsUrl) ?? null,
-      inviteCodeRequired, isOnline
+      inviteCodeRequired, isOnline, version
     );
 
     if (nonActive.length > 0) {

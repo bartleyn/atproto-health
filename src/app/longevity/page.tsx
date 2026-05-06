@@ -71,9 +71,9 @@ export default async function LongevityPage({
         <section>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <StatCard
-              label="PDSes with native creations"
+              label="PDSes with active repos"
               value={indieOnly.length.toLocaleString()}
-              sub="PDSes with at least one did:plc account created natively (via PLC log) — excludes migration-only and did:web PDSes"
+              sub="PDSes with at least one active repo and at least one native did:plc account creation — excludes migration-only and did:web-only PDSes"
             />
             <StatCard
               label="Oldest independent PDS"
@@ -95,7 +95,7 @@ export default async function LongevityPage({
 
         <CollapsibleSection
           title="When Did PDSes Launch?"
-          subtitle="Each point is a PDS. X = first repo-backed account (proxy for launch). Y = total repos (log scale). Colored by launch era. Excludes pds.trump.com, junk PDSes, and migration-only PDSes (no native did:plc creations)."
+          subtitle="Each point is a PDS with 5+ active repos. X = first repo-backed account (proxy for launch). Y = total repos (log scale). Colored by launch era. Excludes pds.trump.com, junk PDSes, and migration-only PDSes (no native did:plc creations)."
           storageKey="longevity-age-scatter"
         >
           <ChartCard title="PDS Age vs. Size">

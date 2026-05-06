@@ -17,6 +17,7 @@
 import { promises as dns } from "dns";
 import { getPlcDb } from "../db/plc-schema";
 import { scanPdsRepos, type RepoInfo, type StatusCounts, type NonActiveRepo } from "./pds-repos";
+import { describeServer } from "./pds-details";
 
 const DEFAULT_CONCURRENCY = 5;
 
@@ -164,8 +165,9 @@ async function main() {
 
   const upsert = db.prepare(`
     INSERT INTO pds_repo_status_snapshots
-      (pds_url, snapshot_date, active, deactivated, deleted, takendown, suspended, other, total_scanned, is_sampled, did_plc_count, did_web_count, is_partial, scanned_at, ip_address)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+      (pds_url, snapshot_date, active, deactivated, deleted, takendown, suspended, other, total_scanned, is_sampled, did_plc_count, did_web_count, is_partial, scanned_at, ip_address,
+       invite_code_required, is_online)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(pds_url, snapshot_date) DO UPDATE SET
       active = excluded.active, deactivated = excluded.deactivated,
       deleted = excluded.deleted, takendown = excluded.takendown,
@@ -175,7 +177,9 @@ async function main() {
       did_web_count = excluded.did_web_count,
       is_partial = excluded.is_partial,
       scanned_at = excluded.scanned_at,
-      ip_address = excluded.ip_address
+      ip_address = excluded.ip_address,
+      invite_code_required = excluded.invite_code_required,
+      is_online = excluded.is_online
   `);
 
   const upsertDidStatus = db.prepare(`
@@ -237,11 +241,22 @@ async function main() {
       if (repoBatch.length >= DID_BATCH_SIZE) flushBatch();
     };
 
+    let inviteCodeRequired: number | null = null;
+
+    let isOnline = 0;
+
     try {
-      const result = await scanPdsRepos(pdsUrl, onRepo);
+      const [result, desc] = await Promise.all([
+        scanPdsRepos(pdsUrl, onRepo),
+        describeServer(pdsUrl),
+      ]);
       counts = result.counts;
       nonActive = result.nonActive;
       partial = result.partial;
+      if (desc?.inviteCodeRequired !== undefined) {
+        inviteCodeRequired = desc.inviteCodeRequired ? 1 : 0;
+      }
+      isOnline = 1; // got a response from the PDS
       if (partial) {
         errors++;
         if (errors <= 20) {
@@ -253,19 +268,20 @@ async function main() {
       if (errors <= 20) {
         console.error(`  ✗ ${pdsUrl}: ${err}`);
       }
+      // Write an offline row so the dashboard reflects current status
+      upsert.run(pdsUrl, today, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, scannedAt, ipMap.get(pdsUrl) ?? null, inviteCodeRequired, 0);
       return;
     }
 
     flushBatch(); // write any remaining DIDs
 
-    if (!counts || counts.total === 0) return; // PDS offline or doesn't support listRepos
-
     upsert.run(
       pdsUrl, today,
-      counts.active, counts.deactivated, counts.deleted,
-      counts.takendown, counts.suspended, counts.other,
-      counts.total, counts.didPlc, counts.didWeb,
-      partial ? 1 : 0, scannedAt, ipMap.get(pdsUrl) ?? null
+      counts?.active ?? 0, counts?.deactivated ?? 0, counts?.deleted ?? 0,
+      counts?.takendown ?? 0, counts?.suspended ?? 0, counts?.other ?? 0,
+      counts?.total ?? 0, counts?.didPlc ?? 0, counts?.didWeb ?? 0,
+      partial ? 1 : 0, scannedAt, ipMap.get(pdsUrl) ?? null,
+      inviteCodeRequired, isOnline
     );
 
     if (nonActive.length > 0) {
@@ -273,15 +289,17 @@ async function main() {
       totalNonActive += nonActive.length;
     }
 
-    totalActive  += counts.active;
-    totalDeleted += counts.deleted + counts.deactivated + counts.takendown + counts.suspended;
+    if (counts) {
+      totalActive  += counts.active;
+      totalDeleted += counts.deleted + counts.deactivated + counts.takendown + counts.suspended;
+    }
     done++;
 
-    if (done % 50 === 0 || counts.active > 1000) {
+    if (done % 50 === 0 || (counts && counts.active > 1000)) {
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
       console.log(
         `[${done}/${toScan.length}] ${pdsUrl.replace("https://", "")} — ` +
-        `${counts.active.toLocaleString()} active${partial ? " (partial)" : ""} ` +
+        `${(counts?.active ?? 0).toLocaleString()} active${partial ? " (partial)" : ""} ` +
         `(${elapsed}s elapsed)`
       );
     }

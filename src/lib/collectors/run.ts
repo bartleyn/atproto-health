@@ -199,8 +199,6 @@ async function main() {
           repoBatches.delete(pdsUrl);
         }
 
-        if (!details.statusCounts || details.statusCounts.total === 0) return;
-
         const c = details.statusCounts;
         const rawGeo = geoResults?.get(pdsUrl);
         const cachedGeo = cachedGeoMap.get(pdsUrl);
@@ -214,10 +212,14 @@ async function main() {
         const isp = rawGeo?.isp ?? cachedGeo?.isp ?? null;
         const org = rawGeo?.org ?? cachedGeo?.org ?? null;
         const dirEntry = directoryMap.get(pdsUrl);
+        // Write a row for every PDS in the directory — including offline ones (total=0).
+        // Offline PDSes still carry geo + invite_code_required + is_online=0 from Mary's state.json.
+        const active = c?.active ?? 0;
+        const total = c?.total ?? 0;
         upsertSnapshot.run(
           pdsUrl, today,
-          c.active, c.deactivated, c.deleted, c.takendown, c.suspended, c.other,
-          c.total, c.didPlc, c.didWeb,
+          active, c?.deactivated ?? 0, c?.deleted ?? 0, c?.takendown ?? 0, c?.suspended ?? 0, c?.other ?? 0,
+          total, c?.didPlc ?? 0, c?.didWeb ?? 0,
           details.partial ? 1 : 0, scannedAt, ipMap.get(pdsUrl) ?? null,
           country, countryCode, region, city, lat, lon, isp, org, asNumber, org,
           dirEntry?.version ?? null,
@@ -225,7 +227,7 @@ async function main() {
           dirEntry?.isOnline ? 1 : 0,
         );
 
-        if (details.nonActive.length > 0) {
+        if (details.nonActive && details.nonActive.length > 0) {
           writeNonActive(pdsUrl, details.nonActive);
         }
       };

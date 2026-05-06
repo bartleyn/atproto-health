@@ -287,6 +287,18 @@ function migrate(db: Database.Database) {
 
     CREATE INDEX IF NOT EXISTS idx_did_web_pds_pds_url
       ON did_web_pds(pds_url);
+
+    -- Manual geo overrides for PDSes that geo-IP resolves incorrectly or not at all.
+    -- Migrated from atproto-health.db pds_manual_geo.
+    CREATE TABLE IF NOT EXISTS pds_manual_geo (
+      url       TEXT PRIMARY KEY,
+      city      TEXT,
+      country   TEXT,
+      latitude  REAL NOT NULL,
+      longitude REAL NOT NULL,
+      org       TEXT,
+      note      TEXT
+    );
   `);
 
   // Additive migrations for existing databases

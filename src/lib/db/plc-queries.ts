@@ -721,3 +721,301 @@ export function getLastScanTime(): string | null {
   ).get() as { last_scan: string | null } | undefined;
   return row?.last_scan ?? null;
 }
+
+// ── Dashboard queries (migrated from queries.ts / atproto-health.db) ──────────
+
+const BSKY_SNAP_FILTER = `pds_url NOT LIKE '%host.bsky.network%' AND pds_url NOT LIKE '%bsky.social%'`;
+
+// Returns a CTE selecting the latest non-partial snapshot per PDS,
+// optionally filtering out bsky infrastructure.
+function latestSnapshotCte(hideBsky: boolean) {
+  const bskyFilter = hideBsky ? `AND ${BSKY_SNAP_FILTER}` : "";
+  return `
+    WITH latest AS (
+      SELECT RTRIM(pds_url, '/') AS pds_url, MAX(snapshot_date) AS snap_date
+      FROM pds_repo_status_snapshots
+      WHERE is_partial = 0 ${bskyFilter}
+      GROUP BY RTRIM(pds_url, '/')
+    ),
+    pds_latest AS (
+      SELECT s.*
+      FROM pds_repo_status_snapshots s
+      JOIN latest l ON RTRIM(s.pds_url, '/') = l.pds_url AND s.snapshot_date = l.snap_date
+    )
+  `;
+}
+
+export const PROVIDER_NORMALIZE_SQL = `
+  CASE
+    WHEN org LIKE '%Cloudflare%' THEN 'Behind Cloudflare (host unknown)'
+    WHEN org LIKE '%DigitalOcean%' OR org LIKE '%Digital Ocean%' THEN 'DigitalOcean'
+    WHEN org LIKE '%Hetzner%' OR org LIKE '%HETZNER%' THEN 'Hetzner'
+    WHEN org LIKE '%OVH%' THEN 'OVH'
+    WHEN org LIKE '%AWS%' OR org LIKE '%Amazon%' THEN 'AWS'
+    WHEN org LIKE '%Google%' THEN 'Google Cloud'
+    WHEN org LIKE '%Microsoft%' OR org LIKE '%Azure%' THEN 'Azure'
+    WHEN org LIKE '%Linode%' OR org LIKE '%Akamai%' THEN 'Akamai/Linode'
+    WHEN org LIKE '%Vultr%' THEN 'Vultr'
+    WHEN org LIKE '%i3Dnet%' OR org LIKE '%i3D.net%' THEN 'i3D.net'
+    WHEN org LIKE '%Scaleway%' THEN 'Scaleway'
+    WHEN org LIKE '%Oracle%' THEN 'Oracle Cloud'
+    WHEN org LIKE '%Contabo%' THEN 'Contabo'
+    WHEN org LIKE '%Fastly%' THEN 'Fastly (CDN)'
+    WHEN org LIKE '%Fly.io%' OR org LIKE '%Fly IO%' THEN 'Fly.io'
+    WHEN org LIKE '%netcup%' OR org LIKE '%NETCUP%' THEN 'netcup'
+    WHEN org LIKE '%RackNerd%' THEN 'RackNerd'
+    WHEN org LIKE '%IONOS%' OR org LIKE '%Ionos%' THEN 'IONOS'
+    WHEN org IS NULL OR org = '' THEN 'Unknown'
+    ELSE org
+  END
+`;
+
+export interface OverviewStats {
+  total: number;
+  online: number;
+  offline: number;
+  openReg: number;
+  inviteOnly: number;
+  countries: number;
+  totalUsers: number;
+  activeUsers: number;
+}
+
+export function getOverviewStats(hideBsky = false): OverviewStats {
+  const db = getPlcDb();
+  return db.prepare(`
+    ${latestSnapshotCte(hideBsky)}
+    SELECT
+      COUNT(*) as total,
+      SUM(CASE WHEN COALESCE(is_online, CASE WHEN total_scanned > 0 THEN 1 ELSE 0 END) = 1 THEN 1 ELSE 0 END) as online,
+      SUM(CASE WHEN COALESCE(is_online, CASE WHEN total_scanned > 0 THEN 1 ELSE 0 END) = 0 THEN 1 ELSE 0 END) as offline,
+      SUM(CASE WHEN invite_code_required = 0 THEN 1 ELSE 0 END) as openReg,
+      SUM(CASE WHEN invite_code_required != 0 OR invite_code_required IS NULL THEN 1 ELSE 0 END) as inviteOnly,
+      COUNT(DISTINCT CASE WHEN country_code IS NOT NULL THEN country_code END) as countries,
+      COALESCE(SUM(total_scanned), 0) as totalUsers,
+      COALESCE(SUM(active), 0) as activeUsers
+    FROM pds_latest
+  `).get() as OverviewStats;
+}
+
+export interface CountryCount {
+  country: string;
+  countryCode: string;
+  count: number;
+}
+
+export function getCountryDistribution(hideBsky = false): CountryCount[] {
+  const db = getPlcDb();
+  return db.prepare(`
+    ${latestSnapshotCte(hideBsky)}
+    SELECT country, country_code as countryCode, COUNT(*) as count
+    FROM pds_latest
+    WHERE country IS NOT NULL
+    GROUP BY country_code ORDER BY count DESC
+  `).all() as CountryCount[];
+}
+
+export interface CountryRepoCount {
+  country: string;
+  countryCode: string;
+  repoCount: number;
+}
+
+export function getReposByCountry(hideBsky = false): CountryRepoCount[] {
+  const db = getPlcDb();
+  return db.prepare(`
+    ${latestSnapshotCte(hideBsky)}
+    SELECT country, country_code as countryCode, SUM(total_scanned) as repoCount
+    FROM pds_latest
+    WHERE country IS NOT NULL AND total_scanned > 0
+    GROUP BY country_code ORDER BY repoCount DESC
+  `).all() as CountryRepoCount[];
+}
+
+export interface VersionCount {
+  version: string;
+  count: number;
+}
+
+export function getVersionDistribution(hideBsky = false): VersionCount[] {
+  const db = getPlcDb();
+  return db.prepare(`
+    ${latestSnapshotCte(hideBsky)}
+    SELECT COALESCE(version, 'unknown') as version, COUNT(*) as count
+    FROM pds_latest
+    GROUP BY version ORDER BY count DESC
+  `).all() as VersionCount[];
+}
+
+export interface HostingProviderCount {
+  provider: string;
+  count: number;
+  isCdn: boolean;
+}
+
+export function getHostingProviders(hideBsky = false): HostingProviderCount[] {
+  const db = getPlcDb();
+  return db.prepare(`
+    ${latestSnapshotCte(hideBsky)}
+    SELECT
+      ${PROVIDER_NORMALIZE_SQL} as provider,
+      COUNT(*) as count,
+      CASE WHEN org LIKE '%Cloudflare%' OR org LIKE '%Fastly%' THEN 1 ELSE 0 END as isCdn
+    FROM pds_latest
+    GROUP BY provider ORDER BY count DESC
+  `).all() as HostingProviderCount[];
+}
+
+export function getCloudflareBreakdown(hideBsky = false): { behindCdn: number; directHosting: number; unknown: number } {
+  const db = getPlcDb();
+  return db.prepare(`
+    ${latestSnapshotCte(hideBsky)}
+    SELECT
+      SUM(CASE WHEN org LIKE '%Cloudflare%' OR org LIKE '%Fastly%' THEN 1 ELSE 0 END) as behindCdn,
+      SUM(CASE WHEN org IS NOT NULL AND org != '' AND org NOT LIKE '%Cloudflare%' AND org NOT LIKE '%Fastly%' THEN 1 ELSE 0 END) as directHosting,
+      SUM(CASE WHEN org IS NULL OR org = '' THEN 1 ELSE 0 END) as unknown
+    FROM pds_latest
+  `).get() as { behindCdn: number; directHosting: number; unknown: number };
+}
+
+export interface UserDistBucket {
+  range: string;
+  count: number;
+  sortKey: number;
+}
+
+export function getUserDistribution(hideBsky = false): UserDistBucket[] {
+  const db = getPlcDb();
+  const rows = db.prepare(`
+    ${latestSnapshotCte(hideBsky)}
+    SELECT total_scanned as users FROM pds_latest WHERE total_scanned IS NOT NULL
+  `).all() as { users: number }[];
+
+  const buckets: Record<string, { count: number; sortKey: number }> = {
+    "0":      { count: 0, sortKey: 0 },
+    "1":      { count: 0, sortKey: 1 },
+    "2-5":    { count: 0, sortKey: 2 },
+    "6-10":   { count: 0, sortKey: 3 },
+    "11-50":  { count: 0, sortKey: 4 },
+    "51-100": { count: 0, sortKey: 5 },
+    "101-500":{ count: 0, sortKey: 6 },
+    "501-1K": { count: 0, sortKey: 7 },
+    "1K+":    { count: 0, sortKey: 8 },
+  };
+  for (const { users } of rows) {
+    if      (users === 0)   buckets["0"].count++;
+    else if (users === 1)   buckets["1"].count++;
+    else if (users <= 5)    buckets["2-5"].count++;
+    else if (users <= 10)   buckets["6-10"].count++;
+    else if (users <= 50)   buckets["11-50"].count++;
+    else if (users <= 100)  buckets["51-100"].count++;
+    else if (users <= 500)  buckets["101-500"].count++;
+    else if (users <= 1000) buckets["501-1K"].count++;
+    else                    buckets["1K+"].count++;
+  }
+  return Object.entries(buckets).map(([range, { count, sortKey }]) => ({ range, count, sortKey }));
+}
+
+export interface ConcentrationStats {
+  top1Pct: number;
+  top5Pct: number;
+  top10Pct: number;
+  totalWithData: number;
+}
+
+export function getConcentrationStats(hideBsky = false): ConcentrationStats {
+  const db = getPlcDb();
+  const rows = db.prepare(`
+    ${latestSnapshotCte(hideBsky)}
+    SELECT
+      CASE
+        WHEN pds_url LIKE '%host.bsky.network%' OR pds_url LIKE '%bsky.social%'
+        THEN 'https://bsky.social'
+        ELSE pds_url
+      END as url,
+      SUM(total_scanned) as repos
+    FROM pds_latest
+    WHERE total_scanned > 0
+    GROUP BY 1
+    ORDER BY repos DESC
+  `).all() as { url: string; repos: number }[];
+
+  const total = rows.reduce((s, r) => s + r.repos, 0);
+  if (total === 0) return { top1Pct: 0, top5Pct: 0, top10Pct: 0, totalWithData: 0 };
+
+  let cum = 0, top1Pct = 0, top5Pct = 0, top10Pct = 0;
+  for (let i = 0; i < rows.length; i++) {
+    cum += rows[i].repos;
+    const pct = (cum / total) * 100;
+    if (i === 0) top1Pct = pct;
+    if (i === 4) top5Pct = pct;
+    if (i === 9) top10Pct = pct;
+  }
+  if (rows.length < 5)  top5Pct  = 100;
+  if (rows.length < 10) top10Pct = 100;
+  return { top1Pct, top5Pct, top10Pct, totalWithData: rows.length };
+}
+
+export interface CityCluster {
+  latitude: number;
+  longitude: number;
+  city: string | null;
+  country: string | null;
+  pdsCount: number;
+}
+
+export function getPdsLocations(hideBsky = false): CityCluster[] {
+  const db = getPlcDb();
+  const cte = latestSnapshotCte(hideBsky);
+  return db.prepare(`
+    ${cte},
+    placed AS (
+      SELECT
+        CASE WHEN org LIKE '%Cloudflare%' OR org LIKE '%Fastly%' THEN 38.0  ELSE latitude  END AS latitude,
+        CASE WHEN org LIKE '%Cloudflare%' OR org LIKE '%Fastly%' THEN -30.0 ELSE longitude END AS longitude,
+        CASE WHEN org LIKE '%Cloudflare%' OR org LIKE '%Fastly%' THEN 'CDN / Host Unknown' ELSE city    END AS city,
+        CASE WHEN org LIKE '%Cloudflare%' OR org LIKE '%Fastly%' THEN NULL                 ELSE country END AS country
+      FROM pds_latest
+      WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+      UNION ALL
+      SELECT latitude, longitude, city, country FROM pds_manual_geo
+    )
+    SELECT AVG(latitude) AS latitude, AVG(longitude) AS longitude,
+           city, country, COUNT(*) AS pdsCount
+    FROM placed
+    GROUP BY city, country
+    ORDER BY pdsCount DESC
+  `).all() as CityCluster[];
+}
+
+export interface PdsProviderLocation {
+  url: string;
+  latitude: number;
+  longitude: number;
+  city: string | null;
+  country: string | null;
+  provider: string;
+}
+
+export function getPdsLocationsWithProvider(hideBsky = false): PdsProviderLocation[] {
+  const db = getPlcDb();
+  const cte = latestSnapshotCte(hideBsky);
+  return db.prepare(`
+    ${cte},
+    combined AS (
+      SELECT
+        pds_url as url,
+        CASE WHEN org LIKE '%Cloudflare%' THEN 38.0  ELSE latitude  END AS latitude,
+        CASE WHEN org LIKE '%Cloudflare%' THEN -30.0 ELSE longitude END AS longitude,
+        CASE WHEN org LIKE '%Cloudflare%' THEN 'Cloudflare Network' ELSE city    END AS city,
+        CASE WHEN org LIKE '%Cloudflare%' THEN NULL                  ELSE country END AS country,
+        ${PROVIDER_NORMALIZE_SQL} as provider
+      FROM pds_latest
+      WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+      UNION ALL
+      SELECT url, latitude, longitude, city, country, COALESCE(org, 'Self-hosted') AS provider
+      FROM pds_manual_geo
+    )
+    SELECT * FROM combined
+  `).all() as PdsProviderLocation[];
+}

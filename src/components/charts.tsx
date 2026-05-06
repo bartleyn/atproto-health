@@ -601,11 +601,13 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
   // Compact table rows below the map — reacts to active tab + selection.
   // Provider tab: always shown (filtered to provider or top overall).
   // Lang/NS tabs: shown only when nothing selected (PdsRankTable handles the selection case).
-  const tableRows = useMemo(() => {
+  const SMALL_REPO_THRESHOLD = 5;
+  const { tableRows, hiddenSmallCount } = useMemo(() => {
     const normUrl = (u: string) => u.replace(/\/$/, "");
     const isBskyShard = (u: string) => u.includes(".host.bsky.network") || /bsky\.social/.test(u);
 
     if (insetTab === "provider") {
+      let all: { url: string; country: string | null; count: number | null }[];
       if (selectedProvider) {
         const topMap = new Map(topPdsList.map(p => [normUrl(p.url), p]));
         const provRows = providerLocations.filter(p => p.provider === selectedProvider);
@@ -628,11 +630,13 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
         if (hasBskyShards) {
           result.set("https://bsky.social", { url: "https://bsky.social", country: bskyCountry, count: bskyShardTotal || null });
         }
-        return [...result.values()]
-          .sort((a, b) => (b.count ?? 0) - (a.count ?? 0))
-          .slice(0, 15);
+        all = [...result.values()].sort((a, b) => (b.count ?? 0) - (a.count ?? 0)).slice(0, 15);
+      } else {
+        all = topPdsList.slice(0, 10).map(p => ({ url: p.url, country: p.country, count: p.repoCount }));
       }
-      return topPdsList.slice(0, 10).map(p => ({ url: p.url, country: p.country, count: p.repoCount }));
+      const visible = all.filter(r => r.count == null || r.count >= SMALL_REPO_THRESHOLD);
+      const hidden = all.filter(r => r.count != null && r.count < SMALL_REPO_THRESHOLD);
+      return { tableRows: visible, hiddenSmallCount: hidden.length };
     }
     if (insetTab === "lang" && !selectedLang && langLocations?.length) {
       const byKey = new Map<string, { url: string; country: string | null; count: number }>();
@@ -642,7 +646,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
         if (!e) byKey.set(key, { url: key, country: l.country, count: l.dids });
         else e.count += l.dids;
       }
-      return [...byKey.values()].sort((a, b) => b.count - a.count).slice(0, 10);
+      return { tableRows: [...byKey.values()].sort((a, b) => b.count - a.count).slice(0, 10), hiddenSmallCount: 0 };
     }
     if (insetTab === "namespace" && !selectedNamespace && namespaceLocations?.length) {
       const byKey = new Map<string, { url: string; country: string | null; count: number }>();
@@ -652,9 +656,9 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
         if (!e) byKey.set(key, { url: key, country: l.country, count: l.dids });
         else e.count += l.dids;
       }
-      return [...byKey.values()].sort((a, b) => b.count - a.count).slice(0, 10);
+      return { tableRows: [...byKey.values()].sort((a, b) => b.count - a.count).slice(0, 10), hiddenSmallCount: 0 };
     }
-    return [];
+    return { tableRows: [], hiddenSmallCount: 0 };
   }, [insetTab, selectedProvider, selectedLang, selectedNamespace, topPdsList, bskyShardCounts, providerLocations, langLocations, namespaceLocations]);
 
   const tableLabel = insetTab === "lang"
@@ -1112,6 +1116,13 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
                   </td>
                 </tr>
               ))}
+              {hiddenSmallCount > 0 && (
+                <tr>
+                  <td colSpan={4} className="py-1 text-gray-600 text-xs italic">
+                    + {hiddenSmallCount} PDS{hiddenSmallCount !== 1 ? "es" : ""} with fewer than {SMALL_REPO_THRESHOLD} repos
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>

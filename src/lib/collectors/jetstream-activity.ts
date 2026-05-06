@@ -93,6 +93,7 @@ const THIRD_PARTY_PREFIXES = [
   "com.puzzmo.*",                     // Puzzmo game streaks
   "blue.trilinesat.*",                // Trilinesat
   "app.offprint.*",                   // Offprint
+  "store.lexicon.*",                  // ATStore
 ];
 
 const WANTED_COLLECTIONS = [
@@ -135,10 +136,10 @@ const starterpackBuffer = new Map<string, number>();
 
 // Lang buffer: "did|lang" → post count (posts in that language by that DID this flush window)
 const langBuffer = new Map<string, number>();
-let langPostsSeen = 0;    // total posts in this flush window
-let langTaggedSeen = 0;   // posts with at least one lang tag in this flush window
+// Lang stats buffer: date → { total posts, tagged posts } for this flush window
+const langStatsBuffer = new Map<string, { total: number; tagged: number }>();
 
-// Collection buffer: "collection|did" → event count (non-bsky/non-chat-bsky creates only)
+// Collection buffer: "collection|did|date" → event count (non-bsky/non-chat-bsky creates only)
 const collectionBuffer = new Map<string, number>();
 let collectionTrackingPaused = NO_COLLECTION_TRACKING;
 
@@ -267,18 +268,16 @@ function flush() {
       last_seen  = excluded.last_seen
   `);
   const upsertLangStats = db.prepare(`
-    INSERT INTO lang_stats (id, total_posts, tagged_posts, updated_at) VALUES (1, ?, ?, datetime('now'))
-    ON CONFLICT (id) DO UPDATE SET
+    INSERT INTO lang_stats (date, total_posts, tagged_posts, updated_at) VALUES (?, ?, ?, datetime('now'))
+    ON CONFLICT (date) DO UPDATE SET
       total_posts  = total_posts  + excluded.total_posts,
       tagged_posts = tagged_posts + excluded.tagged_posts,
       updated_at   = excluded.updated_at
   `);
   const upsertCollection = db.prepare(`
-    INSERT INTO collection_activity (collection, did, event_count, last_seen)
-    VALUES (?, ?, ?, datetime('now'))
-    ON CONFLICT (collection, did) DO UPDATE SET
-      event_count = event_count + excluded.event_count,
-      last_seen   = excluded.last_seen
+    INSERT INTO collection_activity (collection, did, date, event_count)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT (collection, did, date) DO UPDATE SET event_count = event_count + excluded.event_count
   `);
   const saveCursor = db.prepare(`
     INSERT INTO jetstream_cursor (id, cursor, updated_at)
@@ -306,22 +305,22 @@ function flush() {
   const deleteRows      = [...deleteBuffer.entries()];
   const starterpackRows = [...starterpackBuffer.entries()];
   const langRows        = [...langBuffer.entries()];
+  const langStatsRows   = [...langStatsBuffer.entries()];
   const collectionRows  = collectionTrackingPaused ? [] : [...collectionBuffer.entries()];
   const feedGenRows     = [...feedGenBuffer.entries()];
   const feedGenDeletes  = [...feedGenDeleteBuffer];
   const feedLikeRows    = [...feedLikeBuffer.entries()];
-  const postsThisFlush  = langPostsSeen;
-  const taggedThisFlush = langTaggedSeen;
+  const postsThisFlush  = langStatsRows.reduce((s, [, v]) => s + v.total, 0);
+  const taggedThisFlush = langStatsRows.reduce((s, [, v]) => s + v.tagged, 0);
   activityBuffer.clear();
   deleteBuffer.clear();
   starterpackBuffer.clear();
   langBuffer.clear();
+  langStatsBuffer.clear();
   collectionBuffer.clear();
   feedGenBuffer.clear();
   feedGenDeleteBuffer.clear();
   feedLikeBuffer.clear();
-  langPostsSeen  = 0;
-  langTaggedSeen = 0;
 
   db.transaction(() => {
     for (const [entry, bits] of activityRows) {
@@ -341,8 +340,8 @@ function flush() {
       upsertLang.run(key.slice(0, pipe), key.slice(pipe + 1), count);
     }
     for (const [key, count] of collectionRows) {
-      const pipe = key.indexOf("|");
-      upsertCollection.run(key.slice(0, pipe), key.slice(pipe + 1), count);
+      const [collection, did, date] = key.split("|");
+      upsertCollection.run(collection, did, date, count);
     }
     for (const [uri, meta] of feedGenRows) {
       upsertFeedGen.run(uri, meta.creatorDid, meta.displayName, meta.description, meta.firstSeen);
@@ -354,7 +353,9 @@ function flush() {
       const pipe = key.lastIndexOf("|");
       upsertFeedLike.run(key.slice(0, pipe), key.slice(pipe + 1), count);
     }
-    if (postsThisFlush > 0) upsertLangStats.run(postsThisFlush, taggedThisFlush);
+    for (const [date, { total, tagged }] of langStatsRows) {
+      if (total > 0) upsertLangStats.run(date, total, tagged);
+    }
     if (lastCursor > 0) saveCursor.run(lastCursor);
   })();
 
@@ -384,6 +385,8 @@ function pruneOldRows() {
     .toISOString().slice(0, 10);
   const a = db.prepare(`DELETE FROM did_activity_daily WHERE date < ?`).run(cutoff);
   const d = db.prepare(`DELETE FROM delete_events_daily WHERE date < ?`).run(cutoff);
+  db.prepare(`DELETE FROM lang_stats WHERE date < ?`).run(cutoff);
+  db.prepare(`DELETE FROM collection_activity WHERE date < ?`).run(cutoff);
   if (a.changes > 0 || d.changes > 0) {
     console.log(`[activity] Pruned ${a.changes.toLocaleString()} activity + ${d.changes.toLocaleString()} delete rows older than ${cutoff}`);
   }
@@ -465,7 +468,7 @@ function connect() {
 
           // Collection activity: track anything not already covered by the bitmask
           if (!collectionTrackingPaused && !(collection in ACTIVITY_BITS)) {
-            const ckey = `${collection}|${evt.did}`;
+            const ckey = `${collection}|${evt.did}|${date}`;
             collectionBuffer.set(ckey, (collectionBuffer.get(ckey) ?? 0) + 1);
           }
 
@@ -483,16 +486,18 @@ function connect() {
 
           // Lang tracking: extract langs[] from post records
           if (collection === "app.bsky.feed.post") {
-            langPostsSeen++;
+            const ls = langStatsBuffer.get(date) ?? { total: 0, tagged: 0 };
+            ls.total++;
             const langs = evt.commit.record?.langs;
             if (Array.isArray(langs) && langs.length > 0) {
-              langTaggedSeen++;
+              ls.tagged++;
               for (const lang of langs as string[]) {
                 if (typeof lang !== "string" || lang.length > 20) continue;
                 const key = `${evt.did}|${lang}`;
                 langBuffer.set(key, (langBuffer.get(key) ?? 0) + 1);
               }
             }
+            langStatsBuffer.set(date, ls);
           }
 
           // Starter pack joins: profile creates that reference a joinedViaStarterPack
@@ -567,6 +572,17 @@ function connect() {
 
 async function main() {
   console.log(`\n=== Jetstream Activity Collector ===`);
+
+  if (BACKFILL_HOURS !== null) {
+    const db = getActivityDb();
+    const backfillDate = new Date(Date.now() - BACKFILL_HOURS * 60 * 60 * 1000).toISOString().slice(0, 10);
+    console.log(`[activity] Clearing additive daily tables from ${backfillDate} to prevent double-counting on backfill...`);
+    db.prepare(`DELETE FROM delete_events_daily WHERE date >= ?`).run(backfillDate);
+    db.prepare(`DELETE FROM starterpack_joins_daily WHERE date >= ?`).run(backfillDate);
+    db.prepare(`DELETE FROM feed_generator_likes_daily WHERE date >= ?`).run(backfillDate);
+    db.prepare(`DELETE FROM lang_stats WHERE date >= ?`).run(backfillDate);
+    db.prepare(`DELETE FROM collection_activity WHERE date >= ?`).run(backfillDate);
+  }
 
   setInterval(() => {
     flush();

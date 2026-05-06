@@ -56,8 +56,7 @@ function migrate(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_starterpack_joins_daily_date
       ON starterpack_joins_daily(date);
 
-    -- Per-DID language usage accumulated from post events.
-    -- One row per (did, lang); post_count grows with each flush.
+    -- Per-(DID, lang) lifetime post counts from post events.
     -- BCP-47 lang tags as set by the posting client (e.g. "en", "ja", "pt-BR").
     CREATE TABLE IF NOT EXISTS did_langs (
       did        TEXT    NOT NULL,
@@ -69,30 +68,27 @@ function migrate(db: Database.Database) {
 
     CREATE INDEX IF NOT EXISTS idx_did_langs_lang ON did_langs(lang);
 
-    -- Running totals for lang tag coverage (% of posts that carry a langs field).
+    -- Daily lang tag coverage (% of posts that carry a langs field).
     CREATE TABLE IF NOT EXISTS lang_stats (
-      id           INTEGER PRIMARY KEY CHECK (id = 1),
+      date         TEXT    NOT NULL PRIMARY KEY,
       total_posts  INTEGER NOT NULL DEFAULT 0,
       tagged_posts INTEGER NOT NULL DEFAULT 0,
       updated_at   TEXT    NOT NULL
     );
 
-    -- Per-(collection, DID) event counts accumulated from all Jetstream creates.
+    -- Per-(collection, DID, date) event counts from Jetstream creates.
     -- Full collection name (e.g. "app.bsky.feed.post", "com.whtwnd.blog.entry").
     -- Join with plc_did_pds at query time to get per-PDS breakdowns.
     CREATE TABLE IF NOT EXISTS collection_activity (
       collection  TEXT NOT NULL,
       did         TEXT NOT NULL,
+      date        TEXT NOT NULL,
       event_count INTEGER NOT NULL DEFAULT 0,
-      last_seen   TEXT NOT NULL,
-      PRIMARY KEY (collection, did)
+      PRIMARY KEY (collection, did, date)
     );
 
     CREATE INDEX IF NOT EXISTS idx_collection_activity_collection
       ON collection_activity(collection);
-
-    CREATE INDEX IF NOT EXISTS idx_collection_activity_last_seen
-      ON collection_activity(last_seen);
 
     -- Pre-aggregated per-PDS activity summary (written by aggregate:activity-pds).
     -- One row per (pds_url, window_days). bsky.network shards collapsed to 'bsky.network'.
@@ -147,4 +143,35 @@ function migrate(db: Database.Database) {
   db.exec(`DROP INDEX IF EXISTS idx_did_activity_daily_date`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_did_activity_daily_covering ON did_activity_daily(date, did, activity_types)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_did_activity_daily_did ON did_activity_daily(did, date)`);
+
+  // Recreate lang_stats and collection_activity with date columns if they predate this migration.
+  // These are derived tables rebuilt from the event stream, so dropping is safe.
+  const langStatsHasDate = (db.prepare(`SELECT COUNT(*) AS n FROM pragma_table_info('lang_stats') WHERE name = 'date'`).get() as { n: number }).n > 0;
+  if (!langStatsHasDate) {
+    db.exec(`DROP TABLE IF EXISTS lang_stats`);
+    db.exec(`
+      CREATE TABLE lang_stats (
+        date         TEXT    NOT NULL PRIMARY KEY,
+        total_posts  INTEGER NOT NULL DEFAULT 0,
+        tagged_posts INTEGER NOT NULL DEFAULT 0,
+        updated_at   TEXT    NOT NULL
+      )
+    `);
+  }
+
+  const collectionHasDate = (db.prepare(`SELECT COUNT(*) AS n FROM pragma_table_info('collection_activity') WHERE name = 'date'`).get() as { n: number }).n > 0;
+  if (!collectionHasDate) {
+    db.exec(`DROP TABLE IF EXISTS collection_activity`);
+    db.exec(`
+      CREATE TABLE collection_activity (
+        collection  TEXT    NOT NULL,
+        did         TEXT    NOT NULL,
+        date        TEXT    NOT NULL,
+        event_count INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (collection, did, date)
+      )
+    `);
+    db.exec(`CREATE INDEX idx_collection_activity_collection ON collection_activity(collection)`);
+    db.exec(`CREATE INDEX idx_collection_activity_date ON collection_activity(date)`);
+  }
 }

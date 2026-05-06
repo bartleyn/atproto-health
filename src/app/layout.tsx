@@ -24,7 +24,7 @@ export default function RootLayout({
               Migrations
             </Link>
             <Link href="/longevity" className="text-gray-400 underline hover:text-gray-100 transition-colors">
-              PDS & Account Ages
+              PDS & Repo Ages
             </Link>
           </div>
         </nav>

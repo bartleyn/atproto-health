@@ -589,9 +589,11 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
     for (const [pds_url, byNs] of nsByPds) {
       const traitDids = byNs.get(selectedNamespace) ?? 0;
       if (traitDids === 0) continue;
+      const total = [...byNs.values()].reduce((s, v) => s + v, 0);
       result.push({
         pds_url,
         traitDids,
+        total,
         composition: [...byNs.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([label, dids]) => ({ label, dids })),
       });
     }
@@ -1213,7 +1215,10 @@ function PdsRankTable({ rows, traitLabel, mode }: {
           </thead>
           <tbody>
             {sorted.map((row, i) => {
-              const compTotal = row.composition.reduce((s, c) => s + c.dids, 0);
+              const compTotal = row.total ?? row.composition.reduce((s, c) => s + c.dids, 0);
+              const shownDids = row.composition.reduce((s, c) => s + c.dids, 0);
+              const otherDids = compTotal - shownDids;
+              const otherPct = compTotal > 0 ? (otherDids / compTotal) * 100 : 0;
               return (
                 <tr key={row.pds_url} className="border-b border-gray-800/50 hover:bg-gray-900/50">
                   <td className="px-3 py-2.5 text-gray-500 tabular-nums">{i + 1}</td>
@@ -1238,6 +1243,12 @@ function PdsRankTable({ rows, traitLabel, mode }: {
                           style={{ width: `${(c.dids / compTotal) * 100}%`, backgroundColor: colorMap.get(c.label) }}
                         />
                       ))}
+                      {otherPct > 0 && (
+                        <div
+                          title={`Other: ${otherDids.toLocaleString()}`}
+                          style={{ width: `${otherPct}%`, backgroundColor: "#4b5563" }}
+                        />
+                      )}
                     </div>
                     <div className="flex gap-2 flex-wrap">
                       {row.composition.map((c) => (
@@ -1245,6 +1256,11 @@ function PdsRankTable({ rows, traitLabel, mode }: {
                           {c.label} <span className="opacity-60">{Math.round((c.dids / compTotal) * 100)}%</span>
                         </span>
                       ))}
+                      {otherPct > 0 && (
+                        <span className="font-mono text-gray-500">
+                          Other <span className="opacity-60">{Math.round(otherPct)}%</span>
+                        </span>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -1695,17 +1711,31 @@ function CreationWeeklyBarChart({ data, selectedPds, onPdsClick }: CreationWeekl
 
 interface CreationChartsSectionProps {
   repoData: TimeseriesRow[];
+  repoDataNoBsky?: TimeseriesRow[];
 }
 
-export function CreationChartsSection({ repoData }: CreationChartsSectionProps) {
+export function CreationChartsSection({ repoData, repoDataNoBsky }: CreationChartsSectionProps) {
   const [selectedPds, setSelectedPds] = useState<string | null>(null);
+  const [hideBsky, setHideBsky] = useState(false);
+
+  const active = (hideBsky && repoDataNoBsky) ? repoDataNoBsky : repoData;
 
   return (
     <div className="space-y-8">
+      {repoDataNoBsky && (
+        <div className="flex justify-end">
+          <button
+            onClick={() => setHideBsky(h => !h)}
+            className="text-xs px-3 py-1 rounded border border-gray-700 text-gray-400 hover:text-gray-200 hover:border-gray-500 transition-colors"
+          >
+            {hideBsky ? "Show bsky.network" : "Hide bsky.network"}
+          </button>
+        </div>
+      )}
       <div>
         <p className="text-xs text-gray-500 mb-2">Repo-backed accounts — DIDs with an actual repository (excludes 'ghosts', e.g., most morel dids, and all pds.trump.com accounts )</p>
         <StackedAreaChart
-          data={repoData}
+          data={active}
           selectedPds={selectedPds}
           onPdsClick={setSelectedPds}
         />
@@ -1719,7 +1749,7 @@ export function CreationChartsSection({ repoData }: CreationChartsSectionProps) 
             </span>
           )}
         </p>
-        <CreationWeeklyBarChart data={repoData} selectedPds={selectedPds} onPdsClick={setSelectedPds} />
+        <CreationWeeklyBarChart data={active} selectedPds={selectedPds} onPdsClick={setSelectedPds} />
       </div>
     </div>
   );

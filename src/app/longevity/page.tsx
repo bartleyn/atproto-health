@@ -1,6 +1,5 @@
 export const dynamic = "force-dynamic";
 
-import Link from "next/link";
 import { getPdsAgeData, getAccountCohortCounts, getActiveCreationTimeseriesWeekly, getPlcDataTimestamp } from "@/lib/db/plc-queries";
 import { PdsAgeChart, SimpleBarChart, CreationChartsSection } from "@/components/charts";
 import { CollapsibleSection } from "@/components/collapsible-section";
@@ -25,19 +24,13 @@ function ChartCard({ title, subtitle, children }: { title: string; subtitle?: st
   );
 }
 
-export default async function LongevityPage({
-  searchParams,
-}: {
-  searchParams: Promise<{ bsky?: string }>;
-}) {
-  const { bsky } = await searchParams;
-  const hideBsky = bsky === "0";
-
-  const pdsAgeDataAll  = getPdsAgeData(1);
-  const pdsAgeData     = pdsAgeDataAll.filter(r => r.total_accounts >= 5);
-  const cohortData     = getAccountCohortCounts();
-  const activeCreations = getActiveCreationTimeseriesWeekly(hideBsky);
-  const timestamp      = getPlcDataTimestamp();
+export default async function LongevityPage() {
+  const pdsAgeDataAll    = getPdsAgeData(1);
+  const pdsAgeData       = pdsAgeDataAll.filter(r => r.total_accounts >= 5);
+  const cohortData       = getAccountCohortCounts();
+  const activeCreations  = getActiveCreationTimeseriesWeekly(false);
+  const activeCreationsNoBsky = getActiveCreationTimeseriesWeekly(true);
+  const timestamp        = getPlcDataTimestamp();
 
   const totalAccounts = cohortData.reduce((s, r) => s + r.count, 0);
   const cohortBuckets = cohortData.map(r => ({ name: r.cohort, value: r.count }));
@@ -54,8 +47,8 @@ export default async function LongevityPage({
       <div className="max-w-6xl mx-auto space-y-12">
 
         <div>
-          <h1 className="text-3xl font-bold text-white">PDS &amp; Account Age</h1>
-          <p className="text-gray-400 mt-2">When PDSes launched and how old the accounts are</p>
+          <h1 className="text-3xl font-bold text-white">PDS &amp; Repo Age</h1>
+          <p className="text-gray-400 mt-2">When PDSes launched and how old the repos are</p>
           {timestamp && (
             <p className="text-xs text-gray-600 mt-1">
               PLC data collected through{" "}
@@ -95,7 +88,7 @@ export default async function LongevityPage({
 
         <CollapsibleSection
           title="When Did PDSes Launch?"
-          subtitle="Each point is a PDS with 5+ active repos. X = first repo-backed account (proxy for launch). Y = total repos (log scale). Colored by launch era. Excludes pds.trump.com, junk PDSes, and migration-only PDSes (no native did:plc creations)."
+          subtitle="Each point is a PDS with 5+ active repos. X = first repo (proxy for launch). Y = total repos (log scale). Colored by launch era. Excludes pds.trump.com, junk PDSes, and migration-only PDSes (no native did:plc creations)."
           storageKey="longevity-age-scatter"
         >
           <ChartCard title="PDS Age vs. Size">
@@ -104,34 +97,26 @@ export default async function LongevityPage({
         </CollapsibleSection>
 
         <CollapsibleSection
-          title="When Were Accounts Created?"
-          subtitle={`${totalAccounts.toLocaleString()} repo-backed accounts grouped by creation era (excludes pds.trump.com and spam PDSes).`}
+          title="When Were Repos Created?"
+          subtitle={`${totalAccounts.toLocaleString()} repos grouped by creation era (excludes pds.trump.com and spam PDSes).`}
           storageKey="longevity-account-age"
         >
-          <ChartCard title="Account Age Distribution" subtitle="Accounts grouped by creation era">
+          <ChartCard title="Repo Age Distribution" subtitle="Repos grouped by creation era">
             <SimpleBarChart
               data={cohortBuckets}
               color="#8b5cf6"
               layout="horizontal"
               xLabel="Creation cohort"
-              yLabel="Accounts"
+              yLabel="Repos"
             />
           </ChartCard>
         </CollapsibleSection>
 
         <CollapsibleSection
-          title="Weekly Account Creations per PDS"
-          subtitle={`did:plc repo-backed accounts only (did:web excluded). Normalized to 100% — hover for actual counts. Top 10 PDSes by total volume.${hideBsky ? " bsky.network hidden." : ""}`}
+          title="Weekly Repo Creation By PDS"
+          subtitle="did:plc repo-backed accounts only (did:web excluded). Normalized to 100% — hover for actual counts. Top 10 PDSes by total volume."
           storageKey="longevity-creations"
         >
-          <div className="flex justify-end mb-3">
-            <Link
-              href={`/longevity?bsky=${hideBsky ? "1" : "0"}`}
-              className="text-xs px-3 py-1 rounded border border-gray-700 text-gray-400 hover:text-gray-200 hover:border-gray-500 transition-colors"
-            >
-              {hideBsky ? "Show bsky.network" : "Hide bsky.network"}
-            </Link>
-          </div>
           {activeCreations.length === 0 ? (
             <p className="text-gray-500">
               No data yet — run{" "}
@@ -139,7 +124,7 @@ export default async function LongevityPage({
               <code className="text-gray-300">npm run aggregate:plc</code>.
             </p>
           ) : (
-            <CreationChartsSection repoData={activeCreations} />
+            <CreationChartsSection repoData={activeCreations} repoDataNoBsky={activeCreationsNoBsky} />
           )}
         </CollapsibleSection>
 

@@ -44,7 +44,7 @@ const TOP_N = 10;
 // Exclude localhost/loopback dev artifacts, reserved TLDs, private IPs, and malformed URLs.
 // .dev is a real IANA TLD (Google) — do NOT filter it.
 // Pass a table alias (e.g. "w") to avoid ambiguity in joined queries.
-function junkPdsFilter(col = "pds_url") {
+export function junkPdsFilter(col = "pds_url") {
   return `
     ${col} NOT LIKE '%localhost%'
     AND ${col} NOT LIKE '%127.0.0.1%'
@@ -728,19 +728,57 @@ const BSKY_SNAP_FILTER = `pds_url NOT LIKE '%host.bsky.network%' AND pds_url NOT
 
 // Returns a CTE selecting the latest non-partial snapshot per PDS,
 // optionally filtering out bsky infrastructure.
+// Geo columns (org, country, country_code, city, region, latitude, longitude, isp, as_number)
+// are coalesced from the most recent snapshot that actually has geo data, so that
+// scan:pds-status runs (which don't write geo) don't clobber collect:geo data.
 function latestSnapshotCte(hideBsky: boolean) {
   const bskyFilter = hideBsky ? `AND ${BSKY_SNAP_FILTER}` : "";
   return `
     WITH latest AS (
       SELECT RTRIM(pds_url, '/') AS pds_url, MAX(snapshot_date) AS snap_date
       FROM pds_repo_status_snapshots
-      WHERE is_partial = 0 ${bskyFilter}
+      WHERE is_partial = 0 AND ${JUNK_PDS_FILTER} ${bskyFilter}
       GROUP BY RTRIM(pds_url, '/')
     ),
-    pds_latest AS (
+    pds_raw AS (
       SELECT s.*
       FROM pds_repo_status_snapshots s
       JOIN latest l ON RTRIM(s.pds_url, '/') = l.pds_url AND s.snapshot_date = l.snap_date
+    ),
+    latest_geo AS (
+      SELECT RTRIM(pds_url, '/') AS norm_url,
+             org, city, country, country_code, region, latitude, longitude, isp, as_number
+      FROM (
+        SELECT pds_url, org, city, country, country_code, region, latitude, longitude, isp, as_number,
+               ROW_NUMBER() OVER (PARTITION BY RTRIM(pds_url, '/') ORDER BY snapshot_date DESC) AS rn
+        FROM pds_repo_status_snapshots WHERE latitude IS NOT NULL OR org IS NOT NULL
+      ) WHERE rn = 1
+    ),
+    dir_pds AS (
+      SELECT RTRIM(pds_url, '/') AS norm_url
+      FROM pds_repo_status_snapshots
+      WHERE in_directory = 1
+      GROUP BY RTRIM(pds_url, '/')
+    ),
+    pds_latest AS (
+      SELECT
+        r.id, r.pds_url, r.snapshot_date, r.active, r.deactivated, r.deleted,
+        r.takendown, r.suspended, r.other, r.total_scanned, r.is_sampled,
+        r.did_plc_count, r.did_web_count, r.is_partial, r.scanned_at, r.ip_address,
+        r.version, r.invite_code_required, r.is_online,
+        COALESCE(r.country,      g.country)      AS country,
+        COALESCE(r.country_code, g.country_code) AS country_code,
+        COALESCE(r.region,       g.region)       AS region,
+        COALESCE(r.city,         g.city)         AS city,
+        COALESCE(r.latitude,     g.latitude)     AS latitude,
+        COALESCE(r.longitude,    g.longitude)    AS longitude,
+        COALESCE(r.org,          g.org)          AS org,
+        COALESCE(r.isp,          g.isp)          AS isp,
+        COALESCE(r.as_number,    g.as_number)    AS as_number,
+        CASE WHEN d.norm_url IS NOT NULL THEN 1 ELSE 0 END AS in_directory
+      FROM pds_raw r
+      LEFT JOIN latest_geo g ON RTRIM(r.pds_url, '/') = g.norm_url
+      LEFT JOIN dir_pds d ON RTRIM(r.pds_url, '/') = d.norm_url
     )
   `;
 }
@@ -783,19 +821,58 @@ export interface OverviewStats {
 
 export function getOverviewStats(hideBsky = false): OverviewStats {
   const db = getPlcDb();
-  return db.prepare(`
-    ${latestSnapshotCte(hideBsky)}
+  const bskyFilter = hideBsky ? `AND ${BSKY_SNAP_FILTER}` : "";
+
+  // Total/Online/Offline/OpenReg come from the latest directory snapshot per PDS
+  // (rows written by the collect runner from mary's state.json, marked in_directory=1).
+  // This correctly counts offline PDSes that have no repos in listRepos scans.
+  const dirStats = db.prepare(`
     SELECT
       COUNT(*) as total,
-      SUM(CASE WHEN COALESCE(is_online, CASE WHEN total_scanned > 0 THEN 1 ELSE 0 END) = 1 THEN 1 ELSE 0 END) as online,
-      SUM(CASE WHEN COALESCE(is_online, CASE WHEN total_scanned > 0 THEN 1 ELSE 0 END) = 0 THEN 1 ELSE 0 END) as offline,
+      SUM(CASE WHEN is_online = 1 THEN 1 ELSE 0 END) as online,
+      SUM(CASE WHEN is_online = 0 THEN 1 ELSE 0 END) as offline,
       SUM(CASE WHEN invite_code_required = 0 THEN 1 ELSE 0 END) as openReg,
-      SUM(CASE WHEN invite_code_required != 0 OR invite_code_required IS NULL THEN 1 ELSE 0 END) as inviteOnly,
-      COUNT(DISTINCT CASE WHEN country_code IS NOT NULL THEN country_code END) as countries,
+      SUM(CASE WHEN invite_code_required != 0 OR invite_code_required IS NULL THEN 1 ELSE 0 END) as inviteOnly
+    FROM (
+      SELECT RTRIM(pds_url, '/') AS norm_url, is_online, invite_code_required,
+             ROW_NUMBER() OVER (PARTITION BY RTRIM(pds_url, '/') ORDER BY snapshot_date DESC) AS rn
+      FROM pds_repo_status_snapshots
+      WHERE in_directory = 1 AND is_partial = 0 AND ${JUNK_PDS_FILTER} ${bskyFilter}
+    ) WHERE rn = 1
+  `).get() as { total: number; online: number; offline: number; openReg: number; inviteOnly: number };
+
+  // Countries: distinct country codes across PDSes that ever had repos in any snapshot.
+  // Uses latest_geo fallback so temporarily-offline PDSes still contribute their country.
+  // Repo totals from pds_latest (current scan numbers).
+  const repoStats = db.prepare(`
+    ${latestSnapshotCte(hideBsky)},
+    ever_had_repos AS (
+      SELECT RTRIM(pds_url, '/') AS norm_url
+      FROM pds_repo_status_snapshots
+      WHERE ${JUNK_PDS_FILTER} ${bskyFilter}
+      GROUP BY RTRIM(pds_url, '/')
+      HAVING MAX(total_scanned) >= 0
+    )
+    SELECT
+      (SELECT COUNT(DISTINCT country_code)
+       FROM latest_geo g
+       JOIN ever_had_repos e ON g.norm_url = e.norm_url
+       WHERE country_code IS NOT NULL) as countries,
       COALESCE(SUM(total_scanned), 0) as totalUsers,
       COALESCE(SUM(active), 0) as activeUsers
     FROM pds_latest
-  `).get() as OverviewStats;
+  `).get() as { countries: number; totalUsers: number; activeUsers: number };
+
+  return {
+    total: dirStats.total,
+    online: dirStats.online,
+    offline: dirStats.offline,
+    openReg: dirStats.openReg,
+    inviteOnly: dirStats.inviteOnly,
+    countries: repoStats.countries,
+    totalUsers: repoStats.totalUsers,
+    activeUsers: repoStats.activeUsers,
+  };
 }
 
 export interface CountryCount {
@@ -862,6 +939,7 @@ export function getHostingProviders(hideBsky = false): HostingProviderCount[] {
       COUNT(*) as count,
       CASE WHEN org LIKE '%Cloudflare%' OR org LIKE '%Fastly%' THEN 1 ELSE 0 END as isCdn
     FROM pds_latest
+    WHERE in_directory = 1
     GROUP BY provider ORDER BY count DESC
   `).all() as HostingProviderCount[];
 }
@@ -875,6 +953,7 @@ export function getCloudflareBreakdown(hideBsky = false): { behindCdn: number; d
       SUM(CASE WHEN org IS NOT NULL AND org != '' AND org NOT LIKE '%Cloudflare%' AND org NOT LIKE '%Fastly%' THEN 1 ELSE 0 END) as directHosting,
       SUM(CASE WHEN org IS NULL OR org = '' THEN 1 ELSE 0 END) as unknown
     FROM pds_latest
+    WHERE in_directory = 1
   `).get() as { behindCdn: number; directHosting: number; unknown: number };
 }
 
@@ -1004,14 +1083,14 @@ export function getPdsLocationsWithProvider(hideBsky = false): PdsProviderLocati
     ${cte},
     combined AS (
       SELECT
-        pds_url as url,
+        pds_url AS url,
         CASE WHEN org LIKE '%Cloudflare%' THEN 38.0  ELSE latitude  END AS latitude,
         CASE WHEN org LIKE '%Cloudflare%' THEN -30.0 ELSE longitude END AS longitude,
         CASE WHEN org LIKE '%Cloudflare%' THEN 'Cloudflare Network' ELSE city    END AS city,
         CASE WHEN org LIKE '%Cloudflare%' THEN NULL                  ELSE country END AS country,
         ${PROVIDER_NORMALIZE_SQL} as provider
       FROM pds_latest
-      WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+      WHERE in_directory = 1 AND (latitude IS NOT NULL OR org IS NOT NULL)
       UNION ALL
       SELECT url, latitude, longitude, city, country, COALESCE(org, 'Self-hosted') AS provider
       FROM pds_manual_geo

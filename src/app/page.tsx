@@ -204,7 +204,7 @@ export default async function Home({
         <a href="https://github.com/mary-ext/atproto-scraping" target="_blank" rel="noopener noreferrer" className="underline hover:text-gray-300">
           mary-ext/atproto-scraping
         </a>
-        , supplemented with additional PDSes discovered via the AT Protocol PLC log. Online/offline and Open Reg reflect our own periodic scans.
+        , supplemented with additional PDSes discovered via the AT Protocol PLC log. Online/offline and Open Reg reflect mary&apos;s periodic directory scans.
       </p>
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-4">
         <StatCard label="Total PDSes" value={stats.total} />

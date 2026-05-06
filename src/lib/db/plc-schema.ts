@@ -188,6 +188,7 @@ function migrate(db: Database.Database) {
       did_web_count INTEGER NOT NULL DEFAULT 0,
       is_partial    INTEGER NOT NULL DEFAULT 0, -- 1 if scan errored mid-way
       scanned_at    TEXT,                       -- ISO timestamp of when the scan ran
+      in_directory  INTEGER NOT NULL DEFAULT 0, -- 1 if written by collect (mary's directory)
       UNIQUE(pds_url, snapshot_date)
     );
 
@@ -197,6 +198,8 @@ function migrate(db: Database.Database) {
       ON pds_repo_status_snapshots(pds_url);
     CREATE INDEX IF NOT EXISTS idx_pds_repo_status_snapshots_pds_date
       ON pds_repo_status_snapshots(pds_url, snapshot_date);
+    CREATE INDEX IF NOT EXISTS idx_pds_status_norm_url_date
+      ON pds_repo_status_snapshots(RTRIM(pds_url, '/'), snapshot_date);
 
     CREATE TABLE IF NOT EXISTS skywatch_labels (
       did        TEXT NOT NULL,
@@ -339,5 +342,24 @@ function migrate(db: Database.Database) {
     try {
       db.exec(`ALTER TABLE pds_repo_status_snapshots ADD COLUMN ${col}`);
     } catch { /* already exists */ }
+  }
+
+  // in_directory flag: 1 for rows written by the collect runner (mary's directory PDSes).
+  // Backfill once from atproto-health.db pds_instances if the old DB is present.
+  const hasInDirectory = (db.prepare(
+    `SELECT COUNT(*) AS n FROM pragma_table_info('pds_repo_status_snapshots') WHERE name = 'in_directory'`
+  ).get() as { n: number }).n > 0;
+  if (!hasInDirectory) {
+    db.exec(`ALTER TABLE pds_repo_status_snapshots ADD COLUMN in_directory INTEGER NOT NULL DEFAULT 0`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_pds_status_in_directory ON pds_repo_status_snapshots(in_directory)`);
+    try {
+      db.exec(`ATTACH DATABASE 'atproto-health.db' AS old_health`);
+      db.exec(`
+        UPDATE pds_repo_status_snapshots
+        SET in_directory = 1
+        WHERE RTRIM(pds_url, '/') IN (SELECT RTRIM(url, '/') FROM old_health.pds_instances)
+      `);
+      db.exec(`DETACH DATABASE old_health`);
+    } catch { /* old DB not available — rows will be marked by future collect runs */ }
   }
 }

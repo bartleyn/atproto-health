@@ -16,6 +16,7 @@
 
 import { promises as dns } from "dns";
 import { getPlcDb } from "../db/plc-schema";
+import { junkPdsFilter } from "../db/plc-queries";
 import { scanPdsRepos, type RepoInfo, type StatusCounts, type NonActiveRepo } from "./pds-repos";
 import { describeServer } from "./pds-details";
 
@@ -85,7 +86,7 @@ async function main() {
   } else {
     // PDS sources: did:plc accounts (plc_did_pds) + did:web accounts (did_web_pds)
     const plcRows = db
-      .prepare(`SELECT pds_url FROM plc_did_pds GROUP BY pds_url ORDER BY COUNT(*) DESC`)
+      .prepare(`SELECT pds_url FROM plc_did_pds WHERE ${junkPdsFilter()} GROUP BY pds_url ORDER BY COUNT(*) DESC`)
       .all() as { pds_url: string }[];
     const pdsSet = new Map<string, number>(); // url → approx account count
     for (const r of plcRows) {
@@ -93,7 +94,7 @@ async function main() {
     }
 
     const didWebRows = db
-      .prepare(`SELECT DISTINCT pds_url FROM did_web_pds WHERE pds_url IS NOT NULL`)
+      .prepare(`SELECT DISTINCT pds_url FROM did_web_pds WHERE pds_url IS NOT NULL AND ${junkPdsFilter()}`)
       .all() as { pds_url: string }[];
     let didWebAdded = 0;
     for (const r of didWebRows) {

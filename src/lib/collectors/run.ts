@@ -133,10 +133,10 @@ async function main() {
           (pds_url, snapshot_date, active, deactivated, deleted, takendown, suspended, other,
            total_scanned, is_sampled, did_plc_count, did_web_count, is_partial, scanned_at, ip_address,
            country, country_code, region, city, latitude, longitude, isp, org, as_number, hosting_provider,
-           version, invite_code_required, is_online)
+           version, invite_code_required, is_online, in_directory)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?)
+                ?, ?, ?, 1)
         ON CONFLICT(pds_url, snapshot_date) DO UPDATE SET
           active = excluded.active, deactivated = excluded.deactivated,
           deleted = excluded.deleted, takendown = excluded.takendown,
@@ -151,7 +151,8 @@ async function main() {
           isp = excluded.isp, org = excluded.org, as_number = excluded.as_number,
           hosting_provider = excluded.hosting_provider,
           version = excluded.version, invite_code_required = excluded.invite_code_required,
-          is_online = excluded.is_online
+          is_online = excluded.is_online,
+          in_directory = 1
       `);
 
       const upsertDidInRepo = plcDb.prepare(`

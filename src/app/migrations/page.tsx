@@ -7,7 +7,6 @@ import {
   getMigrationJourneyStats,
   getEcosystemStats,
   getPlcDataTimestamp,
-  getScannedPdsCount,
 } from "@/lib/db/plc-queries";
 import { getOverviewStats } from "@/lib/db/plc-queries";
 import { MigrationChartsSection, MultiStepSankeyChart, SimpleBarChart } from "@/components/charts";
@@ -30,7 +29,6 @@ export default async function MigrationsPage() {
   const journeyStats = getMigrationJourneyStats();
   const stats = getEcosystemStats();
   const scanStats = getOverviewStats();
-  const scannedPdsCount = getScannedPdsCount();
   const timestamp = getPlcDataTimestamp();
 
   const fmt = (n: number) => n.toLocaleString();
@@ -94,7 +92,7 @@ export default async function MigrationsPage() {
         {/* Migration Flows Sankey + weekly bar */}
         <CollapsibleSection
           title="Where do users end up?"
-          subtitle="Where did:plc accounts ultimately landed — collapsed origin → current PDS. Excludes bsky.network destinations. Hover for details. Click any node to highlight its trajectories forward and backward."
+          subtitle="Where did:plc accounts ultimately landed — collapsed origin → current PDS. Hover for details. Click any node to highlight its trajectories forward and backward."
           storageKey="migrations-sankey"
         >
           <MigrationChartsSection sankeyData={flows} weeklyData={weeklyMigrations} />

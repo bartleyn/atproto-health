@@ -1,6 +1,9 @@
 import path from "path";
 import { getActivityDb } from "./activity-schema";
 
+const CACHE_TTL_MS = 60 * 60 * 1000;
+const collectionPdsCache = new Map<boolean, { data: { collection: string; pds_url: string; unique_dids: number }[]; expires: number }>();
+
 export interface PdsActivityRow {
   pds_url: string;
   active_dids: number;
@@ -54,6 +57,9 @@ export interface CollectionPdsRow {
 // Returns per-(collection, pds_url) unique DID counts by cross-joining
 // collection_activity with plc_did_pds. Used for the namespace map overlay.
 export function getCollectionPdsData(hideBsky = false): CollectionPdsRow[] {
+  const cached = collectionPdsCache.get(hideBsky);
+  if (cached && Date.now() < cached.expires) return cached.data;
+
   try {
     const db = getActivityDb();
     const plcPath = path.join(process.cwd(), "plc-migrations.db");
@@ -61,13 +67,15 @@ export function getCollectionPdsData(hideBsky = false): CollectionPdsRow[] {
     const bskyFilter = hideBsky
       ? `AND p.pds_url NOT LIKE '%bsky.network%' AND p.pds_url != 'https://bsky.social'`
       : "";
-    return db.prepare(`
+    const data = db.prepare(`
       SELECT ca.collection, p.pds_url, COUNT(DISTINCT ca.did) AS unique_dids
       FROM collection_activity ca
       JOIN plc.plc_did_pds p ON ca.did = p.did
       WHERE 1=1 ${bskyFilter}
       GROUP BY ca.collection, p.pds_url
     `).all() as CollectionPdsRow[];
+    collectionPdsCache.set(hideBsky, { data, expires: Date.now() + CACHE_TTL_MS });
+    return data;
   } catch {
     return [];
   }

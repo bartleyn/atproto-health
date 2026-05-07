@@ -41,6 +41,11 @@ const BSKY_NETWORK_LABEL = "bsky.network";
 const TRUMP_PDS = "https://pds.trump.com";
 const TOP_N = 10;
 
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+const topPdsCache     = new Map<boolean, { data: ScannedTopPds[];  expires: number }>();
+const langSummaryCache = new Map<boolean, { data: PdsLangRow[];    expires: number }>();
+const topLangsCache   = new Map<boolean, { data: LangTotal[];      expires: number }>();
+
 // Exclude localhost/loopback dev artifacts, reserved TLDs, private IPs, and malformed URLs.
 // .dev is a real IANA TLD (Google) — do NOT filter it.
 // Pass a table alias (e.g. "w") to avoid ambiguity in joined queries.
@@ -485,6 +490,9 @@ export interface ScannedTopPds {
  *  Collapses bsky.network shards (SUM — genuinely separate backends) and
  *  same-IP non-bsky aliases (MAX — same repos served under multiple hostnames). */
 export function getTopPdsByScan(limit = 15, hideBsky = false): ScannedTopPds[] {
+  const cached = topPdsCache.get(hideBsky);
+  if (cached && Date.now() < cached.expires) return cached.data.slice(0, limit);
+
   const db = getPlcDb();
 
   const rows = db.prepare(`
@@ -553,9 +561,9 @@ export function getTopPdsByScan(limit = 15, hideBsky = false): ScannedTopPds[] {
     results.push({ url: "https://bsky.social", repoCount: bskyRepos, activeCount: bskyActive, snapshot_date: bskyDate });
   }
 
-  return results
-    .sort((a, b) => b.repoCount - a.repoCount)
-    .slice(0, limit);
+  const sorted = results.sort((a, b) => b.repoCount - a.repoCount);
+  topPdsCache.set(hideBsky, { data: sorted, expires: Date.now() + CACHE_TTL_MS });
+  return sorted.slice(0, limit);
 }
 
 /** Per-shard repo counts for bsky.network shards, keyed by normalized URL.
@@ -616,11 +624,14 @@ export interface PdsLangRow {
 // All (pds_url, lang) pairs from the precomputed summary table.
 // pds_lang_summary is populated by aggregate-plc.ts; returns [] if not yet run.
 export function getPdsLangSummary(hideBsky = false): PdsLangRow[] {
+  const cached = langSummaryCache.get(hideBsky);
+  if (cached && Date.now() < cached.expires) return cached.data;
+
   const db = getPlcDb();
   const bskyFilter = hideBsky
     ? `WHERE pds_url NOT LIKE '%bsky.network%' AND pds_url != 'https://bsky.social'`
     : "";
-  return db.prepare(`
+  const data = db.prepare(`
     SELECT
       CASE WHEN pds_url = 'https://myatproto.social' THEN 'https://blacksky.app' ELSE pds_url END AS pds_url,
       lang, dids, post_count
@@ -628,6 +639,8 @@ export function getPdsLangSummary(hideBsky = false): PdsLangRow[] {
     ${bskyFilter}
     ORDER BY pds_url, dids DESC
   `).all() as PdsLangRow[];
+  langSummaryCache.set(hideBsky, { data, expires: Date.now() + CACHE_TTL_MS });
+  return data;
 }
 
 export interface LangTotal {
@@ -638,18 +651,22 @@ export interface LangTotal {
 
 // Top languages by distinct-DID count.
 export function getTopLangs(limit = 25, hideBsky = false): LangTotal[] {
+  const cached = topLangsCache.get(hideBsky);
+  if (cached && Date.now() < cached.expires) return cached.data.slice(0, limit);
+
   const db = getPlcDb();
   const bskyFilter = hideBsky
     ? `WHERE pds_url NOT LIKE '%bsky.network%' AND pds_url != 'https://bsky.social'`
     : "";
-  return db.prepare(`
+  const data = db.prepare(`
     SELECT lang, SUM(dids) AS total_dids, COUNT(DISTINCT pds_url) AS pds_count
     FROM pds_lang_summary
     ${bskyFilter}
     GROUP BY lang
     ORDER BY total_dids DESC
-    LIMIT ?
-  `).all(limit) as LangTotal[];
+  `).all() as LangTotal[];
+  topLangsCache.set(hideBsky, { data, expires: Date.now() + CACHE_TTL_MS });
+  return data.slice(0, limit);
 }
 
 export interface MigrationJourneyStats {
@@ -737,7 +754,11 @@ function latestSnapshotCte(hideBsky: boolean) {
   const bskyFilter = hideBsky ? `AND ${BSKY_SNAP_FILTER}` : "";
   return `
     WITH latest AS (
-      SELECT RTRIM(pds_url, '/') AS pds_url, MAX(snapshot_date) AS snap_date
+      -- One scan: latest non-partial snapshot date + best-ever counts per PDS.
+      SELECT RTRIM(pds_url, '/') AS pds_url,
+             MAX(snapshot_date)  AS snap_date,
+             MAX(total_scanned)  AS best_total_scanned,
+             MAX(active)         AS best_active
       FROM pds_repo_status_snapshots
       WHERE is_partial = 0 AND ${JUNK_PDS_FILTER} ${bskyFilter}
       GROUP BY RTRIM(pds_url, '/')
@@ -747,22 +768,28 @@ function latestSnapshotCte(hideBsky: boolean) {
       FROM pds_repo_status_snapshots s
       JOIN latest l ON RTRIM(s.pds_url, '/') = l.pds_url AND s.snapshot_date = l.snap_date
     ),
+    latest_geo_date AS (
+      -- MAX(snapshot_date) per PDS where geo data exists — uses covering index, no sort.
+      SELECT RTRIM(pds_url, '/') AS norm_url, MAX(snapshot_date) AS snap_date
+      FROM pds_repo_status_snapshots WHERE latitude IS NOT NULL OR org IS NOT NULL
+      GROUP BY RTRIM(pds_url, '/')
+    ),
     latest_geo AS (
-      SELECT RTRIM(pds_url, '/') AS norm_url,
-             org, city, country, country_code, region, latitude, longitude, isp, as_number
-      FROM (
-        SELECT pds_url, org, city, country, country_code, region, latitude, longitude, isp, as_number,
-               ROW_NUMBER() OVER (PARTITION BY RTRIM(pds_url, '/') ORDER BY snapshot_date DESC) AS rn
-        FROM pds_repo_status_snapshots WHERE latitude IS NOT NULL OR org IS NOT NULL
-      ) WHERE rn = 1
+      SELECT RTRIM(s.pds_url, '/') AS norm_url,
+             s.org, s.city, s.country, s.country_code, s.region,
+             s.latitude, s.longitude, s.isp, s.as_number
+      FROM pds_repo_status_snapshots s
+      JOIN latest_geo_date d ON RTRIM(s.pds_url, '/') = d.norm_url AND s.snapshot_date = d.snap_date
+    ),
+    latest_version_date AS (
+      SELECT RTRIM(pds_url, '/') AS norm_url, MAX(snapshot_date) AS snap_date
+      FROM pds_repo_status_snapshots WHERE version IS NOT NULL
+      GROUP BY RTRIM(pds_url, '/')
     ),
     latest_version AS (
-      SELECT RTRIM(pds_url, '/') AS norm_url, version
-      FROM (
-        SELECT pds_url, version,
-               ROW_NUMBER() OVER (PARTITION BY RTRIM(pds_url, '/') ORDER BY snapshot_date DESC) AS rn
-        FROM pds_repo_status_snapshots WHERE version IS NOT NULL
-      ) WHERE rn = 1
+      SELECT RTRIM(s.pds_url, '/') AS norm_url, s.version
+      FROM pds_repo_status_snapshots s
+      JOIN latest_version_date d ON RTRIM(s.pds_url, '/') = d.norm_url AND s.snapshot_date = d.snap_date
     ),
     dir_pds AS (
       SELECT RTRIM(pds_url, '/') AS norm_url
@@ -775,6 +802,7 @@ function latestSnapshotCte(hideBsky: boolean) {
         r.id, r.pds_url, r.snapshot_date, r.active, r.deactivated, r.deleted,
         r.takendown, r.suspended, r.other, r.total_scanned, r.is_sampled,
         r.did_plc_count, r.did_web_count, r.is_partial, r.scanned_at, r.ip_address,
+        l.best_total_scanned, l.best_active,
         COALESCE(r.version, v.version)           AS version,
         r.invite_code_required, r.is_online,
         COALESCE(r.country,      g.country)      AS country,
@@ -788,6 +816,7 @@ function latestSnapshotCte(hideBsky: boolean) {
         COALESCE(r.as_number,    g.as_number)    AS as_number,
         CASE WHEN d.norm_url IS NOT NULL THEN 1 ELSE 0 END AS in_directory
       FROM pds_raw r
+      JOIN latest l ON RTRIM(r.pds_url, '/') = l.pds_url
       LEFT JOIN latest_geo g ON RTRIM(r.pds_url, '/') = g.norm_url
       LEFT JOIN latest_version v ON RTRIM(r.pds_url, '/') = v.norm_url
       LEFT JOIN dir_pds d ON RTRIM(r.pds_url, '/') = d.norm_url
@@ -856,6 +885,9 @@ export function getOverviewStats(hideBsky = false): OverviewStats {
   // Countries: distinct country codes across PDSes that ever had repos in any snapshot.
   // Uses latest_geo fallback so temporarily-offline PDSes still contribute their country.
   // Repo totals from pds_latest (current scan numbers).
+  // Repo counts: use best_total_scanned / best_active from pds_latest (already computed
+  // as MAX across all non-partial snapshots in latestSnapshotCte — no extra scan).
+  // Deduplicate by backend (IP), treating Cloudflare IPs as separate backends (CDN proxy).
   const repoStats = db.prepare(`
     ${latestSnapshotCte(hideBsky)},
     ever_had_repos AS (
@@ -864,6 +896,20 @@ export function getOverviewStats(hideBsky = false): OverviewStats {
       WHERE ${JUNK_PDS_FILTER} ${bskyFilter}
       GROUP BY RTRIM(pds_url, '/')
       HAVING MAX(total_scanned) >= 0
+    ),
+    backend_deduped AS (
+      SELECT
+        CASE
+          WHEN org LIKE '%Cloudflare%' THEN RTRIM(pds_url, '/')
+          ELSE COALESCE(ip_address, RTRIM(pds_url, '/'))
+        END AS backend,
+        MAX(best_total_scanned) AS total_scanned,
+        MAX(best_active)        AS active
+      FROM pds_latest
+      GROUP BY CASE
+        WHEN org LIKE '%Cloudflare%' THEN RTRIM(pds_url, '/')
+        ELSE COALESCE(ip_address, RTRIM(pds_url, '/'))
+      END
     )
     SELECT
       (SELECT COUNT(DISTINCT country_code)
@@ -872,7 +918,7 @@ export function getOverviewStats(hideBsky = false): OverviewStats {
        WHERE country_code IS NOT NULL) as countries,
       COALESCE(SUM(total_scanned), 0) as totalUsers,
       COALESCE(SUM(active), 0) as activeUsers
-    FROM pds_latest
+    FROM backend_deduped
   `).get() as { countries: number; totalUsers: number; activeUsers: number };
 
   return {

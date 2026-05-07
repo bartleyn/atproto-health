@@ -1668,7 +1668,7 @@ function CreationWeeklyBarChart({ data, selectedPds, onPdsClick }: CreationWeekl
     <div className="overflow-x-auto">
     <div style={{ minWidth: 480 }}>
     <ResponsiveContainer width="100%" height={220}>
-      <BarChart data={chartData} margin={{ top: 4, right: 16, bottom: 0, left: 16 }} barCategoryGap="10%">
+      <BarChart data={chartData} margin={{ top: 4, right: 108, bottom: 0, left: 16 }} barCategoryGap="10%">
         <XAxis
           dataKey="period"
           tick={{ fill: "#6b7280", fontSize: 10 }}
@@ -1681,7 +1681,7 @@ function CreationWeeklyBarChart({ data, selectedPds, onPdsClick }: CreationWeekl
           tick={{ fill: "#6b7280", fontSize: 10 }}
           tickLine={false}
           axisLine={false}
-          width={48}
+          width={40}
           tickFormatter={(v: number) => v >= 1000 ? `${(v / 1000).toFixed(0)}k` : String(v)}
         />
         <Tooltip content={<CustomTooltip />} cursor={{ fill: "rgba(255,255,255,0.04)" }} />

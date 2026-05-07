@@ -35,8 +35,7 @@ export default async function LongevityPage() {
   const totalAccounts = cohortData.reduce((s, r) => s + r.count, 0);
   const cohortBuckets = cohortData.map(r => ({ name: r.cohort, value: r.count }));
 
-  // Summary stats — use unfiltered set so count/oldest/newest reflect all real PDSes
-  const indieOnly = pdsAgeDataAll;//.filter((r) => r.pds_url !== "bsky.network");
+  const indieOnly = pdsAgeDataAll;
   const oldestIndie = indieOnly[0];
   const newestIndie = indieOnly[indieOnly.length - 1];
   const medianIdx = Math.floor(indieOnly.length / 2);
@@ -88,7 +87,7 @@ export default async function LongevityPage() {
 
         <CollapsibleSection
           title="When Did PDSes Launch?"
-          subtitle="Each point is a PDS with 5+ active repos. X = first repo (proxy for launch). Y = total repos (log scale). Colored by launch era. Excludes pds.trump.com, junk PDSes, and migration-only PDSes (no native did:plc creations)."
+          subtitle="Each point is a PDS with 5+ active repos. X = first repo (proxy for launch). Y = total repos (log scale). Colored by launch era. Includes bsky.network shards for scale reference. Excludes pds.trump.com, junk PDSes, and migration-only PDSes (no native did:plc creations)."
           storageKey="longevity-age-scatter"
         >
           <ChartCard title="PDS Age vs. Size">
@@ -114,7 +113,7 @@ export default async function LongevityPage() {
 
         <CollapsibleSection
           title="Weekly Repo Creation By PDS"
-          subtitle="did:plc repo-backed accounts only (did:web excluded). Normalized to 100% — hover for actual counts. Top 10 PDSes by total volume."
+          subtitle="Counts from the AT Protocol PLC log — unique did:plc creations per PDS (did:web excluded). Does not double-count PDSes sharing a backend; does not include migrated-in accounts. Normalized to 100% — hover for actual counts. Top 10 PDSes by total volume."
           storageKey="longevity-creations"
         >
           {activeCreations.length === 0 ? (

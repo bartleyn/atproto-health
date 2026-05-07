@@ -1,7 +1,6 @@
-import { getDashboardData, getLatestFirehoseSample, type ConcentrationStats } from "@/lib/db/queries";
-import { SimpleBarChart, DonutChart, InfraSection } from "@/components/charts";
+import { getDashboardData, type ConcentrationStats } from "@/lib/db/queries";
+import { SimpleBarChart, InfraSection } from "@/components/charts";
 import { CollapsibleSection } from "@/components/collapsible-section";
-import type { GithubTopicStats } from "@/lib/db/queries";
 import { getPdsLangSummary, getTopLangs, getLastScanTime, getTopPdsByScan, getBskyShardCounts } from "@/lib/db/plc-queries";
 import type { PdsLangLocation, NamespaceLocation } from "@/components/world-map";
 import { getCollectionPdsData } from "@/lib/db/activity-queries";
@@ -27,10 +26,8 @@ export default async function Home({
     userDist,
     topPds,
     concentration,
-    firehose,
     locations,
     providerLocations,
-    githubStats,
   } = getDashboardData(hideBsky);
 
   // Join pds_lang_summary with providerLocations geo data by URL.
@@ -345,20 +342,6 @@ export default async function Home({
         </CollapsibleSection>
       )}
 
-      {/* Federation health */}
-      {firehose && (
-        <CollapsibleSection
-          title="Cross-PDS Interactions"
-          subtitle={`Measures how often interactions cross PDS boundaries · aggregated from ${firehose.sampleCount} firehose sample${firehose.sampleCount !== 1 ? "s" : ""} over the last ${firehose.windowDays} days`}
-          storageKey="home-federation"
-        >
-          <FederationSection sample={firehose} />
-        </CollapsibleSection>
-      )}
-
-      {/* GitHub ecosystem stats */}
-      
-
     </main>
   );
 }
@@ -377,71 +360,12 @@ function ConcentrationSection({
     <div className="mb-12">
       <p className="text-xs text-gray-500 mb-3">
         Repo counts from <code className="bg-gray-800 px-1 rounded">listRepos</code> pagination across {concentration.totalWithData.toLocaleString()} PDSes with data.
-        Active = repos marked active by their PDS.
-        Concentration = cumulative share of repos held by the top N PDSes (Bluesky shards counted as one).
+        Active = repos marked active by their PDS. Bluesky shards counted as one for concentration.
       </p>
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-3 gap-3">
         <StatCard label="Total Repos" value={totalRepos} />
         <StatCard label="Active Rate" value={activeRate} suffix="%" accent="cyan" />
-      </div>
-    </div>
-  );
-}
-
-function FederationSection({ sample }: { sample: NonNullable<ReturnType<typeof getLatestFirehoseSample>> }) {
-  const fed = sample.federation;
-  const trueFed = (fed["bsky-to-third"] ?? 0) + (fed["third-to-bsky"] ?? 0) + (fed["third-to-third"] ?? 0);
-  const trueFedRate = sample.resolvedInteractions > 0
-    ? ((trueFed / sample.resolvedInteractions) * 100).toFixed(1)
-    : "0";
-  const rawCrossRate = sample.resolvedInteractions > 0
-    ? ((sample.crossPds / sample.resolvedInteractions) * 100).toFixed(1)
-    : "0";
-
-  const fedData = [
-    { name: "Bluesky internal", value: fed["bsky-internal"] ?? 0 },
-    { name: "Bluesky → Independent", value: fed["bsky-to-third"] ?? 0 },
-    { name: "Independent → Bluesky", value: fed["third-to-bsky"] ?? 0 },
-    { name: "Independent → Independent", value: fed["third-to-third"] ?? 0 },
-    { name: "Same PDS", value: fed["same-pds"] ?? 0 },
-  ];
-
-  const byTypeTotalData = Object.entries(sample.byType).map(([type, stats]) => ({
-    name: type,
-    value: stats.total,
-  }));
-
-
-  return (
-    <div>
-      <p className="text-xs text-gray-500 mb-4">
-        {sample.totalEvents.toLocaleString()} events · {sample.eventsPerSecond} evt/s avg · {Math.round(sample.durationMs / 1000 / 60)} min sampled
-        {" · "}last sampled {new Date(sample.sampledAt + "Z").toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
-        {" · "}includes Fediverse bridge traffic (e.g. Bridgy Fed)
-      </p>
-
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
-        <StatCard label="Cross-PDS Rate (excl. Bluesky internal)" value={Number(trueFedRate)} suffix="%" accent="cyan" />
-        <StatCard label="Cross-PDS Rate (all)" value={Number(rawCrossRate)} suffix="%" />
-        <StatCard label="Interactions Sampled" value={sample.resolvedInteractions} />
-        <StatCard label="Cross-PDS (independent PDS involved)" value={trueFed} accent="green" />
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-        <ChartCard
-          title="Interaction Flow"
-          subtitle="Where interactions cross boundaries"
-        >
-          <DonutChart data={fedData} />
-        </ChartCard>
-
-        <ChartCard
-          title="Interaction Distribution by Type"
-          subtitle="Total resolved interactions by type"
-        >
-          <SimpleBarChart data={byTypeTotalData} color="#6366f1" layout="horizontal" />
-        </ChartCard>
-
+        <StatCard label="On bsky.network" value={Math.round(concentration.top1Pct * 10) / 10} suffix="% of repos" accent="purple" />
       </div>
     </div>
   );
@@ -473,85 +397,6 @@ function StatCard({
         {value == null || isNaN(value) ? "—" : value.toLocaleString()}{suffix && <span className="text-lg">{suffix}</span>}
       </div>
       <div className="text-xs text-gray-400 mt-1">{label}</div>
-    </div>
-  );
-}
-
-function GithubSection({ stats }: { stats: GithubTopicStats[] }) {
-  const collectedAt = stats[0]?.collectedAt;
-
-  // Deduplicate top repos across all queries by fullName, keep highest star count
-  const repoMap = new Map<string, GithubTopicStats["topRepos"][number]>();
-  for (const s of stats) {
-    for (const repo of s.topRepos) {
-      const existing = repoMap.get(repo.fullName);
-      if (!existing || repo.stars > existing.stars) {
-        repoMap.set(repo.fullName, repo);
-      }
-    }
-  }
-  const topRepos = [...repoMap.values()].sort((a, b) => b.stars - a.stars).slice(0, 15);
-
-  return (
-    <div className="mb-12">
-      <div className="flex items-baseline justify-between mb-1">
-        <h2 className="text-lg font-semibold">GitHub Ecosystem</h2>
-        {collectedAt && (
-          <span className="text-xs text-gray-500">
-            {new Date(collectedAt + "Z").toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
-          </span>
-        )}
-      </div>
-      <p className="text-sm text-gray-500 mb-4">
-        Public repositories tagged with ATProto-related topics
-      </p>
-
-      <div className="grid grid-cols-3 gap-3 mb-6">
-        {stats.map((s) => (
-          <div key={s.query} className="rounded-lg border border-gray-800 bg-gray-900 p-4">
-            <div className="text-2xl font-semibold tabular-nums text-gray-100">
-              {s.repoCount.toLocaleString()}
-            </div>
-            <div className="text-xs text-gray-400 mt-1 font-mono">{s.query}</div>
-          </div>
-        ))}
-      </div>
-
-      <div className="overflow-x-auto rounded-lg border border-gray-800">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-gray-800 text-gray-400 text-left">
-              <th className="px-4 py-3 font-medium">#</th>
-              <th className="px-4 py-3 font-medium">Repository</th>
-              <th className="px-4 py-3 font-medium">Description</th>
-              <th className="px-4 py-3 font-medium text-right">Stars</th>
-            </tr>
-          </thead>
-          <tbody>
-            {topRepos.map((repo, i) => (
-              <tr key={repo.fullName} className="border-b border-gray-800/50 hover:bg-gray-900/50">
-                <td className="px-4 py-2.5 text-gray-500 tabular-nums">{i + 1}</td>
-                <td className="px-4 py-2.5 font-mono text-xs">
-                  <a
-                    href={repo.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-blue-400 hover:text-blue-300"
-                  >
-                    {repo.fullName}
-                  </a>
-                </td>
-                <td className="px-4 py-2.5 text-gray-400 text-xs max-w-sm truncate">
-                  {repo.description ?? "—"}
-                </td>
-                <td className="px-4 py-2.5 text-right tabular-nums">
-                  ★ {repo.stars.toLocaleString()}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
     </div>
   );
 }

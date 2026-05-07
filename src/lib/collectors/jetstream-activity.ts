@@ -94,6 +94,7 @@ const THIRD_PARTY_PREFIXES = [
   "blue.trilinesat.*",                // Trilinesat
   "app.offprint.*",                   // Offprint
   "store.lexicon.*",                  // ATStore
+  "actor.rpg.*",                      // RPG Actor
 ];
 
 const WANTED_COLLECTIONS = [

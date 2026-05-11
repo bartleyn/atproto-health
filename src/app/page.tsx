@@ -360,12 +360,12 @@ function ConcentrationSection({
     <div className="mb-12">
       <p className="text-xs text-gray-500 mb-3">
         Repo counts from <code className="bg-gray-800 px-1 rounded">listRepos</code> pagination across {concentration.totalWithData.toLocaleString()} PDSes with data.
-        Active = repos marked active by their PDS. Bluesky shards counted as one for concentration.
+        Active = repos marked active by their PDS. Bluesky concentration = % of repos currently on Bluesky-operated infrastructure.
       </p>
       <div className="grid grid-cols-3 gap-3">
         <StatCard label="Total Repos" value={totalRepos} />
         <StatCard label="Active Rate" value={activeRate} suffix="%" accent="cyan" />
-        <StatCard label="On bsky.network" value={Math.round(concentration.top1Pct * 10) / 10} suffix="% of repos" accent="purple" />
+        <StatCard label="On bsky.network" value={concentration.top1Pct} suffix="% of repos" accent="purple" />
       </div>
     </div>
   );

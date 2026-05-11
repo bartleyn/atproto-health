@@ -1063,35 +1063,32 @@ export interface ConcentrationStats {
 
 export function getConcentrationStats(hideBsky = false): ConcentrationStats {
   const db = getPlcDb();
+
+  // top1Pct: did_in_repo-based bsky concentration from plc_stats_cache.
+  // Matches the migrations page figure — uses count of active DIDs as denominator,
+  // not SUM(total_scanned) which inflates due to deleted/deactivated repos.
+  const statsCache = db.prepare(
+    `SELECT bsky_concentration_pct FROM plc_stats_cache WHERE id = 1`
+  ).get() as { bsky_concentration_pct: number } | undefined;
+  const top1Pct = hideBsky ? 0 : (statsCache?.bsky_concentration_pct ?? 0);
+
   const rows = db.prepare(`
     ${latestSnapshotCte(hideBsky)}
-    SELECT
-      CASE
-        WHEN pds_url LIKE '%host.bsky.network%' OR pds_url LIKE '%bsky.social%'
-        THEN 'https://bsky.social'
-        ELSE pds_url
-      END as url,
-      SUM(total_scanned) as repos
-    FROM pds_latest
-    WHERE total_scanned > 0
-    GROUP BY 1
-    ORDER BY repos DESC
-  `).all() as { url: string; repos: number }[];
+    SELECT SUM(total_scanned) as repos FROM pds_latest WHERE total_scanned > 0
+  `).get() as { repos: number };
 
-  const total = rows.reduce((s, r) => s + r.repos, 0);
-  if (total === 0) return { top1Pct: 0, top5Pct: 0, top10Pct: 0, totalWithData: 0 };
+  const totalWithData = (db.prepare(`
+    SELECT COUNT(*) as n FROM (
+      SELECT RTRIM(pds_url, '/') AS pds_url
+      FROM pds_repo_status_snapshots
+      WHERE ${JUNK_PDS_FILTER}
+      GROUP BY RTRIM(pds_url, '/')
+      HAVING MAX(total_scanned) > 0
+    )
+  `).get() as { n: number }).n;
 
-  let cum = 0, top1Pct = 0, top5Pct = 0, top10Pct = 0;
-  for (let i = 0; i < rows.length; i++) {
-    cum += rows[i].repos;
-    const pct = (cum / total) * 100;
-    if (i === 0) top1Pct = pct;
-    if (i === 4) top5Pct = pct;
-    if (i === 9) top10Pct = pct;
-  }
-  if (rows.length < 5)  top5Pct  = 100;
-  if (rows.length < 10) top10Pct = 100;
-  return { top1Pct, top5Pct, top10Pct, totalWithData: rows.length };
+  if (!rows.repos) return { top1Pct, top5Pct: 0, top10Pct: 0, totalWithData };
+  return { top1Pct, top5Pct: 0, top10Pct: 0, totalWithData };
 }
 
 export interface CityCluster {

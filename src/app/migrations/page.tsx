@@ -61,7 +61,7 @@ export default async function MigrationsPage() {
             <StatCard
               label="On bsky.network"
               value={`${stats.bsky_concentration_pct}%`}
-              sub="of accounts are on Bluesky-operated infrastructure"
+              sub="of repos are on Bluesky-operated infrastructure"
             />
             <StatCard
               label="Total repos"

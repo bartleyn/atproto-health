@@ -235,84 +235,33 @@ async function resolveAndStoreDidWebs() {
   }
 }
 
-function flush() {
-  if (activityBuffer.size === 0 && deleteBuffer.size === 0 && starterpackBuffer.size === 0 && langBuffer.size === 0 && collectionBuffer.size === 0 && feedGenBuffer.size === 0 && feedGenDeleteBuffer.size === 0 && feedLikeBuffer.size === 0) return;
-
-  const db = getActivityDb();
-
-  // Check collection_activity row count and pause if over the limit
+// Snapshot all in-memory buffers and clear them. Fast and synchronous — call this
+// at the top of any flush so new incoming events accumulate in fresh buffers while
+// we write the snapshot to SQLite.
+function snapshotBuffers() {
+  // Check collection_activity row count and pause if over the limit (fast COUNT query)
   if (!collectionTrackingPaused && collectionBuffer.size > 0) {
+    const db = getActivityDb();
     const { n } = db.prepare(`SELECT COUNT(*) AS n FROM collection_activity`).get() as { n: number };
     if (n >= MAX_COLLECTION_ROWS) {
-      console.warn(`[activity] collection_activity has ${n.toLocaleString()} rows (limit ${MAX_COLLECTION_ROWS.toLocaleString()}). Pausing collection tracking. Restart with --no-collection-tracking to disable permanently.`);
+      console.warn(`[activity] collection_activity has ${n.toLocaleString()} rows (limit ${MAX_COLLECTION_ROWS.toLocaleString()}). Pausing collection tracking.`);
       collectionTrackingPaused = true;
       collectionBuffer.clear();
     }
   }
 
-  const upsertActivity = db.prepare(`
-    INSERT INTO did_activity_daily (did, date, activity_types) VALUES (?, ?, ?)
-    ON CONFLICT (did, date) DO UPDATE SET activity_types = activity_types | excluded.activity_types
-  `);
-  const upsertDelete = db.prepare(`
-    INSERT INTO delete_events_daily (date, event_type, count) VALUES (?, ?, ?)
-    ON CONFLICT (date, event_type) DO UPDATE SET count = count + excluded.count
-  `);
-  const upsertStarterpack = db.prepare(`
-    INSERT INTO starterpack_joins_daily (starterpack_uri, date, count) VALUES (?, ?, ?)
-    ON CONFLICT (starterpack_uri, date) DO UPDATE SET count = count + excluded.count
-  `);
-  const upsertLang = db.prepare(`
-    INSERT INTO did_langs (did, lang, post_count, last_seen) VALUES (?, ?, ?, datetime('now'))
-    ON CONFLICT (did, lang) DO UPDATE SET
-      post_count = post_count + excluded.post_count,
-      last_seen  = excluded.last_seen
-  `);
-  const upsertLangStats = db.prepare(`
-    INSERT INTO lang_stats (date, total_posts, tagged_posts, updated_at) VALUES (?, ?, ?, datetime('now'))
-    ON CONFLICT (date) DO UPDATE SET
-      total_posts  = total_posts  + excluded.total_posts,
-      tagged_posts = tagged_posts + excluded.tagged_posts,
-      updated_at   = excluded.updated_at
-  `);
-  const upsertCollection = db.prepare(`
-    INSERT INTO collection_activity (collection, did, date, event_count)
-    VALUES (?, ?, ?, ?)
-    ON CONFLICT (collection, did, date) DO UPDATE SET event_count = event_count + excluded.event_count
-  `);
-  const saveCursor = db.prepare(`
-    INSERT INTO jetstream_cursor (id, cursor, updated_at)
-    VALUES (1, ?, datetime('now'))
-    ON CONFLICT (id) DO UPDATE SET cursor = excluded.cursor, updated_at = excluded.updated_at
-  `);
-  const upsertFeedGen = db.prepare(`
-    INSERT INTO feed_generators (uri, creator_did, display_name, description, first_seen)
-    VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT (uri) DO UPDATE SET
-      display_name = coalesce(excluded.display_name, display_name),
-      description  = coalesce(excluded.description,  description),
-      deleted_at   = NULL
-  `);
-  const markFeedGenDeleted = db.prepare(`
-    UPDATE feed_generators SET deleted_at = datetime('now') WHERE uri = ?
-  `);
-  const upsertFeedLike = db.prepare(`
-    INSERT INTO feed_generator_likes_daily (feed_uri, date, likes)
-    VALUES (?, ?, ?)
-    ON CONFLICT (feed_uri, date) DO UPDATE SET likes = likes + excluded.likes
-  `);
-
-  const activityRows    = [...activityBuffer.entries()];
-  const deleteRows      = [...deleteBuffer.entries()];
-  const starterpackRows = [...starterpackBuffer.entries()];
-  const langRows        = [...langBuffer.entries()];
-  const langStatsRows   = [...langStatsBuffer.entries()];
-  const collectionRows  = collectionTrackingPaused ? [] : [...collectionBuffer.entries()];
-  const feedGenRows     = [...feedGenBuffer.entries()];
-  const feedGenDeletes  = [...feedGenDeleteBuffer];
-  const feedLikeRows    = [...feedLikeBuffer.entries()];
-  const postsThisFlush  = langStatsRows.reduce((s, [, v]) => s + v.total, 0);
-  const taggedThisFlush = langStatsRows.reduce((s, [, v]) => s + v.tagged, 0);
+  const snapshot = {
+    activityRows:    [...activityBuffer.entries()],
+    deleteRows:      [...deleteBuffer.entries()],
+    starterpackRows: [...starterpackBuffer.entries()],
+    langRows:        [...langBuffer.entries()],
+    langStatsRows:   [...langStatsBuffer.entries()],
+    collectionRows:  collectionTrackingPaused ? [] : [...collectionBuffer.entries()],
+    feedGenRows:     [...feedGenBuffer.entries()],
+    feedGenDeletes:  [...feedGenDeleteBuffer],
+    feedLikeRows:    [...feedLikeBuffer.entries()],
+    cursorToSave:    lastCursor,
+  };
   activityBuffer.clear();
   deleteBuffer.clear();
   starterpackBuffer.clear();
@@ -322,48 +271,13 @@ function flush() {
   feedGenBuffer.clear();
   feedGenDeleteBuffer.clear();
   feedLikeBuffer.clear();
+  return snapshot;
+}
 
-  db.transaction(() => {
-    for (const [entry, bits] of activityRows) {
-      const pipe = entry.indexOf("|");
-      upsertActivity.run(entry.slice(0, pipe), entry.slice(pipe + 1), bits);
-    }
-    for (const [key, count] of deleteRows) {
-      const pipe = key.indexOf("|");
-      upsertDelete.run(key.slice(0, pipe), key.slice(pipe + 1), count);
-    }
-    for (const [key, count] of starterpackRows) {
-      const pipe = key.indexOf("|");
-      upsertStarterpack.run(key.slice(0, pipe), key.slice(pipe + 1), count);
-    }
-    for (const [key, count] of langRows) {
-      const pipe = key.indexOf("|");
-      upsertLang.run(key.slice(0, pipe), key.slice(pipe + 1), count);
-    }
-    for (const [key, count] of collectionRows) {
-      const [collection, did, date] = key.split("|");
-      upsertCollection.run(collection, did, date, count);
-    }
-    for (const [uri, meta] of feedGenRows) {
-      upsertFeedGen.run(uri, meta.creatorDid, meta.displayName, meta.description, meta.firstSeen);
-    }
-    for (const uri of feedGenDeletes) {
-      markFeedGenDeleted.run(uri);
-    }
-    for (const [key, count] of feedLikeRows) {
-      const pipe = key.lastIndexOf("|");
-      upsertFeedLike.run(key.slice(0, pipe), key.slice(pipe + 1), count);
-    }
-    for (const [date, { total, tagged }] of langStatsRows) {
-      if (total > 0) upsertLangStats.run(date, total, tagged);
-    }
-    if (lastCursor > 0) saveCursor.run(lastCursor);
-  })();
-
-  // Truncate the WAL after every flush — auto-checkpoint only copies frames (PASSIVE mode)
-  // and never shrinks the WAL file. TRUNCATE zeroes it while we're the sole connection.
-  db.pragma("wal_checkpoint(TRUNCATE)");
-
+function logFlush(snapshot: ReturnType<typeof snapshotBuffers>) {
+  const { activityRows, deleteRows, starterpackRows, langRows, langStatsRows, collectionRows, feedGenRows, feedLikeRows } = snapshot;
+  const postsThisFlush  = langStatsRows.reduce((s, [, v]) => s + v.total, 0);
+  const taggedThisFlush = langStatsRows.reduce((s, [, v]) => s + v.tagged, 0);
   totalActivityFlushed    += activityRows.length;
   totalDeletesFlushed     += deleteRows.reduce((s, [, c]) => s + c, 0);
   totalStarterpackFlushed += starterpackRows.reduce((s, [, c]) => s + c, 0);
@@ -376,8 +290,193 @@ function flush() {
   console.log(
     `[activity] Flushed activity=${activityRows.length.toLocaleString()} deletes=${deleteRows.length} types starterpack=${starterpackRows.length} uris lang=${langRows.length.toLocaleString()} did×lang (${tagPct}% tagged)${collectionNote} feeds=${feedGenRows.length} feed_likes=${feedLikeRows.reduce((s, [, c]) => s + c, 0)} | ` +
     `totals: activity=${totalActivityFlushed.toLocaleString()} deletes=${totalDeletesFlushed.toLocaleString()} starterpack=${totalStarterpackFlushed.toLocaleString()} lang_dids=${totalLangDIDsFlushed.toLocaleString()} collections=${totalCollectionsFlushed.toLocaleString()} feed_gens=${totalFeedGensFlushed.toLocaleString()} feed_likes=${totalFeedLikesFlushed.toLocaleString()} | ` +
-    `events=${totalEvents.toLocaleString()} | cursor=${lastCursor}`
+    `events=${totalEvents.toLocaleString()} | cursor=${snapshot.cursorToSave}`
   );
+}
+
+function prepareStatements(db: ReturnType<typeof getActivityDb>) {
+  return {
+    upsertActivity: db.prepare(`
+      INSERT INTO did_activity_daily (did, date, activity_types) VALUES (?, ?, ?)
+      ON CONFLICT (did, date) DO UPDATE SET activity_types = activity_types | excluded.activity_types
+    `),
+    upsertDelete: db.prepare(`
+      INSERT INTO delete_events_daily (date, event_type, count) VALUES (?, ?, ?)
+      ON CONFLICT (date, event_type) DO UPDATE SET count = count + excluded.count
+    `),
+    upsertStarterpack: db.prepare(`
+      INSERT INTO starterpack_joins_daily (starterpack_uri, date, count) VALUES (?, ?, ?)
+      ON CONFLICT (starterpack_uri, date) DO UPDATE SET count = count + excluded.count
+    `),
+    upsertLang: db.prepare(`
+      INSERT INTO did_langs (did, lang, post_count, last_seen) VALUES (?, ?, ?, datetime('now'))
+      ON CONFLICT (did, lang) DO UPDATE SET
+        post_count = post_count + excluded.post_count,
+        last_seen  = excluded.last_seen
+    `),
+    upsertLangStats: db.prepare(`
+      INSERT INTO lang_stats (date, total_posts, tagged_posts, updated_at) VALUES (?, ?, ?, datetime('now'))
+      ON CONFLICT (date) DO UPDATE SET
+        total_posts  = total_posts  + excluded.total_posts,
+        tagged_posts = tagged_posts + excluded.tagged_posts,
+        updated_at   = excluded.updated_at
+    `),
+    upsertCollection: db.prepare(`
+      INSERT INTO collection_activity (collection, did, date, event_count)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT (collection, did, date) DO UPDATE SET event_count = event_count + excluded.event_count
+    `),
+    saveCursor: db.prepare(`
+      INSERT INTO jetstream_cursor (id, cursor, updated_at)
+      VALUES (1, ?, datetime('now'))
+      ON CONFLICT (id) DO UPDATE SET cursor = excluded.cursor, updated_at = excluded.updated_at
+    `),
+    upsertFeedGen: db.prepare(`
+      INSERT INTO feed_generators (uri, creator_did, display_name, description, first_seen)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT (uri) DO UPDATE SET
+        display_name = coalesce(excluded.display_name, display_name),
+        description  = coalesce(excluded.description,  description),
+        deleted_at   = NULL
+    `),
+    markFeedGenDeleted: db.prepare(`
+      UPDATE feed_generators SET deleted_at = datetime('now') WHERE uri = ?
+    `),
+    upsertFeedLike: db.prepare(`
+      INSERT INTO feed_generator_likes_daily (feed_uri, date, likes)
+      VALUES (?, ?, ?)
+      ON CONFLICT (feed_uri, date) DO UPDATE SET likes = likes + excluded.likes
+    `),
+  };
+}
+
+// Async flush: snapshots buffers immediately (so new events accumulate while we write),
+// then writes to SQLite in chunks of ACTIVITY_CHUNK_SIZE, yielding to the event loop
+// between chunks. This prevents the TCP receive buffer from filling up during large
+// flushes on a grown did_activity_daily table.
+const ACTIVITY_CHUNK_SIZE = 2_000;
+
+async function flush() {
+  if (activityBuffer.size === 0 && deleteBuffer.size === 0 && starterpackBuffer.size === 0 && langBuffer.size === 0 && collectionBuffer.size === 0 && feedGenBuffer.size === 0 && feedGenDeleteBuffer.size === 0 && feedLikeBuffer.size === 0) return;
+
+  const snapshot = snapshotBuffers();
+  const { activityRows, deleteRows, starterpackRows, langRows, langStatsRows, collectionRows, feedGenRows, feedGenDeletes, feedLikeRows, cursorToSave } = snapshot;
+
+  const db = getActivityDb();
+  const stmts = prepareStatements(db);
+
+  // Write activity in chunks, yielding between each so the event loop stays responsive.
+  for (let i = 0; i < activityRows.length; i += ACTIVITY_CHUNK_SIZE) {
+    db.transaction(() => {
+      for (const [entry, bits] of activityRows.slice(i, i + ACTIVITY_CHUNK_SIZE)) {
+        const pipe = entry.indexOf("|");
+        stmts.upsertActivity.run(entry.slice(0, pipe), entry.slice(pipe + 1), bits);
+      }
+    })();
+    if (i + ACTIVITY_CHUNK_SIZE < activityRows.length) {
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
+  }
+
+  // Write lang rows in chunks too — also grows large.
+  for (let i = 0; i < langRows.length; i += ACTIVITY_CHUNK_SIZE) {
+    db.transaction(() => {
+      for (const [key, count] of langRows.slice(i, i + ACTIVITY_CHUNK_SIZE)) {
+        const pipe = key.indexOf("|");
+        stmts.upsertLang.run(key.slice(0, pipe), key.slice(pipe + 1), count);
+      }
+    })();
+    if (i + ACTIVITY_CHUNK_SIZE < langRows.length) {
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
+  }
+
+  // All remaining tables are small — write them in one transaction with the cursor save.
+  db.transaction(() => {
+    for (const [key, count] of deleteRows) {
+      const pipe = key.indexOf("|");
+      stmts.upsertDelete.run(key.slice(0, pipe), key.slice(pipe + 1), count);
+    }
+    for (const [key, count] of starterpackRows) {
+      const pipe = key.indexOf("|");
+      stmts.upsertStarterpack.run(key.slice(0, pipe), key.slice(pipe + 1), count);
+    }
+    for (const [key, count] of collectionRows) {
+      const [collection, did, date] = key.split("|");
+      stmts.upsertCollection.run(collection, did, date, count);
+    }
+    for (const [uri, meta] of feedGenRows) {
+      stmts.upsertFeedGen.run(uri, meta.creatorDid, meta.displayName, meta.description, meta.firstSeen);
+    }
+    for (const uri of feedGenDeletes) {
+      stmts.markFeedGenDeleted.run(uri);
+    }
+    for (const [key, count] of feedLikeRows) {
+      const pipe = key.lastIndexOf("|");
+      stmts.upsertFeedLike.run(key.slice(0, pipe), key.slice(pipe + 1), count);
+    }
+    for (const [date, { total, tagged }] of langStatsRows) {
+      if (total > 0) stmts.upsertLangStats.run(date, total, tagged);
+    }
+    if (cursorToSave > 0) stmts.saveCursor.run(cursorToSave);
+  })();
+
+  // Truncate the WAL after every flush — auto-checkpoint only copies frames (PASSIVE mode)
+  // and never shrinks the WAL file. TRUNCATE zeroes it while we're the sole connection.
+  db.pragma("wal_checkpoint(TRUNCATE)");
+
+  logFlush(snapshot);
+}
+
+// Synchronous flush for shutdown — can't await in signal handlers.
+function flushSync() {
+  if (activityBuffer.size === 0 && deleteBuffer.size === 0 && starterpackBuffer.size === 0 && langBuffer.size === 0 && collectionBuffer.size === 0 && feedGenBuffer.size === 0 && feedGenDeleteBuffer.size === 0 && feedLikeBuffer.size === 0) return;
+
+  const snapshot = snapshotBuffers();
+  const { activityRows, deleteRows, starterpackRows, langRows, langStatsRows, collectionRows, feedGenRows, feedGenDeletes, feedLikeRows, cursorToSave } = snapshot;
+
+  const db = getActivityDb();
+  const stmts = prepareStatements(db);
+
+  db.transaction(() => {
+    for (const [entry, bits] of activityRows) {
+      const pipe = entry.indexOf("|");
+      stmts.upsertActivity.run(entry.slice(0, pipe), entry.slice(pipe + 1), bits);
+    }
+    for (const [key, count] of deleteRows) {
+      const pipe = key.indexOf("|");
+      stmts.upsertDelete.run(key.slice(0, pipe), key.slice(pipe + 1), count);
+    }
+    for (const [key, count] of starterpackRows) {
+      const pipe = key.indexOf("|");
+      stmts.upsertStarterpack.run(key.slice(0, pipe), key.slice(pipe + 1), count);
+    }
+    for (const [key, count] of langRows) {
+      const pipe = key.indexOf("|");
+      stmts.upsertLang.run(key.slice(0, pipe), key.slice(pipe + 1), count);
+    }
+    for (const [key, count] of collectionRows) {
+      const [collection, did, date] = key.split("|");
+      stmts.upsertCollection.run(collection, did, date, count);
+    }
+    for (const [uri, meta] of feedGenRows) {
+      stmts.upsertFeedGen.run(uri, meta.creatorDid, meta.displayName, meta.description, meta.firstSeen);
+    }
+    for (const uri of feedGenDeletes) {
+      stmts.markFeedGenDeleted.run(uri);
+    }
+    for (const [key, count] of feedLikeRows) {
+      const pipe = key.lastIndexOf("|");
+      stmts.upsertFeedLike.run(key.slice(0, pipe), key.slice(pipe + 1), count);
+    }
+    for (const [date, { total, tagged }] of langStatsRows) {
+      if (total > 0) stmts.upsertLangStats.run(date, total, tagged);
+    }
+    if (cursorToSave > 0) stmts.saveCursor.run(cursorToSave);
+  })();
+
+  db.pragma("wal_checkpoint(TRUNCATE)");
+  logFlush(snapshot);
 }
 
 function pruneOldRows() {
@@ -562,7 +661,7 @@ function connect() {
 
   ws.on("close", (code, reason) => {
     cleanup();
-    flush();
+    flushSync();
     relayIdx++;
     const next = JETSTREAM_RELAYS[relayIdx % JETSTREAM_RELAYS.length];
     const why = code !== 1000 ? ` (code ${code}${reason?.length ? `: ${reason}` : ""})` : "";
@@ -582,19 +681,21 @@ async function main() {
     db.prepare(`DELETE FROM starterpack_joins_daily WHERE date >= ?`).run(backfillDate);
     db.prepare(`DELETE FROM feed_generator_likes_daily WHERE date >= ?`).run(backfillDate);
     db.prepare(`DELETE FROM lang_stats WHERE date >= ?`).run(backfillDate);
-    db.prepare(`DELETE FROM collection_activity WHERE date >= ?`).run(backfillDate);
+    // collection_activity uses (collection, did, date) PK — replaying events only inflates
+    // event_count, not unique DID counts. No delete needed; backfill upserts safely.
   }
 
   setInterval(() => {
-    flush();
-    pruneOldRows();
-    resolveAndStoreDidWebs().catch(err => console.error("[activity] did:web resolution error:", err));
+    flush()
+      .then(() => pruneOldRows())
+      .then(() => resolveAndStoreDidWebs())
+      .catch(err => console.error("[activity] flush error:", err));
   }, FLUSH_INTERVAL_MS);
 
   for (const sig of ["SIGINT", "SIGTERM"]) {
     process.on(sig, () => {
       console.log(`\n[activity] ${sig} received, flushing...`);
-      flush();
+      flushSync();
       process.exit(0);
     });
   }

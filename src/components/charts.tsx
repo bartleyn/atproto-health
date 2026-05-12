@@ -626,7 +626,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
             hasBskyShards = true;
           } else {
             const key = normUrl(p.url);
-            result.set(key, { url: p.url, country: p.country, count: topMap.get(key)?.repoCount ?? null });
+            result.set(key, { url: p.url, country: p.country, count: topMap.get(key)?.activeCount ?? null });
           }
         }
         if (hasBskyShards) {
@@ -634,7 +634,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
         }
         all = [...result.values()].sort((a, b) => (b.count ?? 0) - (a.count ?? 0)).slice(0, 15);
       } else {
-        all = topPdsList.slice(0, 10).map(p => ({ url: p.url, country: p.country, count: p.repoCount }));
+        all = topPdsList.slice(0, 10).map(p => ({ url: p.url, country: p.country, count: p.activeCount }));
       }
       const visible = all.filter(r => r.count == null || r.count >= SMALL_REPO_THRESHOLD);
       const hidden = all.filter(r => r.count != null && r.count < SMALL_REPO_THRESHOLD);
@@ -666,10 +666,10 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
   const tableLabel = insetTab === "lang"
     ? { title: "Top PDSes by recent users posting on bsky.app with a tagged language", col: "Users" }
     : insetTab === "namespace"
-    ? { title: "Top PDSes by recent users using a non-bsky.app lexicon", col: "Users" }
+    ? { title: "Top PDSes by recent users using a non-app.bsky lexicon namespace", col: "Users" }
     : selectedProvider
-    ? { title: `Top ${selectedProvider} PDSes`, col: "Total repos" }
-    : { title: "Top PDSes by total repos", col: "Total repos" };
+    ? { title: `Top ${selectedProvider} PDSes`, col: "Active repos" }
+    : { title: "Top PDSes by active repos", col: "Active repos" };
 
   const clearLabel = selectedProvider
     ? `${mappedCount} of ${totalCount} ${selectedProvider} PDSes mapped · clear`
@@ -723,7 +723,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
         />
 
         {/* Inset panel — visible on md+ only; hidden on mobile */}
-        <div className="hidden md:block absolute bottom-3 left-3 w-52 bg-gray-950/90 border border-gray-700 rounded-lg p-3">
+        <div className="hidden md:block absolute bottom-3 left-3 w-60 bg-gray-950/90 border border-gray-700 rounded-lg p-3">
           {/* Tab toggle */}
           {(hasLangData || hasNamespaceData) && (
             <div className="flex gap-1 mb-2">
@@ -746,7 +746,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
                   onClick={() => { setInsetTab("namespace"); setSelectedProvider(null); setSelectedLang(null); }}
                   className={`flex-1 text-xs py-0.5 rounded transition-colors ${insetTab === "namespace" ? "bg-gray-700 text-white" : "text-gray-500 hover:text-gray-300"}`}
                 >
-                  Lexicons
+                  Namespaces
                 </button>
               )}
             </div>
@@ -901,7 +901,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
           {insetTab === "namespace" && hasNamespaceData && (
             <>
               <div className="flex items-center justify-between mb-0.5">
-                <p className="text-xs font-medium text-gray-300">Lexicons</p>
+                <p className="text-xs font-medium text-gray-300">Namespaces</p>
               </div>
               <p className="text-xs text-gray-600 mb-2"># = recent unique users (jetstream, no backfill) · click to highlight</p>
               {(() => {
@@ -954,7 +954,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
                                 : i < 12 ? COLORS[i % COLORS.length] : "#6366f1",
                             }}
                           />
-                          <span className={`text-xs font-mono truncate ${selectedNamespace === row.ns ? "text-white font-medium" : "text-gray-400"}`}>
+                          <span className={`text-xs font-mono truncate min-w-0 ${selectedNamespace === row.ns ? "text-white font-medium" : "text-gray-400"}`}>
                             {row.ns}
                           </span>
                           <span className="text-xs text-gray-600 ml-auto flex-shrink-0 pl-1">{row.total_dids.toLocaleString()}</span>
@@ -969,7 +969,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
         </div>
       </div>
 
-      {/* Provider/Language/Lexicon filter — mobile only (stacked below map) */}
+      {/* Provider/Language/Namespace filter — mobile only (stacked below map) */}
       <div className="block md:hidden mt-4 pt-4 border-t border-gray-800">
         <div className="flex gap-1 mb-3">
           <button
@@ -991,7 +991,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
               onClick={() => { setInsetTab("namespace"); setSelectedProvider(null); setSelectedLang(null); }}
               className={`flex-1 text-xs py-1 rounded transition-colors ${insetTab === "namespace" ? "bg-gray-700 text-white" : "text-gray-500 hover:text-gray-300"}`}
             >
-              Lexicons
+              Namespaces
             </button>
           )}
         </div>
@@ -1063,7 +1063,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
 
         {insetTab === "namespace" && hasNamespaceData && (
           <>
-            <p className="text-xs font-medium text-gray-300 mb-1">Lexicons</p>
+            <p className="text-xs font-medium text-gray-300 mb-1">Namespaces</p>
             <p className="text-xs text-gray-500 mb-3"># = recent unique users · click to highlight</p>
             <DonutChart
               data={activeTopNamespaces.slice(0, 12).map(r => ({ name: r.ns, value: r.total_dids }))}
@@ -1184,12 +1184,12 @@ function PdsRankTable({ rows, traitLabel, mode }: {
   return (
     <div className="mt-6">
       <h3 className="text-sm font-semibold mb-0.5">
-        PDSes by &ldquo;{traitLabel}&rdquo; {mode === "lang" ? "language share" : "lexicon users"}
+        PDSes by &ldquo;{traitLabel}&rdquo; {mode === "lang" ? "language share" : "namespace users"}
       </h3>
       <p className="text-xs text-gray-500 mb-3">
         {mode === "lang"
           ? "Ranked by proportion of active speakers · composition bar shows top-5 language breakdown"
-          : "Ranked by unique users · composition bar shows top-5 lexicon breakdown"}
+          : "Ranked by unique users · composition bar shows top-5 namespace breakdown"}
       </p>
       <div className="overflow-x-auto rounded-lg border border-gray-800">
         <table className="w-full text-xs">

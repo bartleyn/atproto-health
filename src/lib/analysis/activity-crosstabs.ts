@@ -292,12 +292,15 @@ const cohortActivationRate = activityDb.prepare(`
     -- Use plc_account_creations as denominator: continuously updated by PLC collector,
     -- so it includes accounts created since the last scan:pds-status run.
     -- did_in_repo would undercount new cohorts whose PDSes haven't been scanned yet.
+    -- Mirrors active_window_clean exclusions: did_repo_status + skywatch spam/impersonation.
     SELECT
       ${AGE_BUCKET} AS age_bucket,
       COUNT(*) AS total_repos
     FROM plc.plc_account_creations p
     LEFT JOIN plc.did_repo_status s ON p.did = s.did
+    LEFT JOIN plc.skywatch_labels sl ON p.did = sl.did AND sl.label IN ('spam', 'impersonation')
     WHERE s.did IS NULL
+      AND sl.did IS NULL
     GROUP BY age_bucket
   ),
   active_by_bucket AS (

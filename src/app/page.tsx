@@ -307,14 +307,14 @@ export default async function Home({
 
       {/* Top PDSes by users */}
       {resolvedTopPds.length > 0 && (
-        <CollapsibleSection title="Largest PDSes" subtitle="Ranked by total repos from most recent scan · Bluesky shards aggregated" storageKey="home-top-pds">
+        <CollapsibleSection title="Largest PDSes" subtitle="Ranked by active repos from most recent scan · Bluesky shards aggregated" storageKey="home-top-pds">
           <div className="overflow-x-auto rounded-lg border border-gray-800">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-gray-800 text-gray-400 text-left">
                   <th className="px-4 py-3 font-medium">#</th>
                   <th className="px-4 py-3 font-medium">PDS</th>
-                  <th className="px-4 py-3 font-medium text-right">Total Repos (active &amp; otherwise)</th>
+                  <th className="px-4 py-3 font-medium text-right">Active Repos</th>
                   <th className="px-4 py-3 font-medium">Country</th>
                 </tr>
               </thead>
@@ -329,7 +329,7 @@ export default async function Home({
                       {pds.url.replace(/^https?:\/\//, "").replace(/\/$/, "")}
                     </td>
                     <td className="px-4 py-2.5 text-right tabular-nums">
-                      {pds.repoCount.toLocaleString()}
+                      {(pds.activeCount ?? 0).toLocaleString()}
                     </td>
                     <td className="px-4 py-2.5 text-gray-400">
                       {pds.country ?? "—"}
@@ -359,12 +359,12 @@ function ConcentrationSection({
   return (
     <div className="mb-12">
       <p className="text-xs text-gray-500 mb-3">
-        Repo counts from <code className="bg-gray-800 px-1 rounded">listRepos</code> pagination across {concentration.totalWithData.toLocaleString()} PDSes with data.
+        Repo counts from <code className="bg-gray-800 px-1 rounded">listRepos</code> pagination across {concentration.totalWithData.toLocaleString()} PDSes — approximate, likely undercounting (PDSes that are offline or block enumeration are excluded).
         Active = repos marked active by their PDS. Bluesky concentration = % of repos currently on Bluesky-operated infrastructure.
       </p>
       <div className="grid grid-cols-3 gap-3">
-        <StatCard label="Total Repos" value={totalRepos} />
-        <StatCard label="Active Rate" value={activeRate} suffix="%" accent="cyan" />
+        <StatCard label="Total Repos" value={totalRepos} sub="approximate · likely undercounting" />
+        <StatCard label="Active Rate" value={activeRate} suffix="%" accent="cyan" sub="of enumerated repos" />
         <StatCard label="On bsky.network" value={concentration.top1Pct} suffix="% of repos" accent="purple" />
       </div>
     </div>
@@ -376,11 +376,13 @@ function StatCard({
   value,
   suffix,
   accent,
+  sub,
 }: {
   label: string;
   value: number;
   suffix?: string;
   accent?: "green" | "red" | "blue" | "purple" | "cyan";
+  sub?: string;
 }) {
   const accentMap: Record<string, string> = {
     green: "text-green-400",
@@ -397,6 +399,7 @@ function StatCard({
         {value == null || isNaN(value) ? "—" : value.toLocaleString()}{suffix && <span className="text-lg">{suffix}</span>}
       </div>
       <div className="text-xs text-gray-400 mt-1">{label}</div>
+      {sub && <div className="text-xs text-gray-600 mt-1">{sub}</div>}
     </div>
   );
 }

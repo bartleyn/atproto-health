@@ -561,7 +561,7 @@ export function getTopPdsByScan(limit = 15, hideBsky = false): ScannedTopPds[] {
     results.push({ url: "https://bsky.social", repoCount: bskyRepos, activeCount: bskyActive, snapshot_date: bskyDate });
   }
 
-  const sorted = results.sort((a, b) => b.repoCount - a.repoCount);
+  const sorted = results.sort((a, b) => b.activeCount - a.activeCount);
   topPdsCache.set(hideBsky, { data: sorted, expires: Date.now() + CACHE_TTL_MS });
   return sorted.slice(0, limit);
 }

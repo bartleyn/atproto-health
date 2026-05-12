@@ -66,7 +66,7 @@ export default async function MigrationsPage() {
             <StatCard
               label="Total repos"
               value={fmt(scanStats.totalUsers)}
-              sub={`Across ${scanStats.total.toLocaleString()} tracked PDSes · from listRepos`}
+              sub={`Across ${scanStats.total.toLocaleString()} tracked PDSes · from listRepos · approximate, likely undercounting`}
             />
           </div>
           {/* Row 2: migration details */}
@@ -101,7 +101,7 @@ export default async function MigrationsPage() {
         {/* Migration Trajectories */}
         <CollapsibleSection
           title="Migration Flows"
-          subtitle="Actual per-hop did:plc migration steps — each column is one PDS hop. bsky.network shards collapsed. Click a node to highlight all paths through it in both directions."
+          subtitle="Actual per-hop did:plc migration steps — each column is one hop. Hop 6+ is a catch-all for accounts with 6 or more migrations, landing at their true final PDS. bsky.network shards collapsed. Click a node to highlight all paths through it."
           storageKey="migrations-multistep"
         >
           <MultiStepSankeyChart data={trajectories} height={650} />

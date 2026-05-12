@@ -203,12 +203,8 @@ export function aggregatePlc() {
           AND (to_pds LIKE '%bsky.network' OR to_pds = 'https://bsky.social')
         )
       ),
-      deduped AS (
-        SELECT did, from_pds, to_pds, MIN(migrated_at) AS migrated_at
-        FROM normalized GROUP BY did, from_pds, to_pds
-      ),
       filtered AS (
-        SELECT did, from_pds, to_pds, migrated_at FROM deduped
+        SELECT did, from_pds, to_pds, migrated_at FROM normalized
         WHERE (from_pds = 'bsky.network' OR from_pds IN (SELECT pds_url FROM verified))
           AND (to_pds   = 'bsky.network' OR to_pds   IN (SELECT pds_url FROM verified))
       ),
@@ -239,8 +235,8 @@ export function aggregatePlc() {
 
         UNION ALL
 
-        -- Step 5 → "Current" (@6): route to each DID's ACTUAL final PDS so that
-        -- accounts with 7+ migrations still land in Current at their true destination.
+        -- Step 5 → @6 (Hop 6+): route to each DID's ACTUAL final PDS so that
+        -- accounts with 6+ migrations still land at their true destination.
         SELECT
           CASE WHEN r.from_pds  IN (SELECT pds FROM top_pdses) THEN r.from_pds  ELSE 'Other' END || '@5' AS source,
           CASE WHEN f.final_pds IN (SELECT pds FROM top_pdses) THEN f.final_pds ELSE 'Other' END || '@6' AS target

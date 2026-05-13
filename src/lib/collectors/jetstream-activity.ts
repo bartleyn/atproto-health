@@ -15,17 +15,27 @@
  *   --no-collection-tracking          disable collection_activity writes entirely
  *   --max-collection-rows <N>         pause collection_activity writes once table exceeds N rows
  *                                     (default: 5_000_000; re-checked each flush)
+ *   --no-scoring                      disable post scoring + GCS upload entirely
+ *   --min-toxicity <float>            only upload posts where toxicity >= value (default: 0)
+ *
+ * Env vars for post scorer:
+ *   TOXIC_API_URL      Fly.io API base URL (default: https://toxic-cicd.fly.dev)
+ *   GCS_SCORED_BUCKET  GCS bucket (default: bsky-labeled-posts)
+ *   GCS_SCORED_PREFIX  Object prefix (default: posts/)
  *
  * Usage:
  *   npm run collect:activity
  *   npm run collect:activity -- --retention-days 90
  *   npm run collect:activity -- --no-collection-tracking
  *   npm run collect:activity -- --max-collection-rows 1000000
+ *   npm run collect:activity -- --no-scoring
+ *   npm run collect:activity -- --min-toxicity 0.5
  */
 
 import WebSocket from "ws";
 import { getActivityDb } from "../db/activity-schema";
 import { getPlcDb } from "../db/plc-schema";
+import { bufferPost, flushScorer, scorerShutdown } from "./post-scorer";
 
 // Bitmask assignments for activity_types column.
 // Bits 13+ are synthetic — derived from record content, not the collection name alone.
@@ -572,7 +582,7 @@ function connect() {
             collectionBuffer.set(ckey, (collectionBuffer.get(ckey) ?? 0) + 1);
           }
 
-          // Reply / quote sub-type bits
+          // Reply / quote sub-type bits + post scoring buffer
           if (collection === "app.bsky.feed.post") {
             const record = evt.commit.record;
             if (record?.reply) {
@@ -581,6 +591,21 @@ function connect() {
             const embedType = record?.embed?.$type;
             if (embedType === "app.bsky.embed.record" || embedType === "app.bsky.embed.recordWithMedia") {
               activityBuffer.set(key, (activityBuffer.get(key) ?? 0) | BIT_QUOTED);
+            }
+            const text = typeof record?.text === "string" ? record.text.trim() : "";
+            if (text.length > 0) {
+              bufferPost({
+                uri:           `at://${evt.did}/app.bsky.feed.post/${evt.commit.rkey}`,
+                did:           evt.did,
+                rkey:          evt.commit.rkey,
+                text,
+                langs:         Array.isArray(record?.langs) ? record.langs : [],
+                reply_to:      typeof record?.reply?.parent?.uri === "string" ? record.reply.parent.uri : null,
+                quote_of:      (embedType === "app.bsky.embed.record" || embedType === "app.bsky.embed.recordWithMedia")
+                                 ? (record?.embed?.record?.uri ?? null)
+                                 : null,
+                created_at_us: evt.time_us,
+              });
             }
           }
 
@@ -689,6 +714,7 @@ async function main() {
     flush()
       .then(() => pruneOldRows())
       .then(() => resolveAndStoreDidWebs())
+      .then(() => flushScorer())
       .catch(err => console.error("[activity] flush error:", err));
   }, FLUSH_INTERVAL_MS);
 
@@ -696,6 +722,7 @@ async function main() {
     process.on(sig, () => {
       console.log(`\n[activity] ${sig} received, flushing...`);
       flushSync();
+      scorerShutdown();
       process.exit(0);
     });
   }

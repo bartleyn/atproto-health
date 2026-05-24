@@ -1,6 +1,6 @@
 /**
  * Post scorer: buffers app.bsky.feed.post events from the shared Jetstream connection,
- * batch-scores them via the toxic-cicd Fly.io API, and uploads JSONL to GCS.
+ * batch-scores them via the toxic-cicd API, and uploads JSONL to GCS.
  *
  * Called from jetstream-activity.ts:
  *   bufferPost()      — called per post create event in the message handler
@@ -8,7 +8,7 @@
  *   scorerShutdown()  — called on SIGINT/SIGTERM to persist unscored posts to DLQ
  *
  * Env vars:
- *   TOXIC_API_URL      Fly.io API base URL (default: https://toxic-cicd.fly.dev)
+ *   TOXIC_API_URL      Scorer API base URL
  *   GCS_SCORED_BUCKET  GCS bucket (default: bsky-labeled-posts)
  *   GCS_SCORED_PREFIX  Object prefix (default: posts/)
  *
@@ -34,14 +34,13 @@ export type BufferedPost = {
 type ScoredPost = BufferedPost & {
   scored_at: string;
   model_version: string;
-  toxicity: number;
-  hatespeech: number;
-  sentiment: number;
   label: number;
+  scores: Record<string, number>;
+  details: Record<string, string[]>;
 };
 
 // Config
-const TOXIC_API_URL    = process.env.TOXIC_API_URL    ?? "https://toxic-cicd.fly.dev";
+const TOXIC_API_URL    = process.env.TOXIC_API_URL    ?? "http://15.204.11.179:8080";
 const GCS_SCORED_BUCKET = process.env.GCS_SCORED_BUCKET ?? "bsky-labeled-posts";
 const GCS_SCORED_PREFIX = process.env.GCS_SCORED_PREFIX ?? "posts/";
 
@@ -51,12 +50,19 @@ const MIN_TOXICITY  = _minToxIdx >= 0 ? parseFloat(_args[_minToxIdx + 1]) : 0;
 const SCORER_ENABLED = !_args.includes("--no-scoring");
 
 // DLQ: retry up to 10 times with exponential backoff (5m, 20m, 45m … ~8h cap).
-// Drain at most 5 DLQ batches per flush so we don't starve the live path.
+// Drain at most 50 DLQ batches per flush.
+// Large payloads (e.g. from shutdown) are split into SCORE_BATCH_SIZE chunks on enqueue
+// so each retry stays well within the API timeout.
 const DLQ_MAX_ATTEMPTS = 10;
-const DLQ_DRAIN_LIMIT  = 5;
+const DLQ_DRAIN_LIMIT  = 50;
+const SCORE_BATCH_SIZE  = 100;
+const SCORE_CONCURRENCY = 2;
+const DLQ_SCORE_TIMEOUT_MS  = 50_000;
+const LIVE_SCORE_TIMEOUT_MS = 30_000;
 
 let scorerBuffer: BufferedPost[] = [];
 let _storage: Storage | null = null;
+let _flushing = false;
 
 function getStorage(): Storage {
   if (!_storage) _storage = new Storage();
@@ -80,19 +86,23 @@ export function scorerShutdown(): void {
 function _enqueueDlq(posts: BufferedPost[], error: string, attempts: number): void {
   const backoffMs = Math.min(Math.pow(attempts + 1, 2) * 5 * 60_000, 8 * 60 * 60_000);
   const nextRetry = new Date(Date.now() + backoffMs).toISOString();
-  getActivityDb().prepare(`
+  const stmt = getActivityDb().prepare(`
     INSERT INTO score_dlq (posts_json, failed_at, attempts, last_error, next_retry_at)
     VALUES (?, datetime('now'), ?, ?, ?)
-  `).run(JSON.stringify(posts), attempts, error, nextRetry);
+  `);
+  for (let i = 0; i < posts.length; i += SCORE_BATCH_SIZE) {
+    stmt.run(JSON.stringify(posts.slice(i, i + SCORE_BATCH_SIZE)), attempts, error, nextRetry);
+  }
 }
 
-async function _scoreAndUpload(posts: BufferedPost[]): Promise<void> {
+async function _scoreAndUpload(posts: BufferedPost[], timeoutMs = LIVE_SCORE_TIMEOUT_MS): Promise<void> {
   // Score via API
+  const t0 = Date.now();
   const res = await fetch(`${TOXIC_API_URL}/score`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ texts: posts.map(p => p.text) }),
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
@@ -100,22 +110,24 @@ async function _scoreAndUpload(posts: BufferedPost[]): Promise<void> {
   }
   const data = await res.json() as {
     model_version: string;
-    results: { label: number; scores: Record<string, number> }[];
+    results: { label: number; scores: Record<string, number>; details: Record<string, string[]> }[];
   };
+
+  const elapsedMs = Date.now() - t0;
+  console.log(`[scorer] API: ${posts.length} posts scored in ${elapsedMs}ms`);
 
   const scoredAt = new Date().toISOString();
   const scored: ScoredPost[] = posts.map((post, i) => ({
     ...post,
     scored_at:     scoredAt,
     model_version: data.model_version,
-    toxicity:      data.results[i]?.scores["toxicity"]  ?? 0,
-    hatespeech:    data.results[i]?.scores["hatespeech"] ?? 0,
-    sentiment:     data.results[i]?.scores["sentiment"]  ?? 0,
     label:         data.results[i]?.label ?? 0,
+    scores:        data.results[i]?.scores ?? {},
+    details:       data.results[i]?.details ?? {},
   }));
 
   const toUpload = MIN_TOXICITY > 0
-    ? scored.filter(p => p.toxicity >= MIN_TOXICITY)
+    ? scored.filter(p => (p.scores["toxicity"] ?? 0) >= MIN_TOXICITY)
     : scored;
 
   if (toUpload.length === 0) return;
@@ -144,10 +156,24 @@ async function _drainDlq(): Promise<void> {
     LIMIT ?
   `).all(now, DLQ_MAX_ATTEMPTS, DLQ_DRAIN_LIMIT) as { id: number; posts_json: string; attempts: number }[];
 
+  if (rows.length === 0) return;
+
   for (const row of rows) {
+    // Yield between batches so the event loop stays responsive.
+    await new Promise<void>(resolve => setImmediate(resolve));
+
     const posts = JSON.parse(row.posts_json) as BufferedPost[];
+
+    // Re-chunk oversized rows (e.g. from pre-fix shutdown saves) into smaller rows and drop the original.
+    if (posts.length > SCORE_BATCH_SIZE) {
+      db.prepare(`DELETE FROM score_dlq WHERE id = ?`).run(row.id);
+      _enqueueDlq(posts, row.attempts > 0 ? "re-chunked from oversized row" : "initial enqueue", 0);
+      console.log(`[scorer] DLQ batch ${row.id} re-chunked ${posts.length} posts into ${Math.ceil(posts.length / SCORE_BATCH_SIZE)} rows`);
+      continue;
+    }
+
     try {
-      await _scoreAndUpload(posts);
+      await _scoreAndUpload(posts, DLQ_SCORE_TIMEOUT_MS);
       db.prepare(`DELETE FROM score_dlq WHERE id = ?`).run(row.id);
       console.log(`[scorer] DLQ batch ${row.id} retry succeeded (${posts.length} posts)`);
     } catch (err) {
@@ -169,20 +195,42 @@ async function _drainDlq(): Promise<void> {
 }
 
 export async function flushScorer(): Promise<void> {
-  if (!SCORER_ENABLED) return;
-
-  await _drainDlq();
-
-  const posts = scorerBuffer;
-  scorerBuffer = [];
-  if (posts.length === 0) return;
-
+  if (!SCORER_ENABLED || _flushing) return;
+  _flushing = true;
   try {
-    await _scoreAndUpload(posts);
+    await _drainDlq();
+
+    const posts = scorerBuffer;
+    scorerBuffer = [];
+    if (posts.length === 0) return;
+
+    const chunks: BufferedPost[][] = [];
+    for (let i = 0; i < posts.length; i += SCORE_BATCH_SIZE) {
+      chunks.push(posts.slice(i, i + SCORE_BATCH_SIZE));
+    }
+
+    let succeeded = 0;
+    let failed = 0;
+    for (let i = 0; i < chunks.length; i += SCORE_CONCURRENCY) {
+      const group = chunks.slice(i, i + SCORE_CONCURRENCY);
+      const results = await Promise.allSettled(group.map(chunk => _scoreAndUpload(chunk)));
+      for (let j = 0; j < results.length; j++) {
+        if (results[j].status === "fulfilled") {
+          succeeded += group[j].length;
+        } else {
+          const err = (results[j] as PromiseRejectedResult).reason;
+          _enqueueDlq(group[j], String(err), 0);
+          failed += group[j].length;
+          console.warn(`[scorer] Chunk failed, queued ${group[j].length} posts to DLQ: ${err}`);
+        }
+      }
+    }
+
     const filtered = MIN_TOXICITY > 0 ? ` (min-toxicity=${MIN_TOXICITY})` : "";
-    console.log(`[scorer] Scored and uploaded ${posts.length} posts${filtered}`);
-  } catch (err) {
-    _enqueueDlq(posts, String(err), 0);
-    console.warn(`[scorer] Score/upload failed, queued ${posts.length} posts to DLQ: ${err}`);
+    const failedNote = failed > 0 ? `, ${failed} to DLQ` : "";
+    console.log(`[scorer] Flushed ${succeeded} posts${filtered}${failedNote} (${chunks.length} batches)`);
+
+  } finally {
+    _flushing = false;
   }
 }

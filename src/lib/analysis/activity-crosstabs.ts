@@ -9,7 +9,8 @@ const daysBack = args[0] && !args[0].startsWith("--") ? parseInt(args[0], 10) : 
 // Query names: activity_by_age, activity_by_label, stickiness, stickiness_by_age,
 //   active_days_dist, cohort_activation, action_rates, non_active, account_events,
 //   trump_weekly, lang_activity, migration_activity, engagement_depth, starterpacks,
-//   ns_retention, daily_actions_by_cohort
+//   ns_retention, daily_actions_by_cohort,
+//   inter_visit_gaps, action_cadence, recency
 const onlyFlags: string[] = [];
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--only" && args[i + 1]) {
@@ -691,6 +692,161 @@ report(
   `Daily Unique Actions by Cohort (${windowStart}–${RUN_DATE})`,
   `daily_actions_by_cohort_${daysBack}d.csv`,
   dailyActionsByCohort
+);
+}
+
+// ── 17. Inter-visit gap distribution ─────────────────────────────────────────
+// How many days between consecutive active days per user, by cohort.
+// Uses a fixed 90-day lookback regardless of daysBack so there are enough
+// consecutive-day pairs to compute meaningful distributions.
+// "gap = 1" means the user came back the very next day.
+
+const GAP_LOOKBACK = 90;
+const needsGapTables = shouldRun("inter_visit_gaps") || shouldRun("action_cadence") || shouldRun("recency");
+
+if (needsGapTables) {
+  console.log(`Pre-materialising ${GAP_LOOKBACK}-day activity window for gap/recency analysis…`);
+  activityDb.exec(`
+    CREATE TEMP TABLE activity_90d AS
+      SELECT d.did, d.date, d.activity_types
+      FROM did_activity_daily d
+      LEFT JOIN excluded_dids ex ON d.did = ex.did
+      WHERE d.date >= date('now', '-${GAP_LOOKBACK} days')
+        AND ex.did IS NULL;
+    CREATE INDEX temp.idx_activity_90d_did_date ON activity_90d(did, date);
+  `);
+  console.log(`  done.\n`);
+}
+
+if (shouldRun("inter_visit_gaps")) {
+const interVisitGaps = activityDb.prepare(`
+  WITH
+  gaps AS (
+    SELECT
+      did,
+      CAST(julianday(date) - julianday(LAG(date) OVER (PARTITION BY did ORDER BY date)) AS INTEGER) AS gap_days
+    FROM activity_90d
+  )
+  SELECT
+    ${AGE_BUCKET} AS age_bucket,
+    COUNT(DISTINCT g.did)                                                       AS users,
+    COUNT(*)                                                                    AS gap_observations,
+    ROUND(AVG(g.gap_days), 2)                                                  AS avg_gap_days,
+    ROUND(SQRT(AVG(g.gap_days * g.gap_days) - AVG(g.gap_days) * AVG(g.gap_days)), 2) AS stddev_gap_days,
+    SUM(CASE WHEN g.gap_days = 1               THEN 1 ELSE 0 END)              AS gap_1d,
+    SUM(CASE WHEN g.gap_days BETWEEN 2 AND 3   THEN 1 ELSE 0 END)              AS gap_2_3d,
+    SUM(CASE WHEN g.gap_days BETWEEN 4 AND 7   THEN 1 ELSE 0 END)              AS gap_4_7d,
+    SUM(CASE WHEN g.gap_days BETWEEN 8 AND 14  THEN 1 ELSE 0 END)              AS gap_8_14d,
+    SUM(CASE WHEN g.gap_days > 14              THEN 1 ELSE 0 END)              AS gap_15plus_d,
+    ROUND(100.0 * SUM(CASE WHEN g.gap_days = 1 THEN 1 ELSE 0 END) / COUNT(*), 1) AS pct_returned_next_day
+  FROM gaps g
+  JOIN plc.plc_account_creations p ON g.did = p.did
+  WHERE g.gap_days IS NOT NULL
+  GROUP BY age_bucket
+  ORDER BY age_bucket
+`).all() as Record<string, unknown>[];
+
+report(
+  `Inter-Visit Gap Distribution by Cohort (${GAP_LOOKBACK}d lookback)`,
+  `inter_visit_gaps_${GAP_LOOKBACK}d.csv`,
+  interVisitGaps
+);
+}
+
+// ── 18. Action cadence ────────────────────────────────────────────────────────
+// Gaps between consecutive days where a *specific* action was performed.
+// Each action type is treated independently — e.g. "post cadence" computes the
+// gap between consecutive posting days, ignoring days with only likes/follows.
+// Rows: one per (cohort × action_type).
+
+if (shouldRun("action_cadence")) {
+const actionCadence = activityDb.prepare(`
+  WITH
+  post_gaps AS (
+    SELECT did,
+      CAST(julianday(date) - julianday(LAG(date) OVER (PARTITION BY did ORDER BY date)) AS INTEGER) AS gap_days
+    FROM activity_90d WHERE activity_types & 1
+  ),
+  like_gaps AS (
+    SELECT did,
+      CAST(julianday(date) - julianday(LAG(date) OVER (PARTITION BY did ORDER BY date)) AS INTEGER) AS gap_days
+    FROM activity_90d WHERE activity_types & 2
+  ),
+  repost_gaps AS (
+    SELECT did,
+      CAST(julianday(date) - julianday(LAG(date) OVER (PARTITION BY did ORDER BY date)) AS INTEGER) AS gap_days
+    FROM activity_90d WHERE activity_types & 4
+  ),
+  follow_gaps AS (
+    SELECT did,
+      CAST(julianday(date) - julianday(LAG(date) OVER (PARTITION BY did ORDER BY date)) AS INTEGER) AS gap_days
+    FROM activity_90d WHERE activity_types & 8
+  ),
+  all_gaps AS (
+    SELECT 'post'    AS action, did, gap_days FROM post_gaps   WHERE gap_days IS NOT NULL
+    UNION ALL
+    SELECT 'like'    AS action, did, gap_days FROM like_gaps   WHERE gap_days IS NOT NULL
+    UNION ALL
+    SELECT 'repost'  AS action, did, gap_days FROM repost_gaps WHERE gap_days IS NOT NULL
+    UNION ALL
+    SELECT 'follow'  AS action, did, gap_days FROM follow_gaps WHERE gap_days IS NOT NULL
+  )
+  SELECT
+    ${AGE_BUCKET} AS age_bucket,
+    g.action,
+    COUNT(DISTINCT g.did)                                                         AS users,
+    COUNT(*)                                                                      AS gap_observations,
+    ROUND(AVG(g.gap_days), 2)                                                    AS avg_days_between,
+    ROUND(SQRT(AVG(g.gap_days * g.gap_days) - AVG(g.gap_days) * AVG(g.gap_days)), 2) AS stddev,
+    SUM(CASE WHEN g.gap_days = 1              THEN 1 ELSE 0 END)                 AS gap_1d,
+    SUM(CASE WHEN g.gap_days BETWEEN 2 AND 3  THEN 1 ELSE 0 END)                 AS gap_2_3d,
+    SUM(CASE WHEN g.gap_days BETWEEN 4 AND 7  THEN 1 ELSE 0 END)                 AS gap_4_7d,
+    SUM(CASE WHEN g.gap_days > 7              THEN 1 ELSE 0 END)                 AS gap_8plus_d
+  FROM all_gaps g
+  JOIN plc.plc_account_creations p ON g.did = p.did
+  GROUP BY age_bucket, g.action
+  ORDER BY age_bucket, g.action
+`).all() as Record<string, unknown>[];
+
+report(
+  `Action Cadence by Cohort (${GAP_LOOKBACK}d lookback)`,
+  `action_cadence_${GAP_LOOKBACK}d.csv`,
+  actionCadence
+);
+}
+
+// ── 19. User recency distribution ─────────────────────────────────────────────
+// Days since each user's last active day in the 90-day window, by cohort.
+// Shows which cohorts are staying engaged vs going dormant.
+// Users with no activity in 90d are not in activity_90d and are excluded —
+// this measures active-user recency, not churn (see cohort_activation for churn).
+
+if (shouldRun("recency")) {
+const recencyDist = activityDb.prepare(`
+  WITH
+  last_seen AS (
+    SELECT did, MAX(date) AS last_date
+    FROM activity_90d
+    GROUP BY did
+  )
+  SELECT
+    ${AGE_BUCKET} AS age_bucket,
+    COUNT(*)                                                                       AS users,
+    ROUND(AVG(CAST(julianday('now') - julianday(ls.last_date) AS INTEGER)), 1)    AS avg_days_since_active,
+    SUM(CASE WHEN julianday('now') - julianday(ls.last_date) <= 1   THEN 1 ELSE 0 END) AS seen_yesterday,
+    SUM(CASE WHEN julianday('now') - julianday(ls.last_date) BETWEEN 2 AND 7  THEN 1 ELSE 0 END) AS seen_2_7d,
+    SUM(CASE WHEN julianday('now') - julianday(ls.last_date) BETWEEN 8 AND 30 THEN 1 ELSE 0 END) AS seen_8_30d,
+    SUM(CASE WHEN julianday('now') - julianday(ls.last_date) > 30  THEN 1 ELSE 0 END) AS seen_31plus_d
+  FROM last_seen ls
+  JOIN plc.plc_account_creations p ON ls.did = p.did
+  GROUP BY age_bucket
+  ORDER BY age_bucket
+`).all() as Record<string, unknown>[];
+
+report(
+  `User Recency Distribution by Cohort (${GAP_LOOKBACK}d window)`,
+  `recency_dist_${GAP_LOOKBACK}d.csv`,
+  recencyDist
 );
 }
 

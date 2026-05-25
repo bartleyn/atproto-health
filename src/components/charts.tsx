@@ -1795,7 +1795,7 @@ export function MultiStepSankeyChart({ data, height = 480 }: MultiStepSankeyProp
     parseInt(e.target.split('@').pop()!),
   ]));
   const stepLabels = Array.from({ length: maxStep + 1 }, (_, i) =>
-    i === 0 ? "Origin" : i === maxStep ? `Hop ${i}+` : `Hop ${i}`
+    i === 0 ? "Origin" : i === maxStep ? "Current" : `Hop ${i}`
   );
 
   // Consistent color per PDS base name (strip @N) so the same PDS has the same

@@ -101,7 +101,7 @@ export default async function MigrationsPage() {
         {/* Migration Trajectories */}
         <CollapsibleSection
           title="Migration Flows"
-          subtitle="Actual per-hop did:plc migration steps — each column is one hop. Hop 6+ is a catch-all for accounts with 6 or more migrations, landing at their true final PDS. bsky.network shards collapsed. Click a node to highlight all paths through it."
+          subtitle="Actual per-hop did:plc migration steps — each column is one hop. &ldquo;Current&rdquo; shows the true final PDS for accounts with 6+ migrations. bsky.network shards collapsed. Click a node to highlight all paths through it."
           storageKey="migrations-multistep"
         >
           <MultiStepSankeyChart data={trajectories} height={650} />

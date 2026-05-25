@@ -10,7 +10,13 @@ const daysBack = args[0] && !args[0].startsWith("--") ? parseInt(args[0], 10) : 
 //   active_days_dist, cohort_activation, action_rates, non_active, account_events,
 //   trump_weekly, lang_activity, migration_activity, engagement_depth, starterpacks,
 //   ns_retention, daily_actions_by_cohort,
-//   inter_visit_gaps, action_cadence, recency
+//   inter_visit_gaps, action_cadence, recency,
+//   new_user_follow_like, dau_mau
+//
+// --history N  → days of history for the dau_mau time series (default: 60)
+const historyIdx = args.indexOf("--history");
+const historyDays = historyIdx >= 0 ? parseInt(args[historyIdx + 1], 10) : 60;
+
 const onlyFlags: string[] = [];
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--only" && args[i + 1]) {
@@ -848,6 +854,89 @@ report(
   `recency_dist_${GAP_LOOKBACK}d.csv`,
   recencyDist
 );
+}
+
+// ── 20. New-user follow/like funnel ─────────────────────────────────────────
+// For each day in the window, counts new-account DIDs (created within the
+// window) whose per-day activity_types show: follow-only vs follow+like.
+// A user can appear in different buckets on different days as their behavior
+// evolves, which makes this useful as a daily funnel progression view.
+
+if (shouldRun("new_user_follow_like")) {
+const newUserFollowLike = activityDb.prepare(`
+  SELECT
+    d.date,
+    COUNT(DISTINCT d.did)                                                                   AS new_user_dau,
+    COUNT(DISTINCT CASE WHEN (d.activity_types & 10) = 8  THEN d.did END)                  AS followed_only,
+    COUNT(DISTINCT CASE WHEN (d.activity_types & 10) = 10 THEN d.did END)                  AS followed_and_liked,
+    ROUND(100.0 * COUNT(DISTINCT CASE WHEN (d.activity_types & 10) = 8  THEN d.did END)
+                / NULLIF(COUNT(DISTINCT CASE WHEN d.activity_types & 8  THEN d.did END), 0), 1) AS pct_followed_only,
+    ROUND(100.0 * COUNT(DISTINCT CASE WHEN (d.activity_types & 10) = 10 THEN d.did END)
+                / NULLIF(COUNT(DISTINCT CASE WHEN d.activity_types & 8  THEN d.did END), 0), 1) AS pct_followed_and_liked
+  FROM did_activity_daily d
+  JOIN plc.plc_account_creations p ON d.did = p.did
+  LEFT JOIN excluded_dids ex ON d.did = ex.did
+  WHERE d.date >= '${windowStart}'
+    AND p.created_at >= '${windowStart}'
+    AND ex.did IS NULL
+  GROUP BY d.date
+  ORDER BY d.date
+`).all() as Record<string, unknown>[];
+
+report(
+  `New-User Follow/Like Funnel (${windowStart}–${RUN_DATE})`,
+  `new_user_follow_like_${daysBack}d.csv`,
+  newUserFollowLike
+);
+}
+
+// ── 21. DAU / MAU time series ────────────────────────────────────────────────
+// For each calendar day, computes:
+//   DAU = distinct active DIDs on that day
+//   MAU = distinct active DIDs in the trailing 28-day window ending that day
+//   ratio = DAU / MAU  (stickiness trend over time)
+//
+// Uses historyDays + 28 as the warmup window so the first MAU value is fully populated.
+
+if (shouldRun("dau_mau")) {
+const warmupStart = daysAgoStr(historyDays + 28);
+const trendStart  = daysAgoStr(historyDays);
+
+const dauMauSeries = activityDb.prepare(`
+  WITH
+  dau AS (
+    SELECT d.date, COUNT(DISTINCT d.did) AS dau
+    FROM did_activity_daily d
+    LEFT JOIN excluded_dids ex ON d.did = ex.did
+    WHERE d.date >= ?
+      AND ex.did IS NULL
+    GROUP BY d.date
+  ),
+  trend_dates AS (
+    SELECT DISTINCT date FROM dau WHERE date >= ?
+  ),
+  mau AS (
+    SELECT
+      td.date,
+      COUNT(DISTINCT d.did) AS mau
+    FROM trend_dates td
+    JOIN did_activity_daily d
+      ON d.date BETWEEN date(td.date, '-27 days') AND td.date
+    LEFT JOIN excluded_dids ex ON d.did = ex.did
+    WHERE ex.did IS NULL
+    GROUP BY td.date
+  )
+  SELECT
+    dau.date,
+    dau.dau,
+    mau.mau,
+    ROUND(100.0 * dau.dau / mau.mau, 2) AS dau_mau_pct
+  FROM dau
+  JOIN mau ON dau.date = mau.date
+  ORDER BY dau.date
+`).all(warmupStart, trendStart) as Record<string, unknown>[];
+
+report(`DAU / MAU Time Series (last ${historyDays} days)`, `dau_mau_${historyDays}d.csv`, dauMauSeries);
 }
 
 console.log(`\nDone. CSVs written to ${OUT_DIR}/\n`);

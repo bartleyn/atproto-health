@@ -1235,7 +1235,7 @@ function PdsRankTable({ rows, traitLabel, mode }: {
                     </>
                   )}
                   <td className="px-3 py-2.5">
-                    <div className="flex h-2.5 rounded overflow-hidden w-36 gap-px mb-1">
+                    <div className="flex h-3.5 rounded overflow-hidden w-64 gap-px mb-1">
                       {row.composition.map((c) => (
                         <div
                           key={c.label}

@@ -15,17 +15,28 @@
  *   --no-collection-tracking          disable collection_activity writes entirely
  *   --max-collection-rows <N>         pause collection_activity writes once table exceeds N rows
  *                                     (default: 5_000_000; re-checked each flush)
+ *   --no-scoring                      disable post scoring + GCS upload entirely
+ *   --min-toxicity <float>            only upload posts where toxicity >= value (default: 0)
+ *   --scorer-interval <seconds>       how often to flush scored posts to GCS (default: 300)
+ *
+ * Env vars for post scorer:
+ *   TOXIC_API_URL      Fly.io API base URL (default: https://toxic-cicd.fly.dev)
+ *   GCS_SCORED_BUCKET  GCS bucket (default: bsky-labeled-posts)
+ *   GCS_SCORED_PREFIX  Object prefix (default: posts/)
  *
  * Usage:
  *   npm run collect:activity
  *   npm run collect:activity -- --retention-days 90
  *   npm run collect:activity -- --no-collection-tracking
  *   npm run collect:activity -- --max-collection-rows 1000000
+ *   npm run collect:activity -- --no-scoring
+ *   npm run collect:activity -- --min-toxicity 0.5
  */
 
 import WebSocket from "ws";
 import { getActivityDb } from "../db/activity-schema";
 import { getPlcDb } from "../db/plc-schema";
+import { bufferPost, flushScorer, scorerShutdown } from "./post-scorer";
 
 // Bitmask assignments for activity_types column.
 // Bits 13+ are synthetic — derived from record content, not the collection name alone.
@@ -116,6 +127,9 @@ let relayIdx = 0;
 
 const FLUSH_INTERVAL_MS  = 60 * 1000;
 const RECONNECT_DELAY_MS = 5_000;
+// During backfill, events arrive faster than the timer fires. Flush when the three
+// largest buffers exceed this combined entry count to keep heap pressure bounded.
+const BUFFER_FLUSH_THRESHOLD = 200_000;
 
 const args = process.argv.slice(2);
 const retentionIdx = args.indexOf("--retention-days");
@@ -125,6 +139,8 @@ const BACKFILL_HOURS = backfillIdx >= 0 ? parseInt(args[backfillIdx + 1], 10) : 
 const NO_COLLECTION_TRACKING = args.includes("--no-collection-tracking");
 const maxCollectionRowsIdx = args.indexOf("--max-collection-rows");
 const MAX_COLLECTION_ROWS = maxCollectionRowsIdx >= 0 ? parseInt(args[maxCollectionRowsIdx + 1], 10) : 5_000_000;
+const scorerIntervalIdx = args.indexOf("--scorer-interval");
+const SCORER_FLUSH_INTERVAL_MS = (scorerIntervalIdx >= 0 ? parseInt(args[scorerIntervalIdx + 1], 10) : 300) * 1000;
 
 // Activity buffer: "did|date" → bitmask of activity_types seen
 const activityBuffer = new Map<string, number>();
@@ -150,6 +166,9 @@ const feedGenBuffer = new Map<string, { creatorDid: string; displayName: string 
 const feedGenDeleteBuffer = new Set<string>();
 // Feed like buffer: "feed_uri|date" → count (only likes targeting a feed generator)
 const feedLikeBuffer = new Map<string, number>();
+
+// Guard so a single pressure flush is in-flight at a time
+let pressureFlushPending = false;
 
 // did:web PDS discovery: DIDs seen in the stream that need did document resolution
 const didWebSeen = new Set<string>();
@@ -572,7 +591,7 @@ function connect() {
             collectionBuffer.set(ckey, (collectionBuffer.get(ckey) ?? 0) + 1);
           }
 
-          // Reply / quote sub-type bits
+          // Reply / quote sub-type bits + post scoring buffer
           if (collection === "app.bsky.feed.post") {
             const record = evt.commit.record;
             if (record?.reply) {
@@ -581,6 +600,21 @@ function connect() {
             const embedType = record?.embed?.$type;
             if (embedType === "app.bsky.embed.record" || embedType === "app.bsky.embed.recordWithMedia") {
               activityBuffer.set(key, (activityBuffer.get(key) ?? 0) | BIT_QUOTED);
+            }
+            const text = typeof record?.text === "string" ? record.text.trim() : "";
+            if (text.length > 0) {
+              bufferPost({
+                uri:           `at://${evt.did}/app.bsky.feed.post/${evt.commit.rkey}`,
+                did:           evt.did,
+                rkey:          evt.commit.rkey,
+                text,
+                langs:         Array.isArray(record?.langs) ? record.langs : [],
+                reply_to:      typeof record?.reply?.parent?.uri === "string" ? record.reply.parent.uri : null,
+                quote_of:      (embedType === "app.bsky.embed.record" || embedType === "app.bsky.embed.recordWithMedia")
+                                 ? (record?.embed?.record?.uri ?? null)
+                                 : null,
+                created_at_us: evt.time_us,
+              });
             }
           }
 
@@ -645,6 +679,22 @@ function connect() {
       } else if (evt.kind === "tombstone") {
         recordDelete(`${date}|tombstone`);
       }
+      // Pressure-based flush: during backfill events arrive faster than async writes
+      // can drain. Pause the socket so TCP backpressure propagates to the relay and
+      // we stop accumulating until the flush completes.
+      if (!pressureFlushPending &&
+          activityBuffer.size + langBuffer.size + collectionBuffer.size > BUFFER_FLUSH_THRESHOLD) {
+        pressureFlushPending = true;
+        ws.pause();
+        if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
+        flush()
+          .catch(err => console.error("[activity] pressure flush error:", err))
+          .finally(() => {
+            pressureFlushPending = false;
+            ws.resume();
+            resetStallTimer();
+          });
+      }
     } catch {
       // skip malformed
     }
@@ -675,12 +725,23 @@ async function main() {
 
   if (BACKFILL_HOURS !== null) {
     const db = getActivityDb();
-    const backfillDate = new Date(Date.now() - BACKFILL_HOURS * 60 * 60 * 1000).toISOString().slice(0, 10);
-    console.log(`[activity] Clearing additive daily tables from ${backfillDate} to prevent double-counting on backfill...`);
-    db.prepare(`DELETE FROM delete_events_daily WHERE date >= ?`).run(backfillDate);
-    db.prepare(`DELETE FROM starterpack_joins_daily WHERE date >= ?`).run(backfillDate);
-    db.prepare(`DELETE FROM feed_generator_likes_daily WHERE date >= ?`).run(backfillDate);
-    db.prepare(`DELETE FROM lang_stats WHERE date >= ?`).run(backfillDate);
+    const backfillStartMs   = Date.now() - BACKFILL_HOURS * 60 * 60 * 1000;
+    const backfillDate      = new Date(backfillStartMs).toISOString().slice(0, 10);
+    // If the cursor starts mid-day UTC, that date is only partially covered by the replay.
+    // Deleting it would wipe midnight→cursor data we can't recover. Instead, start deletes
+    // from the next day (fully covered). The partial start day may slightly double-count
+    // its overlap window, which is acceptable vs. data loss.
+    const midnightMs        = new Date(backfillDate + "T00:00:00.000Z").getTime();
+    const isPartialStartDay = backfillStartMs > midnightMs + 1000;
+    const deleteFromDate    = isPartialStartDay
+      ? new Date(midnightMs + 86_400_000).toISOString().slice(0, 10)
+      : backfillDate;
+    console.log(`[activity] Clearing additive daily tables from ${deleteFromDate} to prevent double-counting on backfill...`
+      + (isPartialStartDay ? ` (skipping partial start date ${backfillDate})` : ""));
+    db.prepare(`DELETE FROM delete_events_daily WHERE date >= ?`).run(deleteFromDate);
+    db.prepare(`DELETE FROM starterpack_joins_daily WHERE date >= ?`).run(deleteFromDate);
+    db.prepare(`DELETE FROM feed_generator_likes_daily WHERE date >= ?`).run(deleteFromDate);
+    db.prepare(`DELETE FROM lang_stats WHERE date >= ?`).run(deleteFromDate);
     // collection_activity uses (collection, did, date) PK — replaying events only inflates
     // event_count, not unique DID counts. No delete needed; backfill upserts safely.
   }
@@ -692,10 +753,15 @@ async function main() {
       .catch(err => console.error("[activity] flush error:", err));
   }, FLUSH_INTERVAL_MS);
 
+  setInterval(() => {
+    flushScorer().catch(err => console.error("[scorer] flush error:", err));
+  }, SCORER_FLUSH_INTERVAL_MS);
+
   for (const sig of ["SIGINT", "SIGTERM"]) {
     process.on(sig, () => {
       console.log(`\n[activity] ${sig} received, flushing...`);
       flushSync();
+      scorerShutdown();
       process.exit(0);
     });
   }

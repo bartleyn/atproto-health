@@ -78,17 +78,21 @@ function migrate(db: Database.Database) {
 
     -- Per-(collection, DID, date) event counts from Jetstream creates.
     -- Full collection name (e.g. "app.bsky.feed.post", "com.whtwnd.blog.entry").
+    -- Per-day rows enable windowed queries (e.g. unique DIDs per collection in last 30d).
     -- Join with plc_did_pds at query time to get per-PDS breakdowns.
     CREATE TABLE IF NOT EXISTS collection_activity (
-      collection  TEXT NOT NULL,
-      did         TEXT NOT NULL,
-      date        TEXT NOT NULL,
+      collection  TEXT    NOT NULL,
+      did         TEXT    NOT NULL,
+      date        TEXT    NOT NULL,  -- YYYY-MM-DD
       event_count INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (collection, did, date)
     );
 
     CREATE INDEX IF NOT EXISTS idx_collection_activity_collection
       ON collection_activity(collection);
+
+    CREATE INDEX IF NOT EXISTS idx_collection_activity_date
+      ON collection_activity(date);
 
     -- Pre-aggregated per-PDS activity summary (written by aggregate:activity-pds).
     -- One row per (pds_url, window_days). bsky.network shards collapsed to 'bsky.network'.
@@ -130,6 +134,20 @@ function migrate(db: Database.Database) {
 
     CREATE INDEX IF NOT EXISTS idx_feed_generator_likes_date
       ON feed_generator_likes_daily(date);
+
+    -- Dead-letter queue for post-scorer batches that failed to score or upload.
+    -- Retried on each flush cycle; attempts drives exponential backoff via next_retry_at.
+    CREATE TABLE IF NOT EXISTS score_dlq (
+      id            INTEGER PRIMARY KEY,
+      posts_json    TEXT    NOT NULL,         -- JSON array of BufferedPost objects
+      failed_at     TEXT    NOT NULL,         -- ISO timestamp of first failure
+      attempts      INTEGER NOT NULL DEFAULT 0,
+      last_error    TEXT,
+      next_retry_at TEXT    NOT NULL          -- ISO timestamp; retry when <= now()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_score_dlq_retry
+      ON score_dlq(next_retry_at, attempts);
   `);
 
   // Add activity_types column to existing DBs that predate this migration

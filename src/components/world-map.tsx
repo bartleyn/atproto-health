@@ -219,7 +219,7 @@ export function WorldMap({
           style={{ left: pinnedCluster.x + 12, top: pinnedCluster.y - 40 }}
         >
           <span className="text-amber-400">{pinnedCluster.pds}</span>
-          <span className="text-gray-500 ml-1.5">{pinnedCluster.dids.toLocaleString()} {selectedLang ?? selectedNamespace} {selectedLang ? "speakers" : "users"}</span>
+          <span className="text-gray-500 ml-1.5">{pinnedCluster.dids.toLocaleString()} {selectedLang ?? selectedNamespace} {selectedLang ? "speakers (may overlap)" : "users"}</span>
         </div>
       )}
     </div>

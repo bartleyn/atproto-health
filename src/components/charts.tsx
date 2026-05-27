@@ -834,7 +834,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
               <div className="flex items-center justify-between mb-0.5">
                 <p className="text-xs font-medium text-gray-300">Languages</p>
               </div>
-              <p className="text-xs text-gray-600 mb-2"># = active speakers (from jetstream data)</p>
+              <p className="text-xs text-gray-600 mb-2"># = active speakers (from jetstream data) · one user may count in multiple languages</p>
               {(() => {
                 const langDonutData = filteredTopLangs!.slice(0, 12).map(r => ({ name: r.lang, value: r.total_dids }));
                 return (
@@ -1029,7 +1029,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
             <div className="flex items-center justify-between mb-1">
               <p className="text-xs font-medium text-gray-300">Languages</p>
             </div>
-            <p className="text-xs text-gray-500 mb-3"># = active speakers · click to highlight</p>
+            <p className="text-xs text-gray-500 mb-3"># = active speakers · one user may count in multiple languages · click to highlight</p>
             <DonutChart
               data={filteredTopLangs!.slice(0, 12).map(r => ({ name: r.lang, value: r.total_dids }))}
               maxSlices={12}

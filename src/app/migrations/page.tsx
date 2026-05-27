@@ -92,7 +92,7 @@ export default async function MigrationsPage() {
         {/* Migration Flows Sankey + weekly bar */}
         <CollapsibleSection
           title="Where do users end up?"
-          subtitle="Where did:plc accounts ultimately landed — collapsed origin → current PDS. Hover for details. Click any node to highlight its trajectories forward and backward."
+          subtitle="Where did:plc accounts ultimately land — collapsed origin → current PDS. Hover for details. Click any node to highlight its trajectories forward and backward."
           storageKey="migrations-sankey"
         >
           <MigrationChartsSection sankeyData={flows} weeklyData={weeklyMigrations} />

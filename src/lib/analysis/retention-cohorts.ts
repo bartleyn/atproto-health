@@ -1,9 +1,9 @@
 /**
  * D1/D3/D7 retention for new accounts created since the start of activity collection.
  *
- * Cohort = DIDs that appear in both plc_account_creations (for creation date)
- * AND did_in_repo (confirmed to have an actual repo). Raw PLC creations are
- * ~10x larger due to DIDs that were allocated but never activated.
+ * Cohort = DIDs in both plc_account_creations and did_in_repo (confirmed activated repo),
+ * excluding spam/impersonation (skywatch_labels) and suspended/deleted (did_repo_status).
+ * Raw PLC creations are ~10x larger due to DIDs allocated but never activated.
  *
  * Usage:
  *   npx tsx src/lib/analysis/retention-cohorts.ts
@@ -69,6 +69,15 @@ activityDb.pragma("cache_size = -131072");   // 128 MB page cache
 activityDb.pragma("temp_store = MEMORY");
 activityDb.pragma("mmap_size = 2147483648"); // 2 GB mmap
 
+// Exclude spam/impersonation and suspended/deleted accounts — mirrors crosstabs exclusions.
+activityDb.exec(`
+  CREATE TEMP TABLE excluded_dids AS
+    SELECT did FROM plc.did_repo_status
+    UNION
+    SELECT did FROM plc.skywatch_labels WHERE label IN ('spam', 'impersonation');
+  CREATE INDEX temp.idx_excluded_dids ON excluded_dids(did);
+`);
+
 // Earliest and latest dates with activity data — used to bound cohort window
 const { min_date, max_date } = activityDb.prepare(
   `SELECT MIN(date) AS min_date, MAX(date) AS max_date FROM did_activity_daily`
@@ -93,7 +102,7 @@ const retentionByDay = activityDb.prepare(`
   WITH cohorts AS (
     SELECT
       date(p.created_at)                                          AS creation_date,
-      r.did,
+      p.did,
       CASE
         WHEN r.pds_url LIKE '%bsky.network%'
           OR r.pds_url LIKE '%bsky.social%'  THEN 'bsky'
@@ -101,7 +110,9 @@ const retentionByDay = activityDb.prepare(`
       END                                                         AS pds_type
     FROM plc.plc_account_creations p
     INNER JOIN plc.did_in_repo r ON r.did = p.did
+    LEFT JOIN excluded_dids ex ON p.did = ex.did
     WHERE date(p.created_at) BETWEEN ? AND ?
+      AND ex.did IS NULL
   ),
   joined AS (
     SELECT
@@ -154,7 +165,7 @@ const retentionAggregate = activityDb.prepare(`
   WITH cohorts AS (
     SELECT
       date(p.created_at)                                          AS creation_date,
-      r.did,
+      p.did,
       CASE
         WHEN r.pds_url LIKE '%bsky.network%'
           OR r.pds_url LIKE '%bsky.social%'  THEN 'bsky'
@@ -162,7 +173,9 @@ const retentionAggregate = activityDb.prepare(`
       END                                                         AS pds_type
     FROM plc.plc_account_creations p
     INNER JOIN plc.did_in_repo r ON r.did = p.did
+    LEFT JOIN excluded_dids ex ON p.did = ex.did
     WHERE date(p.created_at) BETWEEN ? AND ?
+      AND ex.did IS NULL
   ),
   joined AS (
     SELECT
@@ -211,28 +224,40 @@ const retentionByPds = activityDb.prepare(`
   WITH cohorts AS (
     SELECT
       date(p.created_at)  AS creation_date,
-      r.did,
+      p.did,
       r.pds_url
     FROM plc.plc_account_creations p
     INNER JOIN plc.did_in_repo r ON r.did = p.did
+    LEFT JOIN excluded_dids ex ON p.did = ex.did
     WHERE date(p.created_at) BETWEEN ? AND ?
       AND r.pds_url NOT LIKE '%bsky.network%'
       AND r.pds_url NOT LIKE '%bsky.social%'
+      AND ex.did IS NULL
   ),
   joined AS (
     SELECT
       c.pds_url,
       c.did,
+      MAX(CASE WHEN a.date = date(c.creation_date, '+1 day')  THEN 1 ELSE 0 END) AS d1,
+      MAX(CASE WHEN a.date = date(c.creation_date, '+3 days') THEN 1 ELSE 0 END) AS d3,
       MAX(CASE WHEN a.date = date(c.creation_date, '+7 days') THEN 1 ELSE 0 END) AS d7
     FROM cohorts c
     LEFT JOIN did_activity_daily a
       ON a.did = c.did
-      AND a.date = date(c.creation_date, '+7 days')
+      AND a.date IN (
+        date(c.creation_date, '+1 day'),
+        date(c.creation_date, '+3 days'),
+        date(c.creation_date, '+7 days')
+      )
     GROUP BY c.pds_url, c.creation_date, c.did
   )
   SELECT
     pds_url,
     COUNT(*)                                         AS cohort_size,
+    SUM(d1)                                          AS d1_n,
+    ROUND(100.0 * SUM(d1) / COUNT(*), 2)             AS d1_pct,
+    SUM(d3)                                          AS d3_n,
+    ROUND(100.0 * SUM(d3) / COUNT(*), 2)             AS d3_pct,
     SUM(d7)                                          AS d7_n,
     ROUND(100.0 * SUM(d7) / COUNT(*), 2)             AS d7_pct
   FROM joined
@@ -242,6 +267,6 @@ const retentionByPds = activityDb.prepare(`
   LIMIT 50
 `).all(START_DATE, END_DATE) as Record<string, unknown>[];
 
-report("D7 Retention by PDS (indie, ≥10 new accounts, top 50)", "retention_by_pds.csv", retentionByPds);
+report("D1/D3/D7 Retention by PDS (indie, ≥10 new accounts, top 50)", "retention_by_pds.csv", retentionByPds);
 
 console.log(`\nDone. CSVs written to ${OUT_DIR}/\n`);

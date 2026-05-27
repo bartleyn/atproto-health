@@ -296,14 +296,11 @@ if (shouldRun("cohort_activation")) {
 const cohortActivationRate = activityDb.prepare(`
   WITH
  total_by_bucket AS (
-    -- Use plc_account_creations as denominator: continuously updated by PLC collector,
-    -- so it includes accounts created since the last scan:pds-status run.
-    -- did_in_repo would undercount new cohorts whose PDSes haven't been scanned yet.
-    -- Mirrors active_window_clean exclusions: did_repo_status + skywatch spam/impersonation.
     SELECT
       ${AGE_BUCKET} AS age_bucket,
       COUNT(*) AS total_repos
     FROM plc.plc_account_creations p
+    JOIN plc.did_in_repo r ON p.did = r.did
     LEFT JOIN plc.did_repo_status s ON p.did = s.did
     LEFT JOIN plc.skywatch_labels sl ON p.did = sl.did AND sl.label IN ('spam', 'impersonation')
     WHERE s.did IS NULL
@@ -316,6 +313,7 @@ const cohortActivationRate = activityDb.prepare(`
       COUNT(DISTINCT a.did) AS active_users
     FROM active_window_clean a
     JOIN plc.plc_account_creations p ON a.did = p.did
+    JOIN plc.did_in_repo r ON a.did = r.did
     GROUP BY age_bucket
   )
   SELECT
@@ -477,17 +475,26 @@ report("pds.trump.com Weekly DID Registrations", "trump_pds_weekly.csv", trumpWe
 
 if (shouldRun("lang_activity")) {
 const langActivity = activityDb.prepare(`
+  WITH agg AS (
+    SELECT did,
+      MAX(activity_types & 1) AS posted,
+      MAX(activity_types & 2) AS liked,
+      MAX(activity_types & 4) AS reposted,
+      MAX(activity_types & 8) AS followed
+    FROM active_window_clean
+    GROUP BY did
+  )
   SELECT
     dl.lang,
     COUNT(DISTINCT dl.did)                                                AS active_users,
     SUM(dl.post_count)                                                    AS lifetime_posts,
     ROUND(1.0 * SUM(dl.post_count) / COUNT(DISTINCT dl.did), 1)          AS avg_lifetime_posts_per_user,
-    SUM(CASE WHEN a.activity_types & 1 THEN 1 ELSE 0 END)                AS posted_in_window,
-    SUM(CASE WHEN a.activity_types & 2 THEN 1 ELSE 0 END)                AS liked_in_window,
-    SUM(CASE WHEN a.activity_types & 4 THEN 1 ELSE 0 END)                AS reposted_in_window,
-    SUM(CASE WHEN a.activity_types & 8 THEN 1 ELSE 0 END)                AS followed_in_window
+    SUM(a.posted)                                                         AS posted_in_window,
+    SUM(a.liked)                                                          AS liked_in_window,
+    SUM(a.reposted)                                                       AS reposted_in_window,
+    SUM(a.followed)                                                       AS followed_in_window
   FROM did_langs dl
-  JOIN active_window_clean a ON dl.did = a.did
+  JOIN agg a ON dl.did = a.did
   GROUP BY dl.lang
   ORDER BY active_users DESC
   LIMIT 40

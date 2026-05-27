@@ -345,6 +345,12 @@ export function getPlcDataTimestamp(): { collected_through: string; aggregated_a
   return { collected_through: cursor.collected_through, aggregated_at: agg?.aggregated_at ?? cursor.collected_through };
 }
 
+export function getActiveCreationLastRun(): string | null {
+  const db = getPlcDb();
+  const row = db.prepare(`SELECT updated_at FROM active_creation_cursor WHERE id = 1`).get() as { updated_at: string } | undefined;
+  return row?.updated_at ?? null;
+}
+
 export function getEcosystemStats(hideBsky = false): EcosystemStats {
   const db = getPlcDb();
   const bskyFilter = hideBsky ? `AND m.pds_url NOT LIKE '%bsky.network'` : "";

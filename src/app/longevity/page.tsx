@@ -1,6 +1,6 @@
 export const dynamic = "force-dynamic";
 
-import { getPdsAgeData, getAccountCohortCounts, getActiveCreationTimeseriesWeekly, getPlcDataTimestamp } from "@/lib/db/plc-queries";
+import { getPdsAgeData, getAccountCohortCounts, getActiveCreationTimeseriesWeekly, getPlcDataTimestamp, getActiveCreationLastRun } from "@/lib/db/plc-queries";
 import { PdsAgeChart, SimpleBarChart, CreationChartsSection } from "@/components/charts";
 import { CollapsibleSection } from "@/components/collapsible-section";
 
@@ -31,6 +31,7 @@ export default async function LongevityPage() {
   const activeCreations  = getActiveCreationTimeseriesWeekly(false);
   const activeCreationsNoBsky = getActiveCreationTimeseriesWeekly(true);
   const timestamp        = getPlcDataTimestamp();
+  const creationLastRun  = getActiveCreationLastRun();
 
   const totalAccounts = cohortData.reduce((s, r) => s + r.count, 0);
   const cohortBuckets = cohortData.map(r => ({ name: r.cohort, value: r.count }));
@@ -113,7 +114,7 @@ export default async function LongevityPage() {
 
         <CollapsibleSection
           title="Weekly Repo Creation By PDS"
-          subtitle="Counts from the AT Protocol PLC log — unique did:plc creations per PDS (did:web excluded). Does not double-count PDSes sharing a backend; does not include migrated-in accounts. Normalized to 100% — hover for actual counts. Top 10 PDSes by total volume."
+          subtitle={`Counts from the AT Protocol PLC log — unique did:plc creations per PDS (did:web excluded). Does not double-count PDSes sharing a backend; does not include migrated-in accounts. Normalized to 100% — hover for actual counts. Top 10 PDSes by total volume.${creationLastRun ? ` Last updated: ${new Date(creationLastRun).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" })}.` : ""}`}
           storageKey="longevity-creations"
         >
           {activeCreations.length === 0 ? (

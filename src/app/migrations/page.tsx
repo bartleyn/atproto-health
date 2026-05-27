@@ -111,7 +111,7 @@ export default async function MigrationsPage() {
         {journeyStats.totalMigrants > 0 && (
           <CollapsibleSection
             title="Migration Journey Length"
-            subtitle={`How many times did each account migrate? Excludes bsky.network internal resharding — only voluntary migrations between distinct operators counted. Max recorded: ${journeyStats.maxMigrations} migrations by a single account.`}
+            subtitle={`How many times did each account migrate? Excludes bsky.network internal resharding — only voluntary migrations between distinct operators counted.`}
             storageKey="migrations-journey"
           >
             <div className="grid grid-cols-2 gap-4 mb-6">

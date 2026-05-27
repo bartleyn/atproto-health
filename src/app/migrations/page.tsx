@@ -66,7 +66,7 @@ export default async function MigrationsPage() {
             <StatCard
               label="Total repos"
               value={fmt(scanStats.totalUsers)}
-              sub={`Across ${scanStats.total.toLocaleString()} tracked PDSes · from listRepos · approximate, likely undercounting`}
+              sub={`Across ${scanStats.total.toLocaleString()} PDSes ever seen · from listRepos · approximate, likely undercounting`}
             />
           </div>
           {/* Row 2: migration details */}
@@ -82,7 +82,7 @@ export default async function MigrationsPage() {
               sub="Independent PDS transfers only · excludes bsky.social and internal bsky.network resharding"
             />
             <StatCard
-              label="PDSes tracked"
+              label="PDSes ever seen"
               value={fmt(scanStats.total)}
               sub="From directory scans, PLC discovery, and did:web"
             />

@@ -204,7 +204,7 @@ export default async function Home({
         , supplemented with additional PDSes discovered via the AT Protocol PLC log. Online/offline and Open Reg reflect mary&apos;s periodic directory scans.
       </p>
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-4">
-        <StatCard label="Total PDSes" value={stats.total} />
+        <StatCard label="PDSes Ever Seen" value={stats.total} />
         <StatCard label="Online" value={stats.online} accent="green" />
         <StatCard label="Offline" value={stats.offline} accent="red" />
         <StatCard label="Open Reg" value={stats.openReg} accent="blue" />

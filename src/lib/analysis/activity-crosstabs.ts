@@ -11,7 +11,7 @@ const daysBack = args[0] && !args[0].startsWith("--") ? parseInt(args[0], 10) : 
 //   trump_weekly, lang_activity, migration_activity, engagement_depth, starterpacks,
 //   ns_retention, daily_actions_by_cohort,
 //   inter_visit_gaps, action_cadence, recency,
-//   new_user_follow_like, dau_mau
+//   new_user_follow_like, dau_mau, wau_by_cohort, mau_by_cohort
 //
 // --history N  → days of history for the dau_mau time series (default: 60)
 const historyIdx = args.indexOf("--history");
@@ -72,7 +72,9 @@ function report(title: string, filename: string, rows: Record<string, unknown>[]
 
 const activityDb = new Database(path.join(process.cwd(), "jetstream-activity.db"), { readonly: true });
 const plcDb = new Database(path.join(process.cwd(), "plc-migrations.db"), { readonly: true });
-activityDb.exec(`ATTACH DATABASE '${plcDb.name}' as plc`);
+const analysisDb = new Database(path.join(process.cwd(), "analysis.db"), { readonly: true });
+activityDb.exec(`ATTACH DATABASE '${plcDb.name}' AS plc`);
+activityDb.exec(`ATTACH DATABASE '${analysisDb.name}' AS analysis`);
 
 // 128 MB page cache + in-memory temp tables: keeps sort/hash work out of the
 // WAL files so analysis I/O doesn't compete with the live collector writes.
@@ -80,15 +82,6 @@ activityDb.pragma("cache_size = -131072");
 activityDb.pragma("temp_store = MEMORY");
 // Memory-map the DB file so the OS page cache serves reads without syscall overhead.
 activityDb.pragma("mmap_size = 2147483648");  // 2 GB
-
-// Materialise once; all queries join against this instead of repeating the CTE.
-activityDb.exec(`
-  CREATE TEMP TABLE excluded_dids AS
-    SELECT did FROM plc.did_repo_status
-    UNION
-    SELECT did FROM plc.skywatch_labels WHERE label IN ('spam', 'impersonation');
-  CREATE INDEX temp.idx_excluded_dids ON excluded_dids(did);
-`);
 
 // ── Shared SQL fragments ──────────────────────────────────────────────────────
 
@@ -123,7 +116,7 @@ activityDb.exec(`
   CREATE TEMP TABLE active_window_clean AS
     SELECT DISTINCT d.did, d.activity_types
     FROM did_activity_daily d
-    LEFT JOIN excluded_dids ex ON d.did = ex.did
+    LEFT JOIN analysis.excluded_dids ex ON d.did = ex.did
     WHERE d.date >= '${windowStart}'
       AND ex.did IS NULL;
   CREATE INDEX temp.idx_active_window_clean_did ON active_window_clean(did);
@@ -151,7 +144,7 @@ const activityByAge = activityDb.prepare(`
       ${AGE_BUCKET} AS age_bucket,
       a.activity_types
     FROM active_window_clean a
-    JOIN plc.plc_account_creations p ON a.did = p.did
+    JOIN analysis.cohort_base p ON a.did = p.did
   )
   SELECT age_bucket, ${ACTIVITY_COLS}
   FROM buckets GROUP BY age_bucket
@@ -194,7 +187,7 @@ const stickiness = activityDb.prepare(`
   daily_counts AS (
     SELECT d.date, COUNT(DISTINCT d.did) AS daily_uniques
     FROM did_activity_daily d
-    LEFT JOIN excluded_dids ex ON d.did = ex.did
+    LEFT JOIN analysis.excluded_dids ex ON d.did = ex.did
     WHERE d.date >= '${windowStart}'
       AND ex.did IS NULL
     GROUP BY d.date
@@ -225,8 +218,8 @@ const stickinessByBucket = activityDb.prepare(`
       ${AGE_BUCKET} AS age_bucket,
       COUNT(DISTINCT d.did) AS daily_uniques
     FROM did_activity_daily d
-    JOIN plc.plc_account_creations p ON d.did = p.did
-    LEFT JOIN excluded_dids ex ON d.did = ex.did
+    JOIN analysis.cohort_base p ON d.did = p.did
+    LEFT JOIN analysis.excluded_dids ex ON d.did = ex.did
     WHERE d.date >= '${windowStart}'
       AND ex.did IS NULL
     GROUP BY d.date, age_bucket
@@ -236,7 +229,7 @@ const stickinessByBucket = activityDb.prepare(`
       ${AGE_BUCKET} AS age_bucket,
       COUNT(DISTINCT a.did) AS total_uniques
     FROM active_window_clean a
-    JOIN plc.plc_account_creations p ON a.did = p.did
+    JOIN analysis.cohort_base p ON a.did = p.did
     GROUP BY age_bucket
   )
   SELECT
@@ -266,8 +259,8 @@ user_days AS (
       ${AGE_BUCKET} AS age_bucket,
       COUNT(DISTINCT d.date) AS active_days
     FROM did_activity_daily d
-    JOIN plc.plc_account_creations p ON d.did = p.did
-    LEFT JOIN excluded_dids ex ON d.did = ex.did
+    JOIN analysis.cohort_base p ON d.did = p.did
+    LEFT JOIN analysis.excluded_dids ex ON d.did = ex.did
     WHERE d.date >= date('now', '-' || ? || ' days')
       AND ex.did IS NULL
     GROUP BY d.did, age_bucket
@@ -299,12 +292,7 @@ const cohortActivationRate = activityDb.prepare(`
     SELECT
       ${AGE_BUCKET} AS age_bucket,
       COUNT(*) AS total_repos
-    FROM plc.plc_account_creations p
-    JOIN plc.did_in_repo r ON p.did = r.did
-    LEFT JOIN plc.did_repo_status s ON p.did = s.did
-    LEFT JOIN plc.skywatch_labels sl ON p.did = sl.did AND sl.label IN ('spam', 'impersonation')
-    WHERE s.did IS NULL
-      AND sl.did IS NULL
+    FROM analysis.cohort_base p
     GROUP BY age_bucket
   ),
   active_by_bucket AS (
@@ -312,8 +300,7 @@ const cohortActivationRate = activityDb.prepare(`
       ${AGE_BUCKET} AS age_bucket,
       COUNT(DISTINCT a.did) AS active_users
     FROM active_window_clean a
-    JOIN plc.plc_account_creations p ON a.did = p.did
-    JOIN plc.did_in_repo r ON a.did = r.did
+    JOIN analysis.cohort_base p ON a.did = p.did
     GROUP BY age_bucket
   )
   SELECT
@@ -342,7 +329,7 @@ active_users AS (
       MAX(CASE WHEN d.activity_types & 4 THEN 1 ELSE 0 END) AS ever_reposted,
       MAX(CASE WHEN d.activity_types & 8 THEN 1 ELSE 0 END) AS ever_followed
     FROM did_activity_daily d
-    LEFT JOIN excluded_dids ex ON d.did = ex.did
+    LEFT JOIN analysis.excluded_dids ex ON d.did = ex.did
     WHERE d.date >= date('now', '-' || ? || ' days')
       AND ex.did IS NULL
     GROUP BY d.did
@@ -351,10 +338,7 @@ active_users AS (
     SELECT
       ${AGE_BUCKET} AS age_bucket,
       COUNT(*) AS cohort_size
-    FROM plc.plc_account_creations p
-    JOIN plc.did_in_repo r ON p.did = r.did
-    LEFT JOIN plc.did_repo_status s ON p.did = s.did
-    WHERE s.did IS NULL
+    FROM analysis.cohort_base p
     GROUP BY age_bucket
   ),
   action_counts AS (
@@ -365,7 +349,7 @@ active_users AS (
       SUM(a.ever_reposted) AS reposted,
       SUM(a.ever_followed) AS followed
     FROM active_users a
-    JOIN plc.plc_account_creations p ON a.did = p.did
+    JOIN analysis.cohort_base p ON a.did = p.did
     GROUP BY age_bucket
   )
   SELECT
@@ -574,7 +558,7 @@ user_depth AS (
         MAX(activity_types & 8 > 0)
       )                          AS distinct_types_used
     FROM did_activity_daily d
-    LEFT JOIN excluded_dids ex ON d.did = ex.did
+    LEFT JOIN analysis.excluded_dids ex ON d.did = ex.did
     WHERE d.date >= date('now', '-' || ? || ' days')
       AND ex.did IS NULL
     GROUP BY d.did
@@ -584,7 +568,7 @@ user_depth AS (
       ud.distinct_types_used,
       ${AGE_BUCKET} AS age_bucket
     FROM user_depth ud
-    JOIN plc.plc_account_creations p ON ud.did = p.did
+    JOIN analysis.cohort_base p ON ud.did = p.did
   )
   SELECT
     age_bucket,
@@ -693,10 +677,8 @@ const dailyActionsByCohort = activityDb.prepare(`
     COUNT(DISTINCT CASE WHEN d.activity_types & 8 THEN d.did END) AS unique_followers,
     COUNT(DISTINCT CASE WHEN d.activity_types & 1 THEN d.did END) AS unique_posters
   FROM did_activity_daily d
-  JOIN plc.plc_account_creations p ON d.did = p.did
-  LEFT JOIN excluded_dids ex ON d.did = ex.did
+  JOIN analysis.cohort_base p ON d.did = p.did
   WHERE d.date >= date('now', '-' || ? || ' days')
-    AND ex.did IS NULL
   GROUP BY d.date, age_bucket
   ORDER BY age_bucket, d.date
 `).all(daysBack) as Record<string, unknown>[];
@@ -723,7 +705,7 @@ if (needsGapTables) {
     CREATE TEMP TABLE activity_90d AS
       SELECT d.did, d.date, d.activity_types
       FROM did_activity_daily d
-      LEFT JOIN excluded_dids ex ON d.did = ex.did
+      LEFT JOIN analysis.excluded_dids ex ON d.did = ex.did
       WHERE d.date >= date('now', '-${GAP_LOOKBACK} days')
         AND ex.did IS NULL;
     CREATE INDEX temp.idx_activity_90d_did_date ON activity_90d(did, date);
@@ -753,7 +735,7 @@ const interVisitGaps = activityDb.prepare(`
     SUM(CASE WHEN g.gap_days > 14              THEN 1 ELSE 0 END)              AS gap_15plus_d,
     ROUND(100.0 * SUM(CASE WHEN g.gap_days = 1 THEN 1 ELSE 0 END) / COUNT(*), 1) AS pct_returned_next_day
   FROM gaps g
-  JOIN plc.plc_account_creations p ON g.did = p.did
+  JOIN analysis.cohort_base p ON g.did = p.did
   WHERE g.gap_days IS NOT NULL
   GROUP BY age_bucket
   ORDER BY age_bucket
@@ -816,7 +798,7 @@ const actionCadence = activityDb.prepare(`
     SUM(CASE WHEN g.gap_days BETWEEN 4 AND 7  THEN 1 ELSE 0 END)                 AS gap_4_7d,
     SUM(CASE WHEN g.gap_days > 7              THEN 1 ELSE 0 END)                 AS gap_8plus_d
   FROM all_gaps g
-  JOIN plc.plc_account_creations p ON g.did = p.did
+  JOIN analysis.cohort_base p ON g.did = p.did
   GROUP BY age_bucket, g.action
   ORDER BY age_bucket, g.action
 `).all() as Record<string, unknown>[];
@@ -851,7 +833,7 @@ const recencyDist = activityDb.prepare(`
     SUM(CASE WHEN julianday('now') - julianday(ls.last_date) BETWEEN 8 AND 30 THEN 1 ELSE 0 END) AS seen_8_30d,
     SUM(CASE WHEN julianday('now') - julianday(ls.last_date) > 30  THEN 1 ELSE 0 END) AS seen_31plus_d
   FROM last_seen ls
-  JOIN plc.plc_account_creations p ON ls.did = p.did
+  JOIN analysis.cohort_base p ON ls.did = p.did
   GROUP BY age_bucket
   ORDER BY age_bucket
 `).all() as Record<string, unknown>[];
@@ -881,11 +863,9 @@ const newUserFollowLike = activityDb.prepare(`
     ROUND(100.0 * COUNT(DISTINCT CASE WHEN (d.activity_types & 10) = 10 THEN d.did END)
                 / NULLIF(COUNT(DISTINCT CASE WHEN d.activity_types & 8  THEN d.did END), 0), 1) AS pct_followed_and_liked
   FROM did_activity_daily d
-  JOIN plc.plc_account_creations p ON d.did = p.did
-  LEFT JOIN excluded_dids ex ON d.did = ex.did
+  JOIN analysis.cohort_base p ON d.did = p.did
   WHERE d.date >= '${windowStart}'
     AND p.created_at >= '${windowStart}'
-    AND ex.did IS NULL
   GROUP BY d.date
   ORDER BY d.date
 `).all() as Record<string, unknown>[];
@@ -914,7 +894,7 @@ const dauMauSeries = activityDb.prepare(`
   dau AS (
     SELECT d.date, COUNT(DISTINCT d.did) AS dau
     FROM did_activity_daily d
-    LEFT JOIN excluded_dids ex ON d.did = ex.did
+    LEFT JOIN analysis.excluded_dids ex ON d.did = ex.did
     WHERE d.date >= ?
       AND ex.did IS NULL
     GROUP BY d.date
@@ -929,7 +909,7 @@ const dauMauSeries = activityDb.prepare(`
     FROM trend_dates td
     JOIN did_activity_daily d
       ON d.date BETWEEN date(td.date, '-27 days') AND td.date
-    LEFT JOIN excluded_dids ex ON d.did = ex.did
+    LEFT JOIN analysis.excluded_dids ex ON d.did = ex.did
     WHERE ex.did IS NULL
     GROUP BY td.date
   )
@@ -944,6 +924,59 @@ const dauMauSeries = activityDb.prepare(`
 `).all(warmupStart, trendStart) as Record<string, unknown>[];
 
 report(`DAU / MAU Time Series (last ${historyDays} days)`, `dau_mau_${historyDays}d.csv`, dauMauSeries);
+}
+
+// ── 22. WAU by cohort ─────────────────────────────────────────────────────────
+// Weekly active users per age cohort — distinct DIDs active in each ISO week.
+// Uses historyDays lookback; groups by the Monday-anchored week start.
+
+if (shouldRun("wau_by_cohort")) {
+const wauByCohort = activityDb.prepare(`
+  SELECT
+    date(d.date, 'weekday 1', '-7 days') AS week_start,
+    ${AGE_BUCKET}                         AS age_bucket,
+    COUNT(DISTINCT d.did)                 AS wau
+  FROM did_activity_daily d
+  JOIN analysis.cohort_base p ON d.did = p.did
+  LEFT JOIN analysis.excluded_dids ex ON d.did = ex.did
+  WHERE d.date >= date('now', '-' || ? || ' days')
+    AND ex.did IS NULL
+  GROUP BY week_start, age_bucket
+  ORDER BY week_start, age_bucket
+`).all(historyDays) as Record<string, unknown>[];
+
+report(
+  `WAU by Cohort (last ${historyDays} days)`,
+  `wau_by_cohort_${historyDays}d.csv`,
+  wauByCohort
+);
+}
+
+// ── 23. MAU by cohort ─────────────────────────────────────────────────────────
+// Monthly active users per age cohort — distinct DIDs active in each calendar month.
+// Trailing 28-day rolling windows would be too expensive across 40M rows;
+// calendar month is fast and interpretable for charting.
+
+if (shouldRun("mau_by_cohort")) {
+const mauByCohort = activityDb.prepare(`
+  SELECT
+    strftime('%Y-%m', d.date) AS month,
+    ${AGE_BUCKET}              AS age_bucket,
+    COUNT(DISTINCT d.did)      AS mau
+  FROM did_activity_daily d
+  JOIN analysis.cohort_base p ON d.did = p.did
+  LEFT JOIN analysis.excluded_dids ex ON d.did = ex.did
+  WHERE d.date >= date('now', '-' || ? || ' days')
+    AND ex.did IS NULL
+  GROUP BY month, age_bucket
+  ORDER BY month, age_bucket
+`).all(historyDays) as Record<string, unknown>[];
+
+report(
+  `MAU by Cohort (last ${historyDays} days)`,
+  `mau_by_cohort_${historyDays}d.csv`,
+  mauByCohort
+);
 }
 
 console.log(`\nDone. CSVs written to ${OUT_DIR}/\n`);

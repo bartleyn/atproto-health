@@ -473,6 +473,20 @@ export function getPdsAgeData(minAccounts = 1): PdsAgeRow[] {
   `).all() as PdsAgeRow[];
 }
 
+export function getActivePdsCount(): number {
+  const db = getPlcDb();
+  const row = db.prepare(`
+    SELECT COUNT(*) AS cnt FROM (
+      SELECT RTRIM(pds_url, '/') AS pds_url
+      FROM pds_repo_status_snapshots
+      WHERE ${JUNK_PDS_FILTER}
+      GROUP BY RTRIM(pds_url, '/')
+      HAVING MAX(total_scanned) > 0
+    )
+  `).get() as { cnt: number };
+  return row.cnt;
+}
+
 export function getScannedPdsCount(): number {
   const db = getPlcDb();
   const row = db.prepare(`

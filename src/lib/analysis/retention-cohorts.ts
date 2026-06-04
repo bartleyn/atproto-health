@@ -62,21 +62,12 @@ function report(title: string, filename: string, rows: Record<string, unknown>[]
 // ── DB setup ──────────────────────────────────────────────────────────────────
 
 const activityDb = new Database(path.join(process.cwd(), "jetstream-activity.db"), { readonly: true });
-const plcDb = new Database(path.join(process.cwd(), "plc-migrations.db"), { readonly: true });
-activityDb.exec(`ATTACH DATABASE '${plcDb.name}' as plc`);
+const analysisDb = new Database(path.join(process.cwd(), "analysis.db"), { readonly: true });
+activityDb.exec(`ATTACH DATABASE '${analysisDb.name}' AS analysis`);
 
 activityDb.pragma("cache_size = -131072");   // 128 MB page cache
 activityDb.pragma("temp_store = MEMORY");
 activityDb.pragma("mmap_size = 2147483648"); // 2 GB mmap
-
-// Exclude spam/impersonation and suspended/deleted accounts — mirrors crosstabs exclusions.
-activityDb.exec(`
-  CREATE TEMP TABLE excluded_dids AS
-    SELECT did FROM plc.did_repo_status
-    UNION
-    SELECT did FROM plc.skywatch_labels WHERE label IN ('spam', 'impersonation');
-  CREATE INDEX temp.idx_excluded_dids ON excluded_dids(did);
-`);
 
 // Earliest and latest dates with activity data — used to bound cohort window
 const { min_date, max_date } = activityDb.prepare(
@@ -101,18 +92,11 @@ if (max_date > END_DATE) {
 const retentionByDay = activityDb.prepare(`
   WITH cohorts AS (
     SELECT
-      date(p.created_at)                                          AS creation_date,
-      p.did,
-      CASE
-        WHEN r.pds_url LIKE '%bsky.network%'
-          OR r.pds_url LIKE '%bsky.social%'  THEN 'bsky'
-        ELSE                                      'indie'
-      END                                                         AS pds_type
-    FROM plc.plc_account_creations p
-    INNER JOIN plc.did_in_repo r ON r.did = p.did
-    LEFT JOIN excluded_dids ex ON p.did = ex.did
-    WHERE date(p.created_at) BETWEEN ? AND ?
-      AND ex.did IS NULL
+      date(c.created_at) AS creation_date,
+      c.did,
+      c.pds_type
+    FROM analysis.cohort_base c
+    WHERE date(c.created_at) BETWEEN ? AND ?
   ),
   joined AS (
     SELECT
@@ -164,18 +148,11 @@ report("D1/D3/D7 Retention by Cohort Day × PDS Type", "retention_by_day.csv", r
 const retentionAggregate = activityDb.prepare(`
   WITH cohorts AS (
     SELECT
-      date(p.created_at)                                          AS creation_date,
-      p.did,
-      CASE
-        WHEN r.pds_url LIKE '%bsky.network%'
-          OR r.pds_url LIKE '%bsky.social%'  THEN 'bsky'
-        ELSE                                      'indie'
-      END                                                         AS pds_type
-    FROM plc.plc_account_creations p
-    INNER JOIN plc.did_in_repo r ON r.did = p.did
-    LEFT JOIN excluded_dids ex ON p.did = ex.did
-    WHERE date(p.created_at) BETWEEN ? AND ?
-      AND ex.did IS NULL
+      date(c.created_at) AS creation_date,
+      c.did,
+      c.pds_type
+    FROM analysis.cohort_base c
+    WHERE date(c.created_at) BETWEEN ? AND ?
   ),
   joined AS (
     SELECT
@@ -223,16 +200,12 @@ report("Aggregate Retention (full window) × PDS Type", "retention_aggregate.csv
 const retentionByPds = activityDb.prepare(`
   WITH cohorts AS (
     SELECT
-      date(p.created_at)  AS creation_date,
-      p.did,
-      r.pds_url
-    FROM plc.plc_account_creations p
-    INNER JOIN plc.did_in_repo r ON r.did = p.did
-    LEFT JOIN excluded_dids ex ON p.did = ex.did
-    WHERE date(p.created_at) BETWEEN ? AND ?
-      AND r.pds_url NOT LIKE '%bsky.network%'
-      AND r.pds_url NOT LIKE '%bsky.social%'
-      AND ex.did IS NULL
+      date(c.created_at) AS creation_date,
+      c.did,
+      c.pds_url
+    FROM analysis.cohort_base c
+    WHERE date(c.created_at) BETWEEN ? AND ?
+      AND c.pds_type = 'indie'
   ),
   joined AS (
     SELECT

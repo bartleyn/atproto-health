@@ -666,7 +666,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
   const tableLabel = insetTab === "lang"
     ? { title: "Top PDSes by recent users posting on bsky.app with a tagged language", col: "Users" }
     : insetTab === "namespace"
-    ? { title: "Top PDSes by recent users using a non-app.bsky lexicon", col: "Users" }
+    ? { title: "Top PDSes by recent users using a non-app.bsky NSID", col: "Users" }
     : selectedProvider
     ? { title: `Top ${selectedProvider} PDSes`, col: "Active repos" }
     : { title: "Top PDSes by active repos", col: "Active repos" };
@@ -746,7 +746,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
                   onClick={() => { setInsetTab("namespace"); setSelectedProvider(null); setSelectedLang(null); }}
                   className={`flex-1 text-xs py-0.5 rounded transition-colors ${insetTab === "namespace" ? "bg-gray-700 text-white" : "text-gray-500 hover:text-gray-300"}`}
                 >
-                  Lexicons
+                  NSIDs
                 </button>
               )}
             </div>
@@ -901,7 +901,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
           {insetTab === "namespace" && hasNamespaceData && (
             <>
               <div className="flex items-center justify-between mb-0.5">
-                <p className="text-xs font-medium text-gray-300">Lexicons</p>
+                <p className="text-xs font-medium text-gray-300">NSIDs</p>
               </div>
               <p className="text-xs text-gray-600 mb-2"># = recent unique users (jetstream, no backfill) · click to highlight</p>
               {(() => {
@@ -991,7 +991,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
               onClick={() => { setInsetTab("namespace"); setSelectedProvider(null); setSelectedLang(null); }}
               className={`flex-1 text-xs py-1 rounded transition-colors ${insetTab === "namespace" ? "bg-gray-700 text-white" : "text-gray-500 hover:text-gray-300"}`}
             >
-              Lexicons
+              NSIDs
             </button>
           )}
         </div>
@@ -1063,7 +1063,7 @@ export function InfraSection({ providers, cdnBreakdown, locations, providerLocat
 
         {insetTab === "namespace" && hasNamespaceData && (
           <>
-            <p className="text-xs font-medium text-gray-300 mb-1">Lexicons</p>
+            <p className="text-xs font-medium text-gray-300 mb-1">NSIDs</p>
             <p className="text-xs text-gray-500 mb-3"># = recent unique users · click to highlight</p>
             <DonutChart
               data={activeTopNamespaces.slice(0, 12).map(r => ({ name: r.ns, value: r.total_dids }))}
@@ -1184,12 +1184,12 @@ function PdsRankTable({ rows, traitLabel, mode }: {
   return (
     <div className="mt-6">
       <h3 className="text-sm font-semibold mb-0.5">
-        PDSes by &ldquo;{traitLabel}&rdquo; {mode === "lang" ? "language share" : "lexicon users"}
+        PDSes by &ldquo;{traitLabel}&rdquo; {mode === "lang" ? "language share" : "NSID users"}
       </h3>
       <p className="text-xs text-gray-500 mb-3">
         {mode === "lang"
           ? "Ranked by proportion of active speakers · composition bar shows top-5 language breakdown"
-          : "Ranked by unique users · composition bar shows top-5 lexicon breakdown"}
+          : "Ranked by unique users · composition bar shows top-5 NSID breakdown"}
       </p>
       <div className="overflow-x-auto rounded-lg border border-gray-800">
         <table className="w-full text-xs">

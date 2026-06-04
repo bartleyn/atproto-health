@@ -1,6 +1,6 @@
 export const dynamic = "force-dynamic";
 
-import { getPdsAgeData, getAccountCohortCounts, getActiveCreationTimeseriesWeekly, getPlcDataTimestamp, getActiveCreationLastRun } from "@/lib/db/plc-queries";
+import { getPdsAgeData, getAccountCohortCounts, getActiveCreationTimeseriesWeekly, getPlcDataTimestamp, getActiveCreationLastRun, getActivePdsCount } from "@/lib/db/plc-queries";
 import { PdsAgeChart, SimpleBarChart, CreationChartsSection } from "@/components/charts";
 import { CollapsibleSection } from "@/components/collapsible-section";
 
@@ -32,6 +32,7 @@ export default async function LongevityPage() {
   const activeCreationsNoBsky = getActiveCreationTimeseriesWeekly(true);
   const timestamp        = getPlcDataTimestamp();
   const creationLastRun  = getActiveCreationLastRun();
+  const activePdsCount   = getActivePdsCount();
 
   const totalAccounts = cohortData.reduce((s, r) => s + r.count, 0);
   const cohortBuckets = cohortData.map(r => ({ name: r.cohort, value: r.count }));
@@ -65,8 +66,8 @@ export default async function LongevityPage() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <StatCard
               label="PDSes with active repos"
-              value={indieOnly.length.toLocaleString()}
-              sub="PDSes with at least one active repo and at least one native did:plc account creation — excludes migration-only and did:web-only PDSes"
+              value={activePdsCount.toLocaleString()}
+              sub="PDSes that have ever returned at least one repo from listRepos"
             />
             <StatCard
               label="Oldest independent PDS"

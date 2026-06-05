@@ -3,19 +3,62 @@ import path from "path";
 import fs from "fs";
 
 const args = process.argv.slice(2);
-const daysBack = args[0] && !args[0].startsWith("--") ? parseInt(args[0], 10) : 3;
 
-// --only <query_name>  (repeatable) → run only named queries; omit to run all
-// Query names: activity_by_age, activity_by_label, stickiness, stickiness_by_age,
-//   active_days_dist, cohort_activation, action_rates, non_active, account_events,
-//   trump_weekly, lang_activity, migration_activity, engagement_depth, starterpacks,
-//   ns_retention, daily_actions_by_cohort,
-//   inter_visit_gaps, action_cadence, recency,
-//   new_user_follow_like, dau_mau, wau_by_cohort, mau_by_cohort
-//
-// --history N  → days of history for the dau_mau time series (default: 60)
+if (args.includes("--help") || args.includes("-h")) {
+  console.log(`
+usage: npm run analysis -- [daysBack] [flags]
+
+  daysBack              activity window in days (default: 3)
+
+flags:
+  --only <query>        run one query; repeatable to run several
+  --history N           days of history for time-series queries (default: 60)
+  --bsky-only           restrict cohort to bsky.network origin/current accounts
+  --cohort-end DATE     only include accounts created before DATE (YYYY-MM-DD)
+  --help                show this message
+
+queries:
+  activity_by_age       activity by cohort age bucket
+  activity_by_label     activity by Skywatch label
+  stickiness            overall DAU/WAU stickiness ratio
+  stickiness_by_age     stickiness broken down by cohort
+  active_days_dist      active days distribution × cohort
+  cohort_activation     % of each cohort active in window
+  action_rates          post/like/repost/follow rates by cohort
+  non_active            deactivated/takendown breakdown by cohort
+  account_events        daily delete/deactivate/reactivate/takendown counts
+  trump_weekly          pds.trump.com weekly DID registrations
+  lang_activity         language × activity breakdown
+  migration_activity    migrated vs non-migrated account activity
+  engagement_depth      distinct action types used per user by cohort
+  starterpacks          starterpack join rankings
+  ns_retention          AppView namespace retention rates
+  daily_actions_by_cohort  daily unique posters/likers/followers by cohort
+  inter_visit_gaps      days between consecutive active days by cohort
+  action_cadence        gaps between consecutive posting/liking/etc days
+  recency               days since last active, by cohort
+  new_user_follow_like  new-user follow→like funnel by day
+  dau_mau               DAU/MAU time series (uses --history)
+  wau_by_cohort         weekly active users by cohort (uses --history)
+  mau_by_cohort         monthly active users by cohort (uses --history)
+  new_user_activation_28d  % of new accounts active within 28d of creation
+  creation_weekly       new account creation counts by week
+
+examples:
+  npm run analysis -- 7
+  npm run analysis -- 7 --only cohort_activation --only action_rates
+  npm run analysis -- --only dau_mau --history 90
+  npm run analysis -- --only new_user_activation_28d --history 90 --cohort-end 2026-06-01
+`);
+  process.exit(0);
+}
+
+const daysBack = args[0] && !args[0].startsWith("--") ? parseInt(args[0], 10) : 3;
 const historyIdx = args.indexOf("--history");
 const historyDays = historyIdx >= 0 ? parseInt(args[historyIdx + 1], 10) : 60;
+const bskyOnly = args.includes("--bsky-only");
+const cohortEndIdx = args.indexOf("--cohort-end");
+const cohortEnd = cohortEndIdx >= 0 ? args[cohortEndIdx + 1] : null;
 
 const onlyFlags: string[] = [];
 for (let i = 0; i < args.length; i++) {
@@ -85,7 +128,7 @@ activityDb.pragma("mmap_size = 2147483648");  // 2 GB
 
 // ── Shared SQL fragments ──────────────────────────────────────────────────────
 
-const newAcctCutoff = daysAgoStr(7);  // accounts created in the last 7 days
+const newAcctCutoff = daysAgoStr(14);  // accounts created in the last 14 days
 
 const AGE_BUCKET = `CASE
   WHEN p.created_at >= '${newAcctCutoff}' THEN '0. new accounts (${newAcctCutoff}–${RUN_DATE})'
@@ -107,6 +150,8 @@ const ACTIVITY_COLS = `
 
 const windowStart = daysAgoStr(daysBack);
 console.log(`\nActivity crosstabs — activity window: ${windowStart} – ${RUN_DATE} (${daysBack} days)`);
+if (bskyOnly) console.log(`Cohort filter: bsky.network origin or current`);
+if (cohortEnd) console.log(`Cohort end:    created_at < ${cohortEnd}`);
 
 // Pre-materialise the active-user window so each query doesn't re-scan 33M rows.
 // active_window_clean: unique (did, activity_types) pairs for the window, spam/bots excluded.
@@ -129,6 +174,46 @@ activityDb.exec(`
 `);
 console.log(`  done.\n`);
 
+// When --bsky-only: pre-materialise a filtered cohort (currently on bsky.network OR
+// originally created there, covering accounts that have since migrated away).
+// plc.plc_account_creations holds the creation-time PDS; cohort_base holds the current PDS.
+let COHORT_TABLE = "analysis.cohort_base";
+if (bskyOnly) {
+  console.log(`Pre-materialising bsky_cohort…`);
+  activityDb.exec(`
+    CREATE TEMP TABLE bsky_cohort AS
+      -- fast path: currently on bsky.network (hits cohort_base pds_url index)
+      SELECT * FROM analysis.cohort_base
+      WHERE pds_url LIKE '%.bsky.network' OR pds_url LIKE '%.bsky.social'
+      UNION ALL
+      -- slow path: indie accounts that originated on bsky.network (~2K rows)
+      SELECT cb.*
+      FROM analysis.cohort_base cb
+      JOIN plc.plc_account_creations pac ON pac.did = cb.did
+      WHERE (cb.pds_url NOT LIKE '%.bsky.network' AND cb.pds_url NOT LIKE '%.bsky.social')
+        AND (pac.pds_url LIKE '%.bsky.network' OR pac.pds_url LIKE '%.bsky.social');
+    CREATE INDEX temp.idx_bsky_cohort_did        ON bsky_cohort(did);
+    CREATE INDEX temp.idx_bsky_cohort_created_at ON bsky_cohort(created_at);
+  `);
+  const { n } = activityDb.prepare(`SELECT COUNT(*) AS n FROM bsky_cohort`).get() as { n: number };
+  console.log(`  bsky_cohort: ${n.toLocaleString()} rows\n`);
+  COHORT_TABLE = "bsky_cohort";
+}
+
+if (cohortEnd) {
+  console.log(`Pre-materialising cohort_end_filtered (created_at < ${cohortEnd})…`);
+  activityDb.exec(`
+    CREATE TEMP TABLE cohort_end_filtered AS
+      SELECT * FROM ${COHORT_TABLE}
+      WHERE created_at < '${cohortEnd}';
+    CREATE INDEX temp.idx_cef_did        ON cohort_end_filtered(did);
+    CREATE INDEX temp.idx_cef_created_at ON cohort_end_filtered(created_at);
+  `);
+  const { n } = activityDb.prepare(`SELECT COUNT(*) AS n FROM cohort_end_filtered`).get() as { n: number };
+  console.log(`  cohort_end_filtered: ${n.toLocaleString()} rows\n`);
+  COHORT_TABLE = "cohort_end_filtered";
+}
+
 // Single read transaction: all queries see the same consistent DB snapshot.
 // BEGIN DEFERRED on a readonly WAL connection never blocks the live collector.
 activityDb.exec("BEGIN DEFERRED");
@@ -144,7 +229,7 @@ const activityByAge = activityDb.prepare(`
       ${AGE_BUCKET} AS age_bucket,
       a.activity_types
     FROM active_window_clean a
-    JOIN analysis.cohort_base p ON a.did = p.did
+    JOIN ${COHORT_TABLE} p ON a.did = p.did
   )
   SELECT age_bucket, ${ACTIVITY_COLS}
   FROM buckets GROUP BY age_bucket
@@ -218,7 +303,7 @@ const stickinessByBucket = activityDb.prepare(`
       ${AGE_BUCKET} AS age_bucket,
       COUNT(DISTINCT d.did) AS daily_uniques
     FROM did_activity_daily d
-    JOIN analysis.cohort_base p ON d.did = p.did
+    JOIN ${COHORT_TABLE} p ON d.did = p.did
     LEFT JOIN analysis.excluded_dids ex ON d.did = ex.did
     WHERE d.date >= '${windowStart}'
       AND ex.did IS NULL
@@ -229,7 +314,7 @@ const stickinessByBucket = activityDb.prepare(`
       ${AGE_BUCKET} AS age_bucket,
       COUNT(DISTINCT a.did) AS total_uniques
     FROM active_window_clean a
-    JOIN analysis.cohort_base p ON a.did = p.did
+    JOIN ${COHORT_TABLE} p ON a.did = p.did
     GROUP BY age_bucket
   )
   SELECT
@@ -259,7 +344,7 @@ user_days AS (
       ${AGE_BUCKET} AS age_bucket,
       COUNT(DISTINCT d.date) AS active_days
     FROM did_activity_daily d
-    JOIN analysis.cohort_base p ON d.did = p.did
+    JOIN ${COHORT_TABLE} p ON d.did = p.did
     LEFT JOIN analysis.excluded_dids ex ON d.did = ex.did
     WHERE d.date >= date('now', '-' || ? || ' days')
       AND ex.did IS NULL
@@ -292,7 +377,7 @@ const cohortActivationRate = activityDb.prepare(`
     SELECT
       ${AGE_BUCKET} AS age_bucket,
       COUNT(*) AS total_repos
-    FROM analysis.cohort_base p
+    FROM ${COHORT_TABLE} p
     GROUP BY age_bucket
   ),
   active_by_bucket AS (
@@ -300,7 +385,7 @@ const cohortActivationRate = activityDb.prepare(`
       ${AGE_BUCKET} AS age_bucket,
       COUNT(DISTINCT a.did) AS active_users
     FROM active_window_clean a
-    JOIN analysis.cohort_base p ON a.did = p.did
+    JOIN ${COHORT_TABLE} p ON a.did = p.did
     GROUP BY age_bucket
   )
   SELECT
@@ -338,7 +423,7 @@ active_users AS (
     SELECT
       ${AGE_BUCKET} AS age_bucket,
       COUNT(*) AS cohort_size
-    FROM analysis.cohort_base p
+    FROM ${COHORT_TABLE} p
     GROUP BY age_bucket
   ),
   action_counts AS (
@@ -349,7 +434,7 @@ active_users AS (
       SUM(a.ever_reposted) AS reposted,
       SUM(a.ever_followed) AS followed
     FROM active_users a
-    JOIN analysis.cohort_base p ON a.did = p.did
+    JOIN ${COHORT_TABLE} p ON a.did = p.did
     GROUP BY age_bucket
   )
   SELECT
@@ -568,7 +653,7 @@ user_depth AS (
       ud.distinct_types_used,
       ${AGE_BUCKET} AS age_bucket
     FROM user_depth ud
-    JOIN analysis.cohort_base p ON ud.did = p.did
+    JOIN ${COHORT_TABLE} p ON ud.did = p.did
   )
   SELECT
     age_bucket,
@@ -677,7 +762,7 @@ const dailyActionsByCohort = activityDb.prepare(`
     COUNT(DISTINCT CASE WHEN d.activity_types & 8 THEN d.did END) AS unique_followers,
     COUNT(DISTINCT CASE WHEN d.activity_types & 1 THEN d.did END) AS unique_posters
   FROM did_activity_daily d
-  JOIN analysis.cohort_base p ON d.did = p.did
+  JOIN ${COHORT_TABLE} p ON d.did = p.did
   WHERE d.date >= date('now', '-' || ? || ' days')
   GROUP BY d.date, age_bucket
   ORDER BY age_bucket, d.date
@@ -735,7 +820,7 @@ const interVisitGaps = activityDb.prepare(`
     SUM(CASE WHEN g.gap_days > 14              THEN 1 ELSE 0 END)              AS gap_15plus_d,
     ROUND(100.0 * SUM(CASE WHEN g.gap_days = 1 THEN 1 ELSE 0 END) / COUNT(*), 1) AS pct_returned_next_day
   FROM gaps g
-  JOIN analysis.cohort_base p ON g.did = p.did
+  JOIN ${COHORT_TABLE} p ON g.did = p.did
   WHERE g.gap_days IS NOT NULL
   GROUP BY age_bucket
   ORDER BY age_bucket
@@ -798,7 +883,7 @@ const actionCadence = activityDb.prepare(`
     SUM(CASE WHEN g.gap_days BETWEEN 4 AND 7  THEN 1 ELSE 0 END)                 AS gap_4_7d,
     SUM(CASE WHEN g.gap_days > 7              THEN 1 ELSE 0 END)                 AS gap_8plus_d
   FROM all_gaps g
-  JOIN analysis.cohort_base p ON g.did = p.did
+  JOIN ${COHORT_TABLE} p ON g.did = p.did
   GROUP BY age_bucket, g.action
   ORDER BY age_bucket, g.action
 `).all() as Record<string, unknown>[];
@@ -833,7 +918,7 @@ const recencyDist = activityDb.prepare(`
     SUM(CASE WHEN julianday('now') - julianday(ls.last_date) BETWEEN 8 AND 30 THEN 1 ELSE 0 END) AS seen_8_30d,
     SUM(CASE WHEN julianday('now') - julianday(ls.last_date) > 30  THEN 1 ELSE 0 END) AS seen_31plus_d
   FROM last_seen ls
-  JOIN analysis.cohort_base p ON ls.did = p.did
+  JOIN ${COHORT_TABLE} p ON ls.did = p.did
   GROUP BY age_bucket
   ORDER BY age_bucket
 `).all() as Record<string, unknown>[];
@@ -863,7 +948,7 @@ const newUserFollowLike = activityDb.prepare(`
     ROUND(100.0 * COUNT(DISTINCT CASE WHEN (d.activity_types & 10) = 10 THEN d.did END)
                 / NULLIF(COUNT(DISTINCT CASE WHEN d.activity_types & 8  THEN d.did END), 0), 1) AS pct_followed_and_liked
   FROM did_activity_daily d
-  JOIN analysis.cohort_base p ON d.did = p.did
+  JOIN ${COHORT_TABLE} p ON d.did = p.did
   WHERE d.date >= '${windowStart}'
     AND p.created_at >= '${windowStart}'
   GROUP BY d.date
@@ -937,7 +1022,7 @@ const wauByCohort = activityDb.prepare(`
     ${AGE_BUCKET}                         AS age_bucket,
     COUNT(DISTINCT d.did)                 AS wau
   FROM did_activity_daily d
-  JOIN analysis.cohort_base p ON d.did = p.did
+  JOIN ${COHORT_TABLE} p ON d.did = p.did
   LEFT JOIN analysis.excluded_dids ex ON d.did = ex.did
   WHERE d.date >= date('now', '-' || ? || ' days')
     AND ex.did IS NULL
@@ -964,7 +1049,7 @@ const mauByCohort = activityDb.prepare(`
     ${AGE_BUCKET}              AS age_bucket,
     COUNT(DISTINCT d.did)      AS mau
   FROM did_activity_daily d
-  JOIN analysis.cohort_base p ON d.did = p.did
+  JOIN ${COHORT_TABLE} p ON d.did = p.did
   LEFT JOIN analysis.excluded_dids ex ON d.did = ex.did
   WHERE d.date >= date('now', '-' || ? || ' days')
     AND ex.did IS NULL
@@ -977,6 +1062,77 @@ report(
   `mau_by_cohort_${historyDays}d.csv`,
   mauByCohort
 );
+}
+
+// ── 24. New-user 28-day activation funnel ────────────────────────────────────
+// For each creation week in the lookback window, what % of new accounts showed
+// any activity within their first 28 days?
+// Only includes creation weeks where 28 days have elapsed (complete windows).
+// Uses historyDays + 28 as the scan start for warmup.
+
+if (shouldRun("new_user_activation_28d")) {
+const activationStart = daysAgoStr(historyDays + 28);
+
+const newUserActivation = activityDb.prepare(`
+  WITH new_accounts AS (
+    SELECT
+      p.did,
+      date(p.created_at)                                                    AS creation_date,
+      date(p.created_at, 'weekday 1', '-7 days')                           AS creation_week
+    FROM ${COHORT_TABLE} p
+    LEFT JOIN analysis.excluded_dids ex ON p.did = ex.did
+    WHERE p.created_at >= '${activationStart}'
+      AND date(p.created_at) <= date('now', '-28 days')
+      AND ex.did IS NULL
+  ),
+  first_activity AS (
+    SELECT
+      na.did,
+      na.creation_date,
+      na.creation_week,
+      MIN(a.date) AS first_active_date
+    FROM new_accounts na
+    LEFT JOIN did_activity_daily a
+      ON a.did = na.did
+      AND a.date BETWEEN na.creation_date AND date(na.creation_date, '+27 days')
+    GROUP BY na.did, na.creation_date, na.creation_week
+  )
+  SELECT
+    creation_week,
+    COUNT(*)                                                                 AS new_accounts,
+    COUNT(first_active_date)                                                 AS activated,
+    ROUND(100.0 * COUNT(first_active_date) / COUNT(*), 2)                   AS pct_activated,
+    COUNT(CASE WHEN first_active_date = creation_date          THEN 1 END)  AS activated_d0,
+    COUNT(CASE WHEN first_active_date <= date(creation_date, '+6 days')
+                AND first_active_date > creation_date          THEN 1 END)  AS activated_d1_6,
+    COUNT(CASE WHEN first_active_date > date(creation_date, '+6 days') THEN 1 END) AS activated_d7_27
+  FROM first_activity
+  GROUP BY creation_week
+  ORDER BY creation_week
+`).all() as Record<string, unknown>[];
+
+report(
+  `New-User 28-Day Activation by Creation Week (${activationStart}–${daysAgoStr(28)})`,
+  `new_user_activation_28d_${historyDays}d.csv`,
+  newUserActivation
+);
+}
+
+// ── 25. Weekly creation counts ───────────────────────────────────────────────
+// New activated accounts per week, grouped by the Monday-anchored week of their
+// PLC creation date. Uses COHORT_TABLE so --bsky-only scopes it to bsky-origin accounts.
+
+if (shouldRun("creation_weekly")) {
+const creationWeekly = activityDb.prepare(`
+  SELECT
+    date(p.created_at, '-' || ((strftime('%w', p.created_at) + 6) % 7) || ' days') AS week,
+    COUNT(*) AS new_accounts
+  FROM ${COHORT_TABLE} p
+  GROUP BY week
+  ORDER BY week
+`).all() as Record<string, unknown>[];
+
+report(`Weekly Creation Counts`, `creation_weekly.csv`, creationWeekly);
 }
 
 console.log(`\nDone. CSVs written to ${OUT_DIR}/\n`);

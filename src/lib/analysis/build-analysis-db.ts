@@ -14,10 +14,39 @@
 import Database from "better-sqlite3";
 import path from "path";
 
+const args = process.argv.slice(2);
+
+if (args.includes("--help") || args.includes("-h")) {
+  console.log(`
+usage: npm run analysis:build -- [flags]
+
+flags:
+  --cohort-end DATE     only include accounts created before DATE (YYYY-MM-DD)
+                        useful for reproducible snapshots or debugging a specific window
+                        e.g. --cohort-end 2026-06-01
+  --help                show this message
+
+notes:
+  - always run after plc-migrations.db is updated to keep cohort_base current
+  - cohort_base excludes spam/impersonation/takendown/deactivated accounts (excluded_dids)
+  - without --cohort-end, cohort_base covers all accounts up to now
+
+examples:
+  npm run analysis:build
+  npm run analysis:build -- --cohort-end 2026-06-01
+`);
+  process.exit(0);
+}
+
+const cohortEndIdx = args.indexOf("--cohort-end");
+const cohortEnd = cohortEndIdx >= 0 ? args[cohortEndIdx + 1] : null;
+
 const ANALYSIS_DB_PATH = path.join(process.cwd(), "analysis.db");
 const PLC_DB_PATH      = path.join(process.cwd(), "plc-migrations.db");
 
 console.log("Opening analysis.db...");
+if (cohortEnd) console.log(`  cohort-end: ${cohortEnd}`);
+
 const db = new Database(ANALYSIS_DB_PATH);
 db.pragma("journal_mode = WAL");
 db.pragma("synchronous = NORMAL");
@@ -43,6 +72,8 @@ console.log(`  excluded_dids: ${excluded_count.toLocaleString()} rows`);
 // Build cohort_base in two steps to avoid a slow cross-DB three-way join.
 // Step 1: join only within plc (single attached-DB, indices work).
 // Step 2: delete excluded DIDs locally (analysis.db join, fast with local index).
+const cohortEndFilter = cohortEnd ? `AND p.created_at < '${cohortEnd}'` : "";
+
 console.log("Building cohort_base (step 1/2: plc join)...");
 db.exec(`
   DROP TABLE IF EXISTS cohort_base;
@@ -57,7 +88,8 @@ db.exec(`
         ELSE 'indie'
       END AS pds_type
     FROM plc.plc_account_creations p
-    INNER JOIN plc.did_in_repo r ON r.did = p.did;
+    INNER JOIN plc.did_in_repo r ON r.did = p.did
+    WHERE 1=1 ${cohortEndFilter};
   CREATE INDEX idx_cohort_base_did ON cohort_base(did);
 `);
 console.log("Building cohort_base (step 2/2: removing excluded DIDs)...");

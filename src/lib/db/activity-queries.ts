@@ -1,8 +1,46 @@
 import path from "path";
-import { getActivityDb } from "./activity-schema";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
+import { getActivityDbReadonly as getActivityDb } from "./activity-schema";
 
 const CACHE_TTL_MS = 60 * 60 * 1000;
+const DISK_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
 const collectionPdsCache = new Map<boolean, { data: { collection: string; pds_url: string; unique_dids: number }[]; expires: number }>();
+
+export type CollectionPdsRow = { collection: string; pds_url: string; unique_dids: number };
+
+function collectionDiskPath(hideBsky: boolean) {
+  return path.join(process.cwd(), "cache", hideBsky ? "collection-pds-hidebsky.json" : "collection-pds.json");
+}
+
+function tryLoadCollectionDiskCache(hideBsky: boolean): CollectionPdsRow[] | null {
+  try {
+    const f = collectionDiskPath(hideBsky);
+    if (!existsSync(f)) return null;
+    const { data, writtenAt } = JSON.parse(readFileSync(f, "utf8"));
+    if (Date.now() - new Date(writtenAt).getTime() > DISK_CACHE_MAX_AGE_MS) return null;
+    return data;
+  } catch { return null; }
+}
+
+// Called from the analysis:dashboard-cache script to compute and persist.
+export function computeAndSaveCollectionPdsData(hideBsky: boolean): CollectionPdsRow[] {
+  const db = getActivityDb();
+  const plcPath = path.join(process.cwd(), "plc-migrations.db");
+  try { db.exec(`ATTACH DATABASE '${plcPath}' AS plc`); } catch { /* already attached */ }
+  const bskyFilter = hideBsky
+    ? `AND p.pds_url NOT LIKE '%bsky.network%' AND p.pds_url != 'https://bsky.social'`
+    : "";
+  const data = db.prepare(`
+    SELECT ca.collection, p.pds_url, COUNT(DISTINCT ca.did) AS unique_dids
+    FROM collection_activity ca
+    JOIN plc.plc_did_pds p ON ca.did = p.did
+    WHERE 1=1 ${bskyFilter}
+    GROUP BY ca.collection, p.pds_url
+  `).all() as CollectionPdsRow[];
+  mkdirSync(path.join(process.cwd(), "cache"), { recursive: true });
+  writeFileSync(collectionDiskPath(hideBsky), JSON.stringify({ data, writtenAt: new Date().toISOString() }, null, 0));
+  return data;
+}
 
 export interface PdsActivityRow {
   pds_url: string;
@@ -48,35 +86,17 @@ export function getPdsActivityUpdatedAt(windowDays = 30): string | null {
   }
 }
 
-export interface CollectionPdsRow {
-  collection: string;
-  pds_url: string;
-  unique_dids: number;
-}
-
-// Returns per-(collection, pds_url) unique DID counts by cross-joining
-// collection_activity with plc_did_pds. Used for the namespace map overlay.
+// Returns per-(collection, pds_url) unique DID counts.
+// Reads from disk cache written by analysis:dashboard-cache. Returns [] if no cache.
 export function getCollectionPdsData(hideBsky = false): CollectionPdsRow[] {
   const cached = collectionPdsCache.get(hideBsky);
   if (cached && Date.now() < cached.expires) return cached.data;
 
-  try {
-    const db = getActivityDb();
-    const plcPath = path.join(process.cwd(), "plc-migrations.db");
-    try { db.exec(`ATTACH DATABASE '${plcPath}' AS plc`); } catch { /* already attached */ }
-    const bskyFilter = hideBsky
-      ? `AND p.pds_url NOT LIKE '%bsky.network%' AND p.pds_url != 'https://bsky.social'`
-      : "";
-    const data = db.prepare(`
-      SELECT ca.collection, p.pds_url, COUNT(DISTINCT ca.did) AS unique_dids
-      FROM collection_activity ca
-      JOIN plc.plc_did_pds p ON ca.did = p.did
-      WHERE 1=1 ${bskyFilter}
-      GROUP BY ca.collection, p.pds_url
-    `).all() as CollectionPdsRow[];
-    collectionPdsCache.set(hideBsky, { data, expires: Date.now() + CACHE_TTL_MS });
-    return data;
-  } catch {
-    return [];
+  const disk = tryLoadCollectionDiskCache(hideBsky);
+  if (disk) {
+    collectionPdsCache.set(hideBsky, { data: disk, expires: Date.now() + CACHE_TTL_MS });
+    return disk;
   }
+
+  return [];
 }

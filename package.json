@@ -25,7 +25,8 @@
     "scan:pds-status": "npx tsx src/lib/collectors/scan-pds-status.ts",
     "analysis:build": "npx tsx src/lib/analysis/build-analysis-db.ts",
     "analysis": "npx tsx src/lib/analysis/activity-crosstabs.ts",
-    "analysis:retention": "npx tsx src/lib/analysis/retention-cohorts.ts"
+    "analysis:retention": "npx tsx src/lib/analysis/retention-cohorts.ts",
+    "analysis:dashboard-cache": "npx tsx src/lib/analysis/dashboard-cache.ts"
   },
   "keywords": [],
   "author": "",

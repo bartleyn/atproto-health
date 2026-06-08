@@ -4,6 +4,7 @@ import path from "path";
 const DB_PATH = path.join(process.cwd(), "jetstream-activity.db");
 
 let _db: Database.Database | null = null;
+let _dbReadonly: Database.Database | null = null;
 
 export function getActivityDb(): Database.Database {
   if (!_db) {
@@ -13,6 +14,14 @@ export function getActivityDb(): Database.Database {
     migrate(_db);
   }
   return _db;
+}
+
+// Read-only connection — no migrations, no WAL checkpointing. Safe from web server.
+export function getActivityDbReadonly(): Database.Database {
+  if (!_dbReadonly) {
+    _dbReadonly = new Database(DB_PATH, { readonly: true });
+  }
+  return _dbReadonly;
 }
 
 function migrate(db: Database.Database) {

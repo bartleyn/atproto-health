@@ -1,4 +1,4 @@
-import { getPlcDb } from "./plc-schema";
+import { getPlcDbReadonly as getPlcDb } from "./plc-schema";
 
 export interface TimeseriesRow {
   period: string; // month (YYYY-MM) or week (YYYY-MM-DD Monday)
@@ -42,9 +42,11 @@ const TRUMP_PDS = "https://pds.trump.com";
 const TOP_N = 10;
 
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
-const topPdsCache     = new Map<boolean, { data: ScannedTopPds[];  expires: number }>();
+const topPdsCache      = new Map<boolean, { data: ScannedTopPds[];  expires: number }>();
 const langSummaryCache = new Map<boolean, { data: PdsLangRow[];    expires: number }>();
-const topLangsCache   = new Map<boolean, { data: LangTotal[];      expires: number }>();
+const topLangsCache    = new Map<boolean, { data: LangTotal[];      expires: number }>();
+let lastScanTimeCache: { value: string | null; expires: number } | null = null;
+let bskyShardCountsCache: { value: Map<string, number>; expires: number } | null = null;
 
 // Exclude localhost/loopback dev artifacts, reserved TLDs, private IPs, and malformed URLs.
 // .dev is a real IANA TLD (Google) — do NOT filter it.
@@ -589,6 +591,7 @@ export function getTopPdsByScan(limit = 15, hideBsky = false): ScannedTopPds[] {
 /** Per-shard repo counts for bsky.network shards, keyed by normalized URL.
  *  Used by the infra map table to sum only the shards belonging to a selected provider. */
 export function getBskyShardCounts(): Map<string, number> {
+  if (bskyShardCountsCache && Date.now() < bskyShardCountsCache.expires) return bskyShardCountsCache.value;
   const db = getPlcDb();
   const rows = db.prepare(`
     WITH latest AS (
@@ -602,7 +605,9 @@ export function getBskyShardCounts(): Map<string, number> {
     JOIN latest l ON RTRIM(s.pds_url, '/') = l.norm_url AND s.snapshot_date = l.snap_date
     GROUP BY RTRIM(s.pds_url, '/')
   `).all() as { url: string; repo_count: number }[];
-  return new Map(rows.map(r => [r.url, r.repo_count]));
+  const value = new Map(rows.map(r => [r.url, r.repo_count]));
+  bskyShardCountsCache = { value, expires: Date.now() + CACHE_TTL_MS };
+  return value;
 }
 
 export interface AccountCohortRow {
@@ -622,7 +627,8 @@ export function getAccountCohortCounts(): AccountCohortRow[] {
         WHEN week < '2025-01-01' THEN 'Nov–Dec 2024 (exodus)'
         WHEN week < '2025-07-01' THEN '2025 H1'
         WHEN week < '2026-01-01' THEN '2025 H2'
-        ELSE '2026+'
+        WHEN week < '2026-04-11' THEN '2026 (pre-analysis)'
+        ELSE '2026 (in-window)'
       END AS cohort,
       SUM(count) AS count
     FROM active_creation_weekly
@@ -754,11 +760,14 @@ export function getMigrationJourneyStats(): MigrationJourneyStats {
 }
 
 export function getLastScanTime(): string | null {
+  if (lastScanTimeCache && Date.now() < lastScanTimeCache.expires) return lastScanTimeCache.value;
   const db = getPlcDb();
   const row = db.prepare(
     `SELECT MAX(scanned_at) AS last_scan FROM pds_repo_status_snapshots WHERE is_partial = 0`
   ).get() as { last_scan: string | null } | undefined;
-  return row?.last_scan ?? null;
+  const value = row?.last_scan ?? null;
+  lastScanTimeCache = { value, expires: Date.now() + CACHE_TTL_MS };
+  return value;
 }
 
 // ── Dashboard queries (migrated from queries.ts / atproto-health.db) ──────────

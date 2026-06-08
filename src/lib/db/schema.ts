@@ -4,6 +4,7 @@ import path from "path";
 const DB_PATH = path.join(process.cwd(), "atproto-health.db");
 
 let _db: Database.Database | null = null;
+let _dbReadonly: Database.Database | null = null;
 
 export function getDb(): Database.Database {
   if (!_db) {
@@ -13,6 +14,13 @@ export function getDb(): Database.Database {
     migrate(_db);
   }
   return _db;
+}
+
+export function getDbReadonly(): Database.Database {
+  if (!_dbReadonly) {
+    _dbReadonly = new Database(DB_PATH, { readonly: true });
+  }
+  return _dbReadonly;
 }
 
 function migrate(db: Database.Database) {

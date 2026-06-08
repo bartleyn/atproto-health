@@ -4,6 +4,7 @@ import path from "path";
 const DB_PATH = path.join(process.cwd(), "plc-migrations.db");
 
 let _db: Database.Database | null = null;
+let _dbReadonly: Database.Database | null = null;
 
 export function getPlcDb(): Database.Database {
   if (!_db) {
@@ -12,6 +13,14 @@ export function getPlcDb(): Database.Database {
     migrate(_db);
   }
   return _db;
+}
+
+// Read-only connection for the web server — no migrations, no WAL checkpointing.
+export function getPlcDbReadonly(): Database.Database {
+  if (!_dbReadonly) {
+    _dbReadonly = new Database(DB_PATH, { readonly: true });
+  }
+  return _dbReadonly;
 }
 
 function migrate(db: Database.Database) {

@@ -15,6 +15,15 @@ export default async function Home({
   const params = await searchParams;
   const hideBsky = params.hideBsky === "1";
 
+  const dashboardData = getDashboardData(hideBsky);
+  if (!dashboardData) {
+    return (
+      <main style={{ padding: "2rem", fontFamily: "monospace" }}>
+        <h2>Dashboard cache is cold.</h2>
+        <p>Run <code>npm run analysis:dashboard-cache</code> to populate it, then reload.</p>
+      </main>
+    );
+  }
   const {
     runInfo,
     stats,
@@ -28,7 +37,7 @@ export default async function Home({
     concentration,
     locations,
     providerLocations,
-  } = getDashboardData(hideBsky);
+  } = dashboardData;
 
   // Join pds_lang_summary with providerLocations geo data by URL.
   // Normalize URLs by stripping trailing slashes — main DB stores them WITH trailing slash

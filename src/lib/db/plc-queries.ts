@@ -356,7 +356,7 @@ export async function getEcosystemStats(hideBsky = false): Promise<EcosystemStat
 
   const [statsRows, migrationsRows, indepRows, datesRows] = await Promise.all([
     sql`SELECT total_dids, bsky_concentration_pct, unique_migrating_dids FROM plc.plc_stats_cache WHERE id = 1`,
-    sql.unsafe(`
+    sql.unsafe<{ total_migrations: string | null }[]>(`
       SELECT SUM(count)::bigint AS total_migrations FROM plc.plc_migration_monthly
       WHERE (from_pds IN (SELECT pds_url FROM plc.pds_repo_status_snapshots) OR from_pds LIKE '%bsky.network')
         AND (to_pds IN (SELECT pds_url FROM plc.pds_repo_status_snapshots) OR to_pds LIKE '%bsky.network')
@@ -455,7 +455,7 @@ export async function getPdsAgeData(minAccounts = 1): Promise<PdsAgeRow[]> {
 }
 
 export async function getActivePdsCount(): Promise<number> {
-  const rows = await sql.unsafe(`
+  const rows = await sql.unsafe<{ cnt: number }[]>(`
     SELECT COUNT(*)::int AS cnt FROM (
       SELECT RTRIM(pds_url, '/') AS pds_url
       FROM plc.pds_repo_status_snapshots
@@ -464,18 +464,18 @@ export async function getActivePdsCount(): Promise<number> {
       HAVING MAX(total_scanned) > 0
     ) sub
   `);
-  return (rows[0] as { cnt: number }).cnt;
+  return rows[0].cnt;
 }
 
 export async function getScannedPdsCount(): Promise<number> {
-  const rows = await sql.unsafe(`
+  const rows = await sql.unsafe<{ cnt: number }[]>(`
     SELECT COUNT(DISTINCT RTRIM(pds_url, '/'))::int AS cnt
     FROM plc.pds_repo_status_snapshots s
     WHERE snapshot_date = (
       SELECT MAX(s2.snapshot_date) FROM plc.pds_repo_status_snapshots s2 WHERE s2.pds_url = s.pds_url
     )
   `);
-  return (rows[0] as { cnt: number }).cnt;
+  return rows[0].cnt;
 }
 
 export interface ScannedTopPds {
@@ -847,7 +847,7 @@ export async function getOverviewStats(hideBsky = false): Promise<OverviewStats>
   const bskyFilter = hideBsky ? `AND ${BSKY_SNAP_FILTER}` : "";
 
   const [dirStatsRows, repoStatsRows] = await Promise.all([
-    sql.unsafe(`
+    sql.unsafe<{ total: number; online: number; offline: number; openReg: number; inviteOnly: number }[]>(`
       SELECT
         COUNT(*)::int as total,
         SUM(CASE WHEN is_online = 1 THEN 1 ELSE 0 END)::int as online,
@@ -861,7 +861,7 @@ export async function getOverviewStats(hideBsky = false): Promise<OverviewStats>
         WHERE in_directory = 1 AND is_partial = 0 AND ${JUNK_PDS_FILTER} ${bskyFilter}
       ) sub WHERE rn = 1
     `),
-    sql.unsafe(`
+    sql.unsafe<{ countries: number; totalUsers: string; activeUsers: string }[]>(`
       ${latestSnapshotCte(hideBsky)},
       ever_had_repos AS (
         SELECT RTRIM(pds_url, '/') AS norm_url
@@ -895,8 +895,8 @@ export async function getOverviewStats(hideBsky = false): Promise<OverviewStats>
     `),
   ]);
 
-  const dirStats = dirStatsRows[0] as { total: number; online: number; offline: number; openReg: number; inviteOnly: number };
-  const repoStats = repoStatsRows[0] as { countries: number; totalUsers: string; activeUsers: string };
+  const dirStats = dirStatsRows[0];
+  const repoStats = repoStatsRows[0];
 
   return {
     total: dirStats.total,
@@ -977,7 +977,7 @@ export async function getHostingProviders(hideBsky = false): Promise<HostingProv
 }
 
 export async function getCloudflareBreakdown(hideBsky = false): Promise<{ behindCdn: number; directHosting: number; unknown: number }> {
-  const rows = await sql.unsafe(`
+  const rows = await sql.unsafe<{ behindCdn: number; directHosting: number; unknown: number }[]>(`
     ${latestSnapshotCte(hideBsky)}
     SELECT
       SUM(CASE WHEN org LIKE '%Cloudflare%' OR org LIKE '%Fastly%' THEN 1 ELSE 0 END)::int as "behindCdn",
@@ -986,7 +986,7 @@ export async function getCloudflareBreakdown(hideBsky = false): Promise<{ behind
     FROM pds_latest
     WHERE in_directory = 1
   `);
-  return rows[0] as unknown as { behindCdn: number; directHosting: number; unknown: number };
+  return rows[0];
 }
 
 export interface UserDistBucket {
@@ -1035,8 +1035,8 @@ export interface ConcentrationStats {
 
 export async function getConcentrationStats(hideBsky = false): Promise<ConcentrationStats> {
   const [statsCacheRows, totalWithDataRows] = await Promise.all([
-    sql`SELECT bsky_concentration_pct FROM plc.plc_stats_cache WHERE id = 1`,
-    sql.unsafe(`
+    sql<{ bsky_concentration_pct: number }[]>`SELECT bsky_concentration_pct FROM plc.plc_stats_cache WHERE id = 1`,
+    sql.unsafe<{ n: number }[]>(`
       SELECT COUNT(*)::int as n FROM (
         SELECT RTRIM(pds_url, '/') AS pds_url
         FROM plc.pds_repo_status_snapshots
@@ -1047,9 +1047,9 @@ export async function getConcentrationStats(hideBsky = false): Promise<Concentra
     `),
   ]);
 
-  const statsCache = statsCacheRows[0] as { bsky_concentration_pct: number } | undefined;
+  const statsCache = statsCacheRows[0];
   const top1Pct = hideBsky ? 0 : (statsCache?.bsky_concentration_pct ?? 0);
-  const totalWithData = (totalWithDataRows[0] as { n: number }).n;
+  const totalWithData = totalWithDataRows[0].n;
 
   return { top1Pct, top5Pct: 0, top10Pct: 0, totalWithData };
 }

@@ -116,7 +116,7 @@ export async function getCreationTimeseries(): Promise<MonthlyRow[]> {
         count
       FROM collapsed c
     )
-    SELECT month, pds_url, SUM(count) AS count
+    SELECT month, pds_url, SUM(count)::int AS count
     FROM labeled
     GROUP BY month, pds_url
     ORDER BY month, pds_url
@@ -154,7 +154,7 @@ export async function getCreationTimeseriesWeekly(includeTrump = false, hideBsky
         count
       FROM collapsed c
     )
-    SELECT period, pds_url, SUM(count) AS count
+    SELECT period, pds_url, SUM(count)::int AS count
     FROM labeled
     GROUP BY period, pds_url
     ORDER BY period, pds_url
@@ -187,7 +187,7 @@ export async function getActiveCreationTimeseriesWeekly(hideBsky = false): Promi
         count
       FROM collapsed c
     )
-    SELECT period, pds_url, SUM(count) AS count
+    SELECT period, pds_url, SUM(count)::int AS count
     FROM labeled
     GROUP BY period, pds_url
     ORDER BY period, pds_url
@@ -214,7 +214,7 @@ export async function getMigrationTimeseriesWeekly(): Promise<TimeseriesRow[]> {
         count
       FROM collapsed c
     )
-    SELECT period, pds_url, SUM(count) AS count
+    SELECT period, pds_url, SUM(count)::int AS count
     FROM labeled
     GROUP BY period, pds_url
     ORDER BY period, pds_url
@@ -246,7 +246,7 @@ export async function getMigrationTimeseries(): Promise<MonthlyRow[]> {
         count
       FROM collapsed c
     )
-    SELECT month, pds_url, SUM(count) AS count
+    SELECT month, pds_url, SUM(count)::int AS count
     FROM labeled
     GROUP BY month, pds_url
     ORDER BY month, pds_url
@@ -308,7 +308,7 @@ export async function getMigrationWeeklyBreakdown(topN = 10): Promise<WeeklyMigr
           AND (w.from_pds LIKE '%bsky.network' OR w.from_pds IN (SELECT pds_url FROM verified))
           AND w.week >= TO_CHAR(CURRENT_DATE - INTERVAL '18 months', 'YYYY-MM-DD')
       )
-    SELECT week, to_pds, SUM(count) AS count
+    SELECT week, to_pds, SUM(count)::int AS count
     FROM labeled
     GROUP BY week, to_pds
     ORDER BY week, to_pds
@@ -595,7 +595,7 @@ export async function getAccountCohortCounts(): Promise<AccountCohortRow[]> {
         WHEN week < '2026-04-11' THEN '2026 (pre-analysis)'
         ELSE '2026 (in-window)'
       END AS cohort,
-      SUM(count)::bigint AS count
+      SUM(count)::int AS count
     FROM plc.active_creation_weekly
     WHERE pds_url != '${TRUMP_PDS}'
     GROUP BY cohort
@@ -935,7 +935,7 @@ export interface CountryRepoCount {
 export async function getReposByCountry(hideBsky = false): Promise<CountryRepoCount[]> {
   return await sql.unsafe(`
     ${latestSnapshotCte(hideBsky)}
-    SELECT country, country_code as "countryCode", SUM(total_scanned)::bigint as "repoCount"
+    SELECT country, country_code as "countryCode", SUM(total_scanned)::int as "repoCount"
     FROM pds_latest
     WHERE country IS NOT NULL AND total_scanned > 0
     GROUP BY country_code, country ORDER BY "repoCount" DESC

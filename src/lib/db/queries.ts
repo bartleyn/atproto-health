@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "fs";
 import path from "path";
-import { getDbReadonly as getDb } from "./schema";
+import sql from "./pg";
 import {
   getOverviewStats, getCountryDistribution, getReposByCountry,
   getVersionDistribution, getHostingProviders, getCloudflareBreakdown,
@@ -46,22 +46,27 @@ export interface LatestRunInfo {
   usrRun: { id: number; completedAt: string } | null;
 }
 
-export function getLatestRunInfo(): LatestRunInfo {
-  const db = getDb();
-  function latestBySource(pattern: string) {
-    const row = db
-      .prepare(
-        `SELECT id, completed_at as completedAt FROM collection_runs
-         WHERE status = 'completed' AND source LIKE ?
-         ORDER BY id DESC LIMIT 1`
-      )
-      .get(pattern) as { id: number; completedAt: string } | undefined;
-    return row ?? null;
+export async function getLatestRunInfo(): Promise<LatestRunInfo> {
+  async function latestBySource(pattern: string) {
+    const rows = await sql`
+      SELECT id, completed_at
+      FROM health.collection_runs
+      WHERE status = 'completed' AND source LIKE ${pattern}
+      ORDER BY id DESC LIMIT 1
+    `;
+    if (!rows[0]) return null;
+    return { id: Number(rows[0].id), completedAt: rows[0].completed_at as string };
   }
+  const [dirRun, geoGeo, full, usrUsers] = await Promise.all([
+    latestBySource("%"),
+    latestBySource("%geo%"),
+    latestBySource("%full%"),
+    latestBySource("%users%"),
+  ]);
   return {
-    dirRun: latestBySource("%"),
-    geoRun: latestBySource("%geo%") ?? latestBySource("%full%"),
-    usrRun: latestBySource("%users%") ?? latestBySource("%full%"),
+    dirRun,
+    geoRun: geoGeo ?? full,
+    usrRun: usrUsers ?? full,
   };
 }
 

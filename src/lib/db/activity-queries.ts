@@ -1,10 +1,10 @@
 import path from "path";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
-import { getActivityDbReadonly as getActivityDb } from "./activity-schema";
+import sql from "./pg";
 
 const CACHE_TTL_MS = 60 * 60 * 1000;
 const DISK_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
-const collectionPdsCache = new Map<boolean, { data: { collection: string; pds_url: string; unique_dids: number }[]; expires: number }>();
+const collectionPdsCache = new Map<boolean, { data: CollectionPdsRow[]; expires: number }>();
 
 export type CollectionPdsRow = { collection: string; pds_url: string; unique_dids: number };
 
@@ -23,20 +23,18 @@ function tryLoadCollectionDiskCache(hideBsky: boolean): CollectionPdsRow[] | nul
 }
 
 // Called from the analysis:dashboard-cache script to compute and persist.
-export function computeAndSaveCollectionPdsData(hideBsky: boolean): CollectionPdsRow[] {
-  const db = getActivityDb();
-  const plcPath = path.join(process.cwd(), "plc-migrations.db");
-  try { db.exec(`ATTACH DATABASE '${plcPath}' AS plc`); } catch { /* already attached */ }
+// Cross-schema join replaces the SQLite ATTACH DATABASE pattern.
+export async function computeAndSaveCollectionPdsData(hideBsky: boolean): Promise<CollectionPdsRow[]> {
   const bskyFilter = hideBsky
     ? `AND p.pds_url NOT LIKE '%bsky.network%' AND p.pds_url != 'https://bsky.social'`
     : "";
-  const data = db.prepare(`
-    SELECT ca.collection, p.pds_url, COUNT(DISTINCT ca.did) AS unique_dids
-    FROM collection_activity ca
+  const data = await sql.unsafe(`
+    SELECT ca.collection, p.pds_url, COUNT(DISTINCT ca.did)::int AS unique_dids
+    FROM activity.collection_activity ca
     JOIN plc.plc_did_pds p ON ca.did = p.did
     WHERE 1=1 ${bskyFilter}
     GROUP BY ca.collection, p.pds_url
-  `).all() as CollectionPdsRow[];
+  `) as unknown as CollectionPdsRow[];
   mkdirSync(path.join(process.cwd(), "cache"), { recursive: true });
   writeFileSync(collectionDiskPath(hideBsky), JSON.stringify({ data, writtenAt: new Date().toISOString() }, null, 0));
   return data;
@@ -52,42 +50,36 @@ export interface PdsActivityRow {
   updated_at: string;
 }
 
-/**
- * Returns top indie PDSes by unique active DIDs over the last windowDays.
- * bsky.network is excluded — this is the indie-PDS view.
- * Returns [] if aggregate:activity-pds hasn't been run yet.
- */
-export function getPdsActivitySummary(windowDays = 30, limit = 15): PdsActivityRow[] {
+export async function getPdsActivitySummary(windowDays = 30, limit = 15): Promise<PdsActivityRow[]> {
   try {
-    const db = getActivityDb();
-    return db.prepare(`
+    const rows = await sql`
       SELECT pds_url, active_dids, poster_dids, liker_dids, reposter_dids, follower_dids, updated_at
-      FROM pds_activity_summary
-      WHERE window_days = ?
+      FROM activity.pds_activity_summary
+      WHERE window_days = ${windowDays}
         AND pds_url != 'bsky.network'
         AND active_dids > 0
       ORDER BY active_dids DESC
-      LIMIT ?
-    `).all(windowDays, limit) as PdsActivityRow[];
+      LIMIT ${limit}
+    `;
+    return rows as unknown as PdsActivityRow[];
   } catch {
     return [];
   }
 }
 
-export function getPdsActivityUpdatedAt(windowDays = 30): string | null {
+export async function getPdsActivityUpdatedAt(windowDays = 30): Promise<string | null> {
   try {
-    const db = getActivityDb();
-    const row = db.prepare(
-      `SELECT MAX(updated_at) AS ts FROM pds_activity_summary WHERE window_days = ?`
-    ).get(windowDays) as { ts: string | null };
-    return row?.ts ?? null;
+    const rows = await sql`
+      SELECT MAX(updated_at) AS ts FROM activity.pds_activity_summary WHERE window_days = ${windowDays}
+    `;
+    return (rows[0]?.ts as string | null) ?? null;
   } catch {
     return null;
   }
 }
 
-// Returns per-(collection, pds_url) unique DID counts.
 // Reads from disk cache written by analysis:dashboard-cache. Returns [] if no cache.
+// Stays synchronous — no DB query, disk I/O only.
 export function getCollectionPdsData(hideBsky = false): CollectionPdsRow[] {
   const cached = collectionPdsCache.get(hideBsky);
   if (cached && Date.now() < cached.expires) return cached.data;

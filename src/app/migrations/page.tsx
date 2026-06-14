@@ -23,13 +23,15 @@ function StatCard({ label, value, sub }: { label: string; value: string; sub?: s
 }
 
 export default async function MigrationsPage() {
-  const flows = getMigrationFlows();
-  const weeklyMigrations = getMigrationWeeklyBreakdown();
-  const trajectories = getMigrationTrajectories();
-  const journeyStats = getMigrationJourneyStats();
-  const stats = getEcosystemStats();
-  const scanStats = getOverviewStats();
-  const timestamp = getPlcDataTimestamp();
+  const [flows, weeklyMigrations, trajectories, journeyStats, stats, scanStats, timestamp] = await Promise.all([
+    getMigrationFlows(),
+    getMigrationWeeklyBreakdown(),
+    getMigrationTrajectories(),
+    getMigrationJourneyStats(),
+    getEcosystemStats(),
+    getOverviewStats(),
+    getPlcDataTimestamp(),
+  ]);
 
   const fmt = (n: number) => n.toLocaleString();
 

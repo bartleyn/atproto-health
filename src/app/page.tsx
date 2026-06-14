@@ -49,12 +49,14 @@ export default async function Home({
   // bsky.network providerLocations — used to geo-locate the virtual 'bsky.network' lang row
   const bskyProviderLocs = providerLocations.filter(p => isBskyUrl(p.url));
 
-  const lastScanTime = getLastScanTime();
-  const allTopPds = getTopPdsByScan(Infinity, hideBsky);
+  const [lastScanTime, allTopPds, bskyShardCounts, langRows] = await Promise.all([
+    getLastScanTime(),
+    getTopPdsByScan(Infinity, hideBsky),
+    getBskyShardCounts(),
+    getPdsLangSummary(hideBsky),
+  ]);
   const scanTopPds = allTopPds.slice(0, 15);
-  const bskyShardCounts = getBskyShardCounts();
   const collectionPdsData = getCollectionPdsData(hideBsky);
-  const langRows = getPdsLangSummary(hideBsky);
   const langLocations: PdsLangLocation[] = langRows.flatMap(row => {
     // Legacy collapsed entry (pre-re-aggregation): distribute evenly across unique bsky cities.
     // Distributing per-city (not per-shard) avoids inflating cities that have many shards.
@@ -73,7 +75,7 @@ export default async function Home({
     if (!geo?.city) return [];
     return [{ url: row.pds_url, city: geo.city, country: geo.country, lang: row.lang, dids: row.dids }];
   });
-  const topLangs = getTopLangs(25, hideBsky);
+  const topLangs = await getTopLangs(25, hideBsky);
 
   // Build namespace locations: group collection_activity by (nsRoot, pds) then geo-join.
   // nsRoot = first two NSID parts (e.g. "blue.flashes" from "blue.flashes.feed.post").

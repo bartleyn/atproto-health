@@ -7,6 +7,7 @@
 
 import { collectPlcMigrations } from "./plc-migrations";
 import { aggregatePlc, aggregateLangs } from "./aggregate-plc";
+import sql from "../db/pg";
 
 async function main() {
   console.log("\n=== PLC Migration Collector ===\n");
@@ -22,11 +23,12 @@ async function main() {
   console.log(`  Migrations found: ${migrationsFound.toLocaleString()}`);
 
   console.log("\nAggregating monthly buckets...");
-  aggregatePlc();
+  await aggregatePlc();
 
-  console.log("\nAggregating languages..." );
-  aggregateLangs();
+  console.log("\nAggregating languages...");
+  await aggregateLangs();
 
+  await sql.end();
 }
 
 main().catch((err) => {

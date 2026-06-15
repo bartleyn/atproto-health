@@ -8,7 +8,7 @@
  * from the migration collector.
  */
 
-import { getPlcDb } from "../db/plc-schema";
+import sql from "../db/pg";
 
 const EXPORT_URL = "https://plc.directory/export";
 const BATCH_SIZE = 1000;

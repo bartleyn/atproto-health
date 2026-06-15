@@ -680,7 +680,9 @@ async function main() {
     process.on(sig, () => {
       console.log(`\n[activity] ${sig} received, flushing...`);
       flush()
-        .then(() => { scorerShutdown(); sql.end().then(() => process.exit(0)); })
+        .then(() => scorerShutdown())
+        .then(() => sql.end())
+        .then(() => process.exit(0))
         .catch(() => process.exit(1));
     });
   }

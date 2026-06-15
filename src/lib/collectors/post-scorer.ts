@@ -18,7 +18,7 @@
  */
 
 import { Storage } from "@google-cloud/storage";
-import { getActivityDb } from "../db/activity-schema";
+import sql from "../db/pg";
 
 export type BufferedPost = {
   uri: string;
@@ -74,24 +74,31 @@ export function bufferPost(post: BufferedPost): void {
   scorerBuffer.push(post);
 }
 
-// On shutdown: save the live buffer to DLQ synchronously so nothing is lost.
-export function scorerShutdown(): void {
+// On shutdown: save the live buffer to DLQ so nothing is lost.
+export async function scorerShutdown(): Promise<void> {
   if (!SCORER_ENABLED || scorerBuffer.length === 0) return;
   const posts = scorerBuffer;
   scorerBuffer = [];
-  _enqueueDlq(posts, "process shutdown", 0);
+  await _enqueueDlq(posts, "process shutdown", 0);
   console.log(`[scorer] Saved ${posts.length} unscored posts to DLQ on shutdown`);
 }
 
-function _enqueueDlq(posts: BufferedPost[], error: string, attempts: number): void {
+async function _enqueueDlq(posts: BufferedPost[], error: string, attempts: number): Promise<void> {
   const backoffMs = Math.min(Math.pow(attempts + 1, 2) * 5 * 60_000, 8 * 60 * 60_000);
   const nextRetry = new Date(Date.now() + backoffMs).toISOString();
-  const stmt = getActivityDb().prepare(`
-    INSERT INTO score_dlq (posts_json, failed_at, attempts, last_error, next_retry_at)
-    VALUES (?, datetime('now'), ?, ?, ?)
-  `);
+  const failedAt = new Date().toISOString();
+  const rows = [];
   for (let i = 0; i < posts.length; i += SCORE_BATCH_SIZE) {
-    stmt.run(JSON.stringify(posts.slice(i, i + SCORE_BATCH_SIZE)), attempts, error, nextRetry);
+    rows.push({
+      posts_json: JSON.stringify(posts.slice(i, i + SCORE_BATCH_SIZE)),
+      failed_at: failedAt,
+      attempts,
+      last_error: error,
+      next_retry_at: nextRetry,
+    });
+  }
+  if (rows.length > 0) {
+    await sql`INSERT INTO activity.score_dlq ${sql(rows, "posts_json", "failed_at", "attempts", "last_error", "next_retry_at")}`;
   }
 }
 
@@ -145,16 +152,15 @@ async function _scoreAndUpload(posts: BufferedPost[], timeoutMs = LIVE_SCORE_TIM
 }
 
 async function _drainDlq(): Promise<void> {
-  const db  = getActivityDb();
   const now = new Date().toISOString();
 
-  const rows = db.prepare(`
+  const rows = await sql<{ id: number; posts_json: string; attempts: number }[]>`
     SELECT id, posts_json, attempts
-    FROM score_dlq
-    WHERE next_retry_at <= ? AND attempts < ?
+    FROM activity.score_dlq
+    WHERE next_retry_at <= ${now} AND attempts < ${DLQ_MAX_ATTEMPTS}
     ORDER BY failed_at ASC
-    LIMIT ?
-  `).all(now, DLQ_MAX_ATTEMPTS, DLQ_DRAIN_LIMIT) as { id: number; posts_json: string; attempts: number }[];
+    LIMIT ${DLQ_DRAIN_LIMIT}
+  `;
 
   if (rows.length === 0) return;
 
@@ -166,28 +172,30 @@ async function _drainDlq(): Promise<void> {
 
     // Re-chunk oversized rows (e.g. from pre-fix shutdown saves) into smaller rows and drop the original.
     if (posts.length > SCORE_BATCH_SIZE) {
-      db.prepare(`DELETE FROM score_dlq WHERE id = ?`).run(row.id);
-      _enqueueDlq(posts, row.attempts > 0 ? "re-chunked from oversized row" : "initial enqueue", 0);
+      await sql`DELETE FROM activity.score_dlq WHERE id = ${row.id}`;
+      await _enqueueDlq(posts, row.attempts > 0 ? "re-chunked from oversized row" : "initial enqueue", 0);
       console.log(`[scorer] DLQ batch ${row.id} re-chunked ${posts.length} posts into ${Math.ceil(posts.length / SCORE_BATCH_SIZE)} rows`);
       continue;
     }
 
     try {
       await _scoreAndUpload(posts, DLQ_SCORE_TIMEOUT_MS);
-      db.prepare(`DELETE FROM score_dlq WHERE id = ?`).run(row.id);
+      await sql`DELETE FROM activity.score_dlq WHERE id = ${row.id}`;
       console.log(`[scorer] DLQ batch ${row.id} retry succeeded (${posts.length} posts)`);
     } catch (err) {
       const newAttempts = row.attempts + 1;
       if (newAttempts >= DLQ_MAX_ATTEMPTS) {
-        db.prepare(`DELETE FROM score_dlq WHERE id = ?`).run(row.id);
+        await sql`DELETE FROM activity.score_dlq WHERE id = ${row.id}`;
         console.warn(`[scorer] DLQ batch ${row.id} exhausted ${DLQ_MAX_ATTEMPTS} retries, dropping ${posts.length} posts`);
       } else {
         const backoffMs  = Math.min(Math.pow(newAttempts, 2) * 5 * 60_000, 8 * 60 * 60_000);
         const nextRetry  = new Date(Date.now() + backoffMs).toISOString();
         const backoffMin = Math.round(backoffMs / 60_000);
-        db.prepare(`
-          UPDATE score_dlq SET attempts = ?, last_error = ?, next_retry_at = ? WHERE id = ?
-        `).run(newAttempts, String(err), nextRetry, row.id);
+        await sql`
+          UPDATE activity.score_dlq
+          SET attempts = ${newAttempts}, last_error = ${String(err)}, next_retry_at = ${nextRetry}
+          WHERE id = ${row.id}
+        `;
         console.warn(`[scorer] DLQ batch ${row.id} retry ${newAttempts} failed (next in ${backoffMin}m): ${err}`);
       }
     }
@@ -219,7 +227,7 @@ export async function flushScorer(): Promise<void> {
           succeeded += group[j].length;
         } else {
           const err = (results[j] as PromiseRejectedResult).reason;
-          _enqueueDlq(group[j], String(err), 0);
+          await _enqueueDlq(group[j], String(err), 0);
           failed += group[j].length;
           console.warn(`[scorer] Chunk failed, queued ${group[j].length} posts to DLQ: ${err}`);
         }

@@ -85,7 +85,7 @@ export async function* listAllRepos(pdsUrl: string): AsyncGenerator<RepoInfo> {
  */
 export async function scanPdsRepos(
   pdsUrl: string,
-  onRepo?: (repo: RepoInfo) => void,
+  onRepo?: (repo: RepoInfo) => void | Promise<void>,
 ): Promise<ScanResult> {
   const counts: StatusCounts = {
     active: 0, deactivated: 0, deleted: 0,
@@ -97,7 +97,7 @@ export async function scanPdsRepos(
 
   try {
     for await (const repo of listAllRepos(pdsUrl)) {
-      onRepo?.(repo);
+      await onRepo?.(repo);
       counts.total++;
       if (repo.did.startsWith("did:plc:"))      counts.didPlc++;
       else if (repo.did.startsWith("did:web:")) counts.didWeb++;

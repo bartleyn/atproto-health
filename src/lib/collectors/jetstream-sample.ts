@@ -8,7 +8,7 @@
  */
 
 import WebSocket from "ws";
-import { getDb } from "../db/schema";
+import sql from "../db/pg";
 
 const JETSTREAM_URL =
   "wss://jetstream1.us-east.bsky.network/subscribe?wantedCollections=app.bsky.feed.like&wantedCollections=app.bsky.feed.post&wantedCollections=app.bsky.graph.follow&wantedCollections=app.bsky.feed.repost";
@@ -92,17 +92,9 @@ async function resolveDid(did: string): Promise<string | null> {
 }
 
 // Pre-seed the cache from our DB
-function seedCacheFromDb() {
-  const db = getDb();
-  // Build a map from the firehose.didWebs data in state.json snapshots
-  // For now, we'll resolve on the fly from PLC directory
-  // But we can use our pds_snapshots to know which PDS URLs exist
-  const rows = db
-    .prepare(`SELECT DISTINCT url FROM pds_instances`)
-    .all() as { url: string }[];
-  console.log(
-    `[jetstream] Seeded PDS URL list with ${rows.length} known instances`
-  );
+async function seedCacheFromDb() {
+  const rows = await sql<{ url: string }[]>`SELECT DISTINCT url FROM health.pds_instances`;
+  console.log(`[jetstream] Seeded PDS URL list with ${rows.length} known instances`);
 }
 
 // ── Event parsing ─────────────────────────────────────────────────────
@@ -161,7 +153,7 @@ function collectionToType(collection: string): InteractionType | null {
 export async function sampleJetstream(
   durationSec = 60
 ): Promise<SampleResult> {
-  seedCacheFromDb();
+  await seedCacheFromDb();
 
   const interactions: Interaction[] = [];
   let totalEvents = 0;

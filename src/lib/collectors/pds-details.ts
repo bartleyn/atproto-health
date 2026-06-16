@@ -62,7 +62,7 @@ export async function describeServer(pdsUrl: string): Promise<DescribeServerResp
 
 export async function fetchPdsDetails(
   pdsUrl: string,
-  onRepo?: (repo: RepoInfo) => void,
+  onRepo?: (repo: RepoInfo) => void | Promise<void>,
 ): Promise<PdsDetails> {
   const [desc, scanResult] = await Promise.allSettled([
     describeServer(pdsUrl),
@@ -88,7 +88,7 @@ export async function fetchPdsDetails(
 
 export interface FetchAllOptions {
   concurrency?: number;
-  onRepo?: (pdsUrl: string, repo: RepoInfo) => void;
+  onRepo?: (pdsUrl: string, repo: RepoInfo) => void | Promise<void>;
   onPdsDone?: (pdsUrl: string, details: PdsDetails) => void;
 }
 

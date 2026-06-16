@@ -13,22 +13,24 @@
  *   npm run collect:bsky-mod -- --reset
  */
 
-import { getPlcDb } from "../db/plc-schema";
+import sql from "../db/pg";
 
-const LABELERS: Record<string, { endpoint: string; did: string; table: string; cursorTable: string; labelFilter?: string[] }> = {
+const LABELERS: Record<string, {
+  endpoint: string; did: string;
+  table: string; cursorTable: string;
+  labelFilter?: string[];
+}> = {
   skywatch: {
     endpoint:    "https://ozone.skywatch.blue",
     did:         "did:plc:e4elbtctnfqocyfcml6h2lf7",
-    table:       "skywatch_labels",
-    cursorTable: "skywatch_labels_cursor",
+    table:       "plc.skywatch_labels",
+    cursorTable: "plc.skywatch_labels_cursor",
   },
   "bsky-mod": {
     endpoint:    "https://mod.bsky.app",
     did:         "did:plc:ar7c4by46qjdydhdevvrndac",
-    table:       "bsky_mod_labels",
-    cursorTable: "bsky_mod_labels_cursor",
-    // Only collect account-level action labels — post content labels (porn, sexual, etc.)
-    // are not useful for ecosystem analysis and dominate the feed
+    table:       "plc.bsky_mod_labels",
+    cursorTable: "plc.bsky_mod_labels_cursor",
     labelFilter: ["spam", "impersonation"],
   },
 };
@@ -36,7 +38,6 @@ const LABELERS: Record<string, { endpoint: string; did: string; table: string; c
 const PAGE_SIZE = 50;
 const REQUEST_TIMEOUT_MS = 30_000;
 const COURTESY_DELAY_MS = 100;
-const LOG_INTERVAL = 10_000;
 
 const args = process.argv.slice(2);
 const labelerName = args.includes("--labeler")
@@ -72,7 +73,6 @@ async function fetchPage(cursor?: string): Promise<QueryLabelsResponse> {
 }
 
 async function main() {
-  const db = getPlcDb();
   const reset = args.includes("--reset");
 
   console.log(`\n=== Label Collector: ${labelerName} ===`);
@@ -82,28 +82,16 @@ async function main() {
   if (config.labelFilter) console.log(`Filter:   ${config.labelFilter.join(", ")}`);
 
   if (reset) {
-    db.exec(`DELETE FROM ${config.table}; DELETE FROM ${config.cursorTable};`);
+    await sql.unsafe(`DELETE FROM ${config.table}`);
+    await sql.unsafe(`DELETE FROM ${config.cursorTable}`);
     console.log(`Reset: cleared existing labels and cursor.\n`);
   }
 
-  const cursorRow = db.prepare(`SELECT cursor FROM ${config.cursorTable} WHERE id = 1`).get() as { cursor: string } | undefined;
-  let cursor: string | undefined = cursorRow?.cursor;
+  const cursorRows = await sql.unsafe<{ cursor: string }[]>(
+    `SELECT cursor FROM ${config.cursorTable} WHERE id = 1`
+  );
+  let cursor: string | undefined = cursorRows[0]?.cursor;
   console.log(cursor ? `Resuming from cursor: ${cursor}` : `Starting from beginning`);
-
-  const upsert = db.prepare(`
-    INSERT INTO ${config.table} (did, label, labeled_at)
-    VALUES (?, ?, ?)
-    ON CONFLICT (did, label) DO UPDATE SET labeled_at = excluded.labeled_at
-  `);
-  const saveCursor = db.prepare(`
-    INSERT INTO ${config.cursorTable} (id, cursor, updated_at)
-    VALUES (1, ?, datetime('now'))
-    ON CONFLICT (id) DO UPDATE SET cursor = excluded.cursor, updated_at = excluded.updated_at
-  `);
-
-  const upsertBatch = db.transaction((rows: { did: string; label: string; labeledAt: string }[]) => {
-    for (const r of rows) upsert.run(r.did, r.label, r.labeledAt);
-  });
 
   let totalFetched = 0;
   let totalInserted = 0;
@@ -113,23 +101,33 @@ async function main() {
     const page = await fetchPage(cursor);
     pages++;
 
-    const batch: { did: string; label: string; labeledAt: string }[] = [];
+    const batch: { did: string; label: string; labeled_at: string }[] = [];
     for (const label of page.labels) {
       totalFetched++;
       if (!label.uri.startsWith("did:")) continue;
       if (label.val.startsWith("!") || label.neg) continue;
       if (label.src !== config.did) continue;
       if (config.labelFilter && !config.labelFilter.includes(label.val)) continue;
-      batch.push({ did: label.uri, label: label.val, labeledAt: label.cts });
+      batch.push({ did: label.uri, label: label.val, labeled_at: label.cts });
     }
 
     if (batch.length > 0) {
-      upsertBatch(batch);
+      const values = batch.map((_, i) => `($${i * 3 + 1}, $${i * 3 + 2}, $${i * 3 + 3})`).join(", ");
+      const params = batch.flatMap(r => [r.did, r.label, r.labeled_at]);
+      await sql.unsafe(
+        `INSERT INTO ${config.table} (did, label, labeled_at) VALUES ${values}
+         ON CONFLICT (did, label) DO UPDATE SET labeled_at = EXCLUDED.labeled_at`,
+        params
+      );
       totalInserted += batch.length;
     }
 
     if (page.cursor) {
-      saveCursor.run(page.cursor);
+      await sql.unsafe(
+        `INSERT INTO ${config.cursorTable} (id, cursor, updated_at) VALUES (1, $1, NOW())
+         ON CONFLICT (id) DO UPDATE SET cursor = EXCLUDED.cursor, updated_at = NOW()`,
+        [page.cursor]
+      );
       cursor = page.cursor;
     }
 
@@ -146,13 +144,15 @@ async function main() {
   console.log(`  Total fetched:  ${totalFetched.toLocaleString()}`);
   console.log(`  Total inserted: ${totalInserted.toLocaleString()}`);
 
-  const dist = db.prepare(`
-    SELECT label, COUNT(*) as count FROM ${config.table} GROUP BY label ORDER BY count DESC
-  `).all() as { label: string; count: number }[];
+  const dist = await sql.unsafe<{ label: string; count: number }[]>(
+    `SELECT label, COUNT(*)::int AS count FROM ${config.table} GROUP BY label ORDER BY count DESC`
+  );
   console.log(`\nLabel distribution:`);
   for (const row of dist) {
     console.log(`  ${row.label.padEnd(35)} ${row.count.toLocaleString()}`);
   }
+
+  await sql.end();
 }
 
 main().catch(err => {

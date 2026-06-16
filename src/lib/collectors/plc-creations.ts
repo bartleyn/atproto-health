@@ -63,36 +63,12 @@ export async function backfillPlcCreations(): Promise<{
   opsScanned: number;
   creationsFound: number;
 }> {
-  const db = getPlcDb();
-
-  const cursorRow = db
-    .prepare(`SELECT after FROM plc_creations_cursor WHERE id = 1`)
-    .get() as { after: string } | undefined;
-  let cursor = cursorRow?.after ?? "";
-
-  const insertCreation = db.prepare(`
-    INSERT OR IGNORE INTO plc_account_creations (did, pds_url, created_at)
-    VALUES (?, ?, ?)
-  `);
-
-  const upsertCursor = db.prepare(`
-    INSERT INTO plc_creations_cursor (id, after, updated_at)
-    VALUES (1, ?, datetime('now'))
-    ON CONFLICT(id) DO UPDATE SET after = excluded.after, updated_at = excluded.updated_at
-  `);
-
-  const commitBatch = db.transaction(
-    (creations: Array<{ did: string; pdsUrl: string; createdAt: string }>, newCursor: string) => {
-      for (const c of creations) {
-        insertCreation.run(c.did, c.pdsUrl, c.createdAt);
-      }
-      upsertCursor.run(newCursor);
-    }
-  );
+  const cursorRows = await sql<{ after: string }[]>`SELECT after FROM plc.plc_creations_cursor WHERE id = 1`;
+  let cursor = cursorRows[0]?.after ?? "";
 
   let totalOps = 0;
   let totalCreations = 0;
-  let pendingCreations: Array<{ did: string; pdsUrl: string; createdAt: string }> = [];
+  let pendingCreations: Array<{ did: string; pds_url: string; created_at: string }> = [];
 
   while (true) {
     let ops: PlcOp[];
@@ -113,7 +89,11 @@ export async function backfillPlcCreations(): Promise<{
       const pds = extractPds(op);
       if (!pds) continue;
 
-      pendingCreations.push({ did: op.did, pdsUrl: pds.replace(/\/$/, "").toLowerCase().replace(/^http:\/\//, "https://"), createdAt: op.createdAt });
+      pendingCreations.push({
+        did: op.did,
+        pds_url: pds.replace(/\/$/, "").toLowerCase().replace(/^http:\/\//, "https://"),
+        created_at: op.createdAt,
+      });
       totalCreations++;
     }
 
@@ -121,8 +101,16 @@ export async function backfillPlcCreations(): Promise<{
     totalOps += ops.length;
 
     if (pendingCreations.length >= COMMIT_EVERY) {
-      commitBatch(pendingCreations, cursor);
-      db.pragma("wal_checkpoint(PASSIVE)");
+      await sql.begin(async sql => {
+        await sql`
+          INSERT INTO plc.plc_account_creations ${sql(pendingCreations, "did", "pds_url", "created_at")}
+          ON CONFLICT DO NOTHING
+        `;
+        await sql`
+          INSERT INTO plc.plc_creations_cursor (id, after, updated_at) VALUES (1, ${cursor}, NOW())
+          ON CONFLICT (id) DO UPDATE SET after = EXCLUDED.after, updated_at = NOW()
+        `;
+      });
       pendingCreations = [];
       console.log(
         `[plc-creations] ${totalOps.toLocaleString()} ops scanned · ${totalCreations.toLocaleString()} creations · cursor ${cursor}`
@@ -135,8 +123,16 @@ export async function backfillPlcCreations(): Promise<{
   }
 
   if (pendingCreations.length > 0) {
-    commitBatch(pendingCreations, cursor);
-    db.pragma("wal_checkpoint(PASSIVE)");
+    await sql.begin(async sql => {
+      await sql`
+        INSERT INTO plc.plc_account_creations ${sql(pendingCreations, "did", "pds_url", "created_at")}
+        ON CONFLICT DO NOTHING
+      `;
+      await sql`
+        INSERT INTO plc.plc_creations_cursor (id, after, updated_at) VALUES (1, ${cursor}, NOW())
+        ON CONFLICT (id) DO UPDATE SET after = EXCLUDED.after, updated_at = NOW()
+      `;
+    });
   }
 
   return { opsScanned: totalOps, creationsFound: totalCreations };

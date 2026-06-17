@@ -15,7 +15,7 @@
  */
 
 import { promises as dns } from "dns";
-import sql from "../db/pg";
+import sql, { withDbRetry } from "../db/pg";
 import { junkPdsFilter } from "../db/plc-queries";
 import { scanPdsRepos, type RepoInfo, type StatusCounts, type NonActiveRepo } from "./pds-repos";
 import { describeServer } from "./pds-details";
@@ -196,13 +196,13 @@ async function main() {
     const flushBatch = async () => {
       if (repoBatch.length === 0) return;
       const batch = repoBatch.splice(0);
-      await sql`
+      await withDbRetry(() => sql`
         INSERT INTO plc.did_in_repo ${sql(
           batch.map(r => ({ did: r.did, pds_url: pdsUrl, scanned_at: scannedAt, first_scanned_at: scannedAt })),
           "did", "pds_url", "scanned_at", "first_scanned_at"
         )}
         ON CONFLICT (did) DO UPDATE SET pds_url = EXCLUDED.pds_url, scanned_at = EXCLUDED.scanned_at
-      `;
+      `, "did_in_repo");
       totalDidInRepo += batch.length;
     };
 
@@ -236,7 +236,7 @@ async function main() {
     } catch (err: unknown) {
       errors++;
       if (errors <= 20) console.error(`  ✗ ${pdsUrl}: ${err}`);
-      await sql`
+      await withDbRetry(() => sql`
         INSERT INTO plc.pds_repo_status_snapshots
           (pds_url, snapshot_date, active, deactivated, deleted, takendown, suspended, other,
            total_scanned, is_sampled, did_plc_count, did_web_count, is_partial, scanned_at, ip_address,
@@ -248,13 +248,13 @@ async function main() {
           total_scanned = 0, is_partial = 0, scanned_at = EXCLUDED.scanned_at,
           ip_address = EXCLUDED.ip_address, invite_code_required = EXCLUDED.invite_code_required,
           is_online = 0, version = COALESCE(EXCLUDED.version, plc.pds_repo_status_snapshots.version)
-      `;
+      `, "pds_repo_status_snapshots");
       return;
     }
 
     await flushBatch();
 
-    await sql`
+    await withDbRetry(() => sql`
       INSERT INTO plc.pds_repo_status_snapshots
         (pds_url, snapshot_date, active, deactivated, deleted, takendown, suspended, other,
          total_scanned, is_sampled, did_plc_count, did_web_count, is_partial, scanned_at, ip_address,
@@ -278,17 +278,21 @@ async function main() {
         invite_code_required = EXCLUDED.invite_code_required,
         is_online = EXCLUDED.is_online,
         version = COALESCE(EXCLUDED.version, plc.pds_repo_status_snapshots.version)
-    `;
+    `, "pds_repo_status_snapshots");
 
     if (nonActive.length > 0) {
-      await sql`
-        INSERT INTO plc.did_repo_status ${sql(
-          nonActive.map(r => ({ did: r.did, status: r.status, pds_url: pdsUrl, scanned_at: scannedAt })),
-          "did", "status", "pds_url", "scanned_at"
-        )}
-        ON CONFLICT (did) DO UPDATE SET
-          status = EXCLUDED.status, pds_url = EXCLUDED.pds_url, scanned_at = EXCLUDED.scanned_at
-      `;
+      // Batched to stay under Postgres's 65,534-parameter limit (4 cols/row).
+      for (let i = 0; i < nonActive.length; i += DID_BATCH_SIZE) {
+        const batch = nonActive.slice(i, i + DID_BATCH_SIZE);
+        await withDbRetry(() => sql`
+          INSERT INTO plc.did_repo_status ${sql(
+            batch.map(r => ({ did: r.did, status: r.status, pds_url: pdsUrl, scanned_at: scannedAt })),
+            "did", "status", "pds_url", "scanned_at"
+          )}
+          ON CONFLICT (did) DO UPDATE SET
+            status = EXCLUDED.status, pds_url = EXCLUDED.pds_url, scanned_at = EXCLUDED.scanned_at
+        `, "did_repo_status");
+      }
       totalNonActive += nonActive.length;
     }
 

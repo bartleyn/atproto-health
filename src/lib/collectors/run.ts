@@ -8,7 +8,7 @@
  */
 
 import { promises as dns } from "dns";
-import sql from "../db/pg";
+import sql, { withDbRetry } from "../db/pg";
 import { fetchPdsDirectory, type PdsDirectoryEntry } from "./pds-directory";
 import { geolocatePdses, type GeoIpResult } from "./geo-ip";
 import { fetchAllPdsDetails, type PdsDetails, type RepoInfo } from "./pds-details";
@@ -139,13 +139,13 @@ async function main() {
         if (batch.length >= DID_BATCH_SIZE) {
           const flush = batch.splice(0);
           repoBatches.set(pdsUrl, batch);
-          await sql`
+          await withDbRetry(() => sql`
             INSERT INTO plc.did_in_repo ${sql(
               flush.map(r => ({ did: r.did, pds_url: pdsUrl, scanned_at: scannedAt, first_scanned_at: scannedAt })),
               "did", "pds_url", "scanned_at", "first_scanned_at"
             )}
             ON CONFLICT (did) DO UPDATE SET pds_url = EXCLUDED.pds_url, scanned_at = EXCLUDED.scanned_at
-          `;
+          `, "did_in_repo");
         }
       };
 
@@ -156,13 +156,13 @@ async function main() {
         const remaining = repoBatches.get(pdsUrl) ?? [];
         if (remaining.length > 0) {
           repoBatches.delete(pdsUrl);
-          await sql`
+          await withDbRetry(() => sql`
             INSERT INTO plc.did_in_repo ${sql(
               remaining.map(r => ({ did: r.did, pds_url: pdsUrl, scanned_at: scannedAt, first_scanned_at: scannedAt })),
               "did", "pds_url", "scanned_at", "first_scanned_at"
             )}
             ON CONFLICT (did) DO UPDATE SET pds_url = EXCLUDED.pds_url, scanned_at = EXCLUDED.scanned_at
-          `;
+          `, "did_in_repo");
         }
 
         const c = details.statusCounts;
@@ -170,7 +170,7 @@ async function main() {
         const cachedGeo = cachedGeoMap.get(pdsUrl);
         const dirEntry = directoryMap.get(pdsUrl);
 
-        await sql`
+        await withDbRetry(() => sql`
           INSERT INTO plc.pds_repo_status_snapshots
             (pds_url, snapshot_date, active, deactivated, deleted, takendown, suspended, other,
              total_scanned, is_sampled, did_plc_count, did_web_count, is_partial, scanned_at, ip_address,
@@ -212,17 +212,21 @@ async function main() {
             hosting_provider = EXCLUDED.hosting_provider,
             version = EXCLUDED.version, invite_code_required = EXCLUDED.invite_code_required,
             is_online = EXCLUDED.is_online, in_directory = 1
-        `;
+        `, "pds_repo_status_snapshots");
 
         if (details.nonActive && details.nonActive.length > 0) {
-          await sql`
-            INSERT INTO plc.did_repo_status ${sql(
-              details.nonActive.map(r => ({ did: r.did, status: r.status, pds_url: pdsUrl, scanned_at: scannedAt })),
-              "did", "status", "pds_url", "scanned_at"
-            )}
-            ON CONFLICT (did) DO UPDATE SET
-              status = EXCLUDED.status, pds_url = EXCLUDED.pds_url, scanned_at = EXCLUDED.scanned_at
-          `;
+          // Batched to stay under Postgres's 65,534-parameter limit (4 cols/row).
+          for (let i = 0; i < details.nonActive.length; i += DID_BATCH_SIZE) {
+            const batch = details.nonActive.slice(i, i + DID_BATCH_SIZE);
+            await withDbRetry(() => sql`
+              INSERT INTO plc.did_repo_status ${sql(
+                batch.map(r => ({ did: r.did, status: r.status, pds_url: pdsUrl, scanned_at: scannedAt })),
+                "did", "status", "pds_url", "scanned_at"
+              )}
+              ON CONFLICT (did) DO UPDATE SET
+                status = EXCLUDED.status, pds_url = EXCLUDED.pds_url, scanned_at = EXCLUDED.scanned_at
+            `, "did_repo_status");
+          }
         }
       };
 
@@ -261,13 +265,18 @@ async function main() {
       };
     });
 
-    await sql`INSERT INTO health.pds_snapshots ${sql(snapshots,
-      "pds_id", "run_id", "version", "invite_code_required", "is_online", "error_at",
-      "did", "available_domains", "contact", "links",
-      "user_count_total", "user_count_active",
-      "ip_address", "country", "country_code", "region", "city",
-      "latitude", "longitude", "isp", "org", "as_number", "hosting_provider"
-    )}`;
+    // Batched to stay under Postgres's 65,534-parameter limit (23 cols/row).
+    const SNAPSHOT_BATCH_SIZE = 1000;
+    for (let i = 0; i < snapshots.length; i += SNAPSHOT_BATCH_SIZE) {
+      const batch = snapshots.slice(i, i + SNAPSHOT_BATCH_SIZE);
+      await withDbRetry(() => sql`INSERT INTO health.pds_snapshots ${sql(batch,
+        "pds_id", "run_id", "version", "invite_code_required", "is_online", "error_at",
+        "did", "available_domains", "contact", "links",
+        "user_count_total", "user_count_active",
+        "ip_address", "country", "country_code", "region", "city",
+        "latitude", "longitude", "isp", "org", "as_number", "hosting_provider"
+      )}`, "pds_snapshots");
+    }
 
     await sql`
       UPDATE health.collection_runs

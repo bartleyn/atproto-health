@@ -349,7 +349,32 @@ async function flush() {
     }
   }
 
-  // Small tables — fire in parallel.
+  // collection_activity is unbounded per flush (one row per collection×did×date) and
+  // starterpack_joins can grow large too — batch both to stay under Postgres's
+  // 65,534-parameter limit (4 / 3 cols per row respectively).
+  for (let i = 0; i < collectionRows.length; i += ACTIVITY_CHUNK_SIZE) {
+    const chunk = collectionRows.slice(i, i + ACTIVITY_CHUNK_SIZE).map(([key, count]) => {
+      const [collection, did, date] = key.split("|");
+      return { collection, did, date, event_count: count };
+    });
+    await sql`
+      INSERT INTO activity.collection_activity ${sql(chunk, "collection", "did", "date", "event_count")}
+      ON CONFLICT (collection, did, date) DO UPDATE SET
+        event_count = collection_activity.event_count + EXCLUDED.event_count
+    `;
+  }
+  for (let i = 0; i < starterpackRows.length; i += ACTIVITY_CHUNK_SIZE) {
+    const chunk = starterpackRows.slice(i, i + ACTIVITY_CHUNK_SIZE).map(([key, count]) => {
+      const pipe = key.indexOf("|");
+      return { starterpack_uri: key.slice(0, pipe), date: key.slice(pipe + 1), count };
+    });
+    await sql`
+      INSERT INTO activity.starterpack_joins_daily ${sql(chunk, "starterpack_uri", "date", "count")}
+      ON CONFLICT (starterpack_uri, date) DO UPDATE SET count = starterpack_joins_daily.count + EXCLUDED.count
+    `;
+  }
+
+  // Small tables (bounded by event-type / distinct-feed / date cardinality) — fire in parallel.
   await Promise.all([
     deleteRows.length > 0 && sql`
       INSERT INTO activity.delete_events_daily ${sql(deleteRows.map(([key, count]) => {
@@ -357,21 +382,6 @@ async function flush() {
         return { date: key.slice(0, pipe), event_type: key.slice(pipe + 1), count };
       }), "date", "event_type", "count")}
       ON CONFLICT (date, event_type) DO UPDATE SET count = delete_events_daily.count + EXCLUDED.count
-    `,
-    starterpackRows.length > 0 && sql`
-      INSERT INTO activity.starterpack_joins_daily ${sql(starterpackRows.map(([key, count]) => {
-        const pipe = key.indexOf("|");
-        return { starterpack_uri: key.slice(0, pipe), date: key.slice(pipe + 1), count };
-      }), "starterpack_uri", "date", "count")}
-      ON CONFLICT (starterpack_uri, date) DO UPDATE SET count = starterpack_joins_daily.count + EXCLUDED.count
-    `,
-    collectionRows.length > 0 && sql`
-      INSERT INTO activity.collection_activity ${sql(collectionRows.map(([key, count]) => {
-        const [collection, did, date] = key.split("|");
-        return { collection, did, date, event_count: count };
-      }), "collection", "did", "date", "event_count")}
-      ON CONFLICT (collection, did, date) DO UPDATE SET
-        event_count = collection_activity.event_count + EXCLUDED.event_count
     `,
     feedGenRows.length > 0 && sql`
       INSERT INTO activity.feed_generators ${sql(feedGenRows.map(([uri, meta]) => ({

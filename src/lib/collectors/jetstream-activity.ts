@@ -2,6 +2,7 @@
  * Long-running Jetstream collector that tracks:
  *   1. Daily account activity (did_activity_daily) — one row per (did, date), bitmask of collections used
  *   2. Delete events (delete_events_daily) — daily counts by event type
+ *   2b. Per-DID post deletes (post_deletes_daily) — app.bsky.feed.post deletes per (did, date)
  *   3. Starter pack joins (starterpack_joins_daily)
  *   4. Per-DID language usage (did_langs)
  *   5. Non-bsky collection activity (collection_activity) — event counts per (collection, DID)
@@ -148,6 +149,11 @@ const activityBuffer = new Map<string, number>();
 // Delete buffer: "date|event_type" → count
 const deleteBuffer = new Map<string, number>();
 
+// Per-DID post-delete buffer: "did|date" → count (app.bsky.feed.post deletes only).
+// delete_events_daily only keeps aggregate-by-collection counts; this attributes
+// post deletes to the account doing them so we can see who deletes posts.
+const postDeleteBuffer = new Map<string, number>();
+
 // Starter pack join buffer: "starterpack_uri|date" → count
 const starterpackBuffer = new Map<string, number>();
 
@@ -178,6 +184,7 @@ const didWebResolved = new Set<string>();
 let lastCursor = 0;
 let totalActivityFlushed = 0;
 let totalDeletesFlushed = 0;
+let totalPostDeletesFlushed = 0;
 let totalStarterpackFlushed = 0;
 let totalLangDIDsFlushed = 0;
 let totalCollectionsFlushed = 0;
@@ -253,6 +260,7 @@ function snapshotBuffers() {
   const snapshot = {
     activityRows:    [...activityBuffer.entries()],
     deleteRows:      [...deleteBuffer.entries()],
+    postDeleteRows:  [...postDeleteBuffer.entries()],
     starterpackRows: [...starterpackBuffer.entries()],
     langRows:        [...langBuffer.entries()],
     langStatsRows:   [...langStatsBuffer.entries()],
@@ -264,6 +272,7 @@ function snapshotBuffers() {
   };
   activityBuffer.clear();
   deleteBuffer.clear();
+  postDeleteBuffer.clear();
   starterpackBuffer.clear();
   langBuffer.clear();
   langStatsBuffer.clear();
@@ -275,11 +284,12 @@ function snapshotBuffers() {
 }
 
 function logFlush(snapshot: ReturnType<typeof snapshotBuffers>) {
-  const { activityRows, deleteRows, starterpackRows, langRows, langStatsRows, collectionRows, feedGenRows, feedLikeRows } = snapshot;
+  const { activityRows, deleteRows, postDeleteRows, starterpackRows, langRows, langStatsRows, collectionRows, feedGenRows, feedLikeRows } = snapshot;
   const postsThisFlush  = langStatsRows.reduce((s, [, v]) => s + v.total, 0);
   const taggedThisFlush = langStatsRows.reduce((s, [, v]) => s + v.tagged, 0);
   totalActivityFlushed    += activityRows.length;
   totalDeletesFlushed     += deleteRows.reduce((s, [, c]) => s + c, 0);
+  totalPostDeletesFlushed += postDeleteRows.reduce((s, [, c]) => s + c, 0);
   totalStarterpackFlushed += starterpackRows.reduce((s, [, c]) => s + c, 0);
   totalLangDIDsFlushed    += langRows.length;
   totalCollectionsFlushed += collectionRows.length;
@@ -288,8 +298,8 @@ function logFlush(snapshot: ReturnType<typeof snapshotBuffers>) {
   const tagPct = postsThisFlush > 0 ? ((taggedThisFlush / postsThisFlush) * 100).toFixed(1) : "—";
   const collectionNote = collectionTrackingPaused ? " [collection tracking PAUSED]" : ` collections=${collectionRows.length.toLocaleString()}`;
   console.log(
-    `[activity] Flushed activity=${activityRows.length.toLocaleString()} deletes=${deleteRows.length} types starterpack=${starterpackRows.length} uris lang=${langRows.length.toLocaleString()} did×lang (${tagPct}% tagged)${collectionNote} feeds=${feedGenRows.length} feed_likes=${feedLikeRows.reduce((s, [, c]) => s + c, 0)} | ` +
-    `totals: activity=${totalActivityFlushed.toLocaleString()} deletes=${totalDeletesFlushed.toLocaleString()} starterpack=${totalStarterpackFlushed.toLocaleString()} lang_dids=${totalLangDIDsFlushed.toLocaleString()} collections=${totalCollectionsFlushed.toLocaleString()} feed_gens=${totalFeedGensFlushed.toLocaleString()} feed_likes=${totalFeedLikesFlushed.toLocaleString()} | ` +
+    `[activity] Flushed activity=${activityRows.length.toLocaleString()} deletes=${deleteRows.length} types postdel=${postDeleteRows.length.toLocaleString()} dids starterpack=${starterpackRows.length} uris lang=${langRows.length.toLocaleString()} did×lang (${tagPct}% tagged)${collectionNote} feeds=${feedGenRows.length} feed_likes=${feedLikeRows.reduce((s, [, c]) => s + c, 0)} | ` +
+    `totals: activity=${totalActivityFlushed.toLocaleString()} deletes=${totalDeletesFlushed.toLocaleString()} postdel=${totalPostDeletesFlushed.toLocaleString()} starterpack=${totalStarterpackFlushed.toLocaleString()} lang_dids=${totalLangDIDsFlushed.toLocaleString()} collections=${totalCollectionsFlushed.toLocaleString()} feed_gens=${totalFeedGensFlushed.toLocaleString()} feed_likes=${totalFeedLikesFlushed.toLocaleString()} | ` +
     `events=${totalEvents.toLocaleString()} | cursor=${snapshot.cursorToSave}`
   );
 }
@@ -313,7 +323,7 @@ async function flush() {
   }
 
   const snapshot = snapshotBuffers();
-  const { activityRows, deleteRows, starterpackRows, langRows, langStatsRows, collectionRows, feedGenRows, feedGenDeletes, feedLikeRows, cursorToSave } = snapshot;
+  const { activityRows, deleteRows, postDeleteRows, starterpackRows, langRows, langStatsRows, collectionRows, feedGenRows, feedGenDeletes, feedLikeRows, cursorToSave } = snapshot;
 
   // did_activity_daily — chunked upsert with bitwise OR merge.
   for (let i = 0; i < activityRows.length; i += ACTIVITY_CHUNK_SIZE) {
@@ -345,6 +355,22 @@ async function flush() {
         last_seen  = EXCLUDED.last_seen
     `;
     if (i + ACTIVITY_CHUNK_SIZE < langRows.length) {
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
+  }
+
+  // post_deletes_daily — one row per (did, date); can be many distinct DIDs per
+  // flush, so chunk + yield like did_activity_daily (3 cols, ~21K-row param cap).
+  for (let i = 0; i < postDeleteRows.length; i += ACTIVITY_CHUNK_SIZE) {
+    const chunk = postDeleteRows.slice(i, i + ACTIVITY_CHUNK_SIZE).map(([entry, count]) => {
+      const pipe = entry.indexOf("|");
+      return { did: entry.slice(0, pipe), date: entry.slice(pipe + 1), count };
+    });
+    await sql`
+      INSERT INTO activity.post_deletes_daily ${sql(chunk, "did", "date", "count")}
+      ON CONFLICT (did, date) DO UPDATE SET count = post_deletes_daily.count + EXCLUDED.count
+    `;
+    if (i + ACTIVITY_CHUNK_SIZE < postDeleteRows.length) {
       await new Promise<void>(resolve => setImmediate(resolve));
     }
   }
@@ -427,12 +453,33 @@ async function flush() {
   logFlush(snapshot);
 }
 
+// Serialize all flushes. flush() is fired from four places (timer, pressure-flush,
+// reconnect-close, shutdown); nothing stopped two from running at once, and two
+// concurrent flush() calls grab different pooled connections and run INSERT ... ON
+// CONFLICT on did_activity_daily in different key orders → 40P01 self-deadlock
+// (and lost flushes => undercounts on the additive tables). flushNow() runs flushes
+// one at a time on a promise chain. Callers that arrive while a flush is already
+// queued (not yet started) coalesce onto that queued run, and the returned promise
+// resolves only when their covering flush completes — so the pressure path can still
+// await an actual drain before it resumes the socket.
+let flushChain: Promise<void> = Promise.resolve();
+let flushQueued = false;
+function flushNow(): Promise<void> {
+  if (flushQueued) return flushChain;       // a not-yet-started flush will cover us
+  flushQueued = true;
+  flushChain = flushChain
+    .catch(() => {})                        // a prior failure must not break the chain
+    .then(() => { flushQueued = false; return flush(); });
+  return flushChain;
+}
+
 async function pruneOldRows() {
   const cutoff = new Date(Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000)
     .toISOString().slice(0, 10);
   const [a, d] = await Promise.all([
     sql`DELETE FROM activity.did_activity_daily WHERE date < ${cutoff}`,
     sql`DELETE FROM activity.delete_events_daily WHERE date < ${cutoff}`,
+    sql`DELETE FROM activity.post_deletes_daily WHERE date < ${cutoff}`,
     sql`DELETE FROM activity.lang_stats WHERE date < ${cutoff}`,
     sql`DELETE FROM activity.collection_activity WHERE date < ${cutoff}`,
   ]);
@@ -591,6 +638,12 @@ function connect() {
           // Record-level delete by collection
           recordDelete(`${date}|record:${evt.commit.collection}`);
 
+          // Per-DID attribution for post deletes (who deletes posts, how many)
+          if (evt.commit.collection === "app.bsky.feed.post") {
+            const pkey = `${evt.did}|${date}`;
+            postDeleteBuffer.set(pkey, (postDeleteBuffer.get(pkey) ?? 0) + 1);
+          }
+
           // Feed generator deletes: mark the URI so we can tombstone the row
           if (evt.commit.collection === "app.bsky.feed.generator") {
             feedGenDeleteBuffer.add(`at://${evt.did}/app.bsky.feed.generator/${evt.commit.rkey}`);
@@ -612,7 +665,7 @@ function connect() {
         pressureFlushPending = true;
         ws.pause();
         if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
-        flush()
+        flushNow()
           .catch(err => console.error("[activity] pressure flush error:", err))
           .finally(() => {
             pressureFlushPending = false;
@@ -636,7 +689,7 @@ function connect() {
 
   ws.on("close", (code, reason) => {
     cleanup();
-    flush().catch(err => console.error("[activity] close flush error:", err));
+    flushNow().catch(err => console.error("[activity] close flush error:", err));
     relayIdx++;
     const next = JETSTREAM_RELAYS[relayIdx % JETSTREAM_RELAYS.length];
     const why = code !== 1000 ? ` (code ${code}${reason?.length ? `: ${reason}` : ""})` : "";
@@ -665,6 +718,7 @@ async function main() {
     // event_count, not unique DID counts. No delete needed; backfill upserts safely.
     await Promise.all([
       sql`DELETE FROM activity.delete_events_daily WHERE date >= ${deleteFromDate}`,
+      sql`DELETE FROM activity.post_deletes_daily WHERE date >= ${deleteFromDate}`,
       sql`DELETE FROM activity.starterpack_joins_daily WHERE date >= ${deleteFromDate}`,
       sql`DELETE FROM activity.feed_generator_likes_daily WHERE date >= ${deleteFromDate}`,
       sql`DELETE FROM activity.lang_stats WHERE date >= ${deleteFromDate}`,
@@ -676,7 +730,7 @@ async function main() {
   }
 
   setInterval(() => {
-    flush()
+    flushNow()
       .then(() => pruneOldRows())
       .then(() => resolveAndStoreDidWebs())
       .catch(err => console.error("[activity] flush error:", err));
@@ -689,7 +743,7 @@ async function main() {
   for (const sig of ["SIGINT", "SIGTERM"]) {
     process.on(sig, () => {
       console.log(`\n[activity] ${sig} received, flushing...`);
-      flush()
+      flushNow()
         .then(() => scorerShutdown())
         .then(() => sql.end())
         .then(() => process.exit(0))

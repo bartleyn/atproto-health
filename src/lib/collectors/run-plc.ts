@@ -6,6 +6,7 @@
  */
 
 import { collectPlcMigrations } from "./plc-migrations";
+import { backfillPlcHandles } from "./plc-handles";
 import { aggregatePlc, aggregateLangs } from "./aggregate-plc";
 import sql from "../db/pg";
 
@@ -21,6 +22,15 @@ async function main() {
   console.log(`  Ops processed:    ${opsProcessed.toLocaleString()}`);
   console.log(`  Creations found:  ${creationsFound.toLocaleString()}`);
   console.log(`  Migrations found: ${migrationsFound.toLocaleString()}`);
+
+  // Incrementally refresh DID→handle (resumes from plc_handles_cursor; cheap once
+  // backfilled). Restricted to repos we have — see plc-handles.ts.
+  console.log("\nUpdating handles (incremental)...");
+  const hStart = Date.now();
+  const { opsScanned, handlesFound } = await backfillPlcHandles();
+  console.log(`  Done in ${((Date.now() - hStart) / 1000 / 60).toFixed(1)}m`);
+  console.log(`  Ops scanned:      ${opsScanned.toLocaleString()}`);
+  console.log(`  Handles upserted: ${handlesFound.toLocaleString()}`);
 
   console.log("\nAggregating monthly buckets...");
   await aggregatePlc();

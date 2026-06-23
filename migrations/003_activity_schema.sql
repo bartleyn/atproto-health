@@ -25,6 +25,20 @@ CREATE TABLE IF NOT EXISTS activity.delete_events_daily (
   PRIMARY KEY (date, event_type)
 );
 
+-- Per-DID post deletions per day. delete_events_daily aggregates deletes by
+-- collection but discards the DID; this table answers "which accounts delete
+-- posts, and how many" by tracking app.bsky.feed.post deletes per (did, date).
+CREATE TABLE IF NOT EXISTS activity.post_deletes_daily (
+  did   TEXT    NOT NULL,
+  date  TEXT    NOT NULL, -- YYYY-MM-DD
+  count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (did, date)
+);
+
+-- Date index for "top deleters in window" scans (range filter, then GROUP BY did).
+CREATE INDEX IF NOT EXISTS idx_post_deletes_daily_date
+  ON activity.post_deletes_daily(date);
+
 CREATE TABLE IF NOT EXISTS activity.jetstream_cursor (
   id         INTEGER PRIMARY KEY CHECK (id = 1),
   cursor     BIGINT      NOT NULL, -- Unix microseconds (Jetstream time_us)

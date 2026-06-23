@@ -15,6 +15,7 @@
     "collect:ecosystem": "npx tsx --env-file .env src/lib/collectors/run-ecosystem.ts",
     "collect:plc": "npx tsx --env-file .env src/lib/collectors/run-plc.ts",
     "collect:plc:creations": "npx tsx --env-file .env src/lib/collectors/run-plc-creations.ts",
+    "collect:plc:handles": "npx tsx --env-file .env src/lib/collectors/run-plc-handles.ts",
     "aggregate:plc": "npx tsx --env-file .env src/lib/collectors/run-aggregate-plc.ts",
     "aggregate:active-plc": "npx tsx --env-file .env src/lib/collectors/aggregate-active-plc.ts",
     "aggregate:activity-pds": "npx tsx --env-file .env src/lib/collectors/aggregate-activity-pds.ts",

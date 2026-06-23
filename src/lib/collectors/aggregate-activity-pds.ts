@@ -54,14 +54,14 @@ async function main() {
       END AS pds_url,
       ${WINDOW_DAYS} AS window_days,
       COUNT(DISTINCT a.did)::int                                                  AS active_dids,
-      COUNT(DISTINCT CASE WHEN a.activity_types & 1 THEN a.did END)::int         AS poster_dids,
-      COUNT(DISTINCT CASE WHEN a.activity_types & 2 THEN a.did END)::int         AS liker_dids,
-      COUNT(DISTINCT CASE WHEN a.activity_types & 4 THEN a.did END)::int         AS reposter_dids,
-      COUNT(DISTINCT CASE WHEN a.activity_types & 8 THEN a.did END)::int         AS follower_dids,
+      COUNT(DISTINCT CASE WHEN a.activity_types & 1 != 0 THEN a.did END)::int    AS poster_dids,
+      COUNT(DISTINCT CASE WHEN a.activity_types & 2 != 0 THEN a.did END)::int    AS liker_dids,
+      COUNT(DISTINCT CASE WHEN a.activity_types & 4 != 0 THEN a.did END)::int    AS reposter_dids,
+      COUNT(DISTINCT CASE WHEN a.activity_types & 8 != 0 THEN a.did END)::int    AS follower_dids,
       NOW()                                                                       AS updated_at
     FROM activity.did_activity_daily a
     JOIN plc.plc_did_pds p ON a.did = p.did
-    WHERE a.date >= (CURRENT_DATE - ${WINDOW_DAYS})::text
+    WHERE a.date >= (CURRENT_DATE - ${WINDOW_DAYS}::int)::text
     GROUP BY 1
   `;
 

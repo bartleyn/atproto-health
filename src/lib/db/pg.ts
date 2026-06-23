@@ -7,7 +7,7 @@ if (!process.env.DATABASE_URL) {
 const sql = postgres(process.env.DATABASE_URL, {
   max: 10,
   idle_timeout: 30,
-  connect_timeout: 10,
+  connect_timeout: 30,
   types: {
     // Return bigint columns as JS number rather than string.
     // All our IDs fit comfortably within Number.MAX_SAFE_INTEGER.
@@ -21,6 +21,7 @@ const sql = postgres(process.env.DATABASE_URL, {
 const TRANSIENT_DB_ERRORS = new Set([
   "CONNECTION_ENDED", "CONNECTION_CLOSED", "CONNECTION_DESTROYED",
   "ECONNRESET", "EPIPE", "ETIMEDOUT", "57P01", // 57P01 = admin shutdown
+  "CONNECT_TIMEOUT", // postgres.js: TCP connect didn't complete within connect_timeout
 ]);
 
 /**

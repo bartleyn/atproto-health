@@ -182,19 +182,19 @@ export default async function Home({
           {runInfo.dirRun && (
             <p>
               Directory:{" "}
-              {new Date(runInfo.dirRun.completedAt + "Z").toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
+              {new Date(runInfo.dirRun.completedAt).toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
             </p>
           )}
           {runInfo.geoRun && (
             <p>
               Geo:{" "}
-              {new Date(runInfo.geoRun.completedAt + "Z").toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
+              {new Date(runInfo.geoRun.completedAt).toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
             </p>
           )}
           {runInfo.usrRun && (
             <p>
               Users:{" "}
-              {new Date(runInfo.usrRun.completedAt + "Z").toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
+              {new Date(runInfo.usrRun.completedAt).toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
             </p>
           )}
           {lastScanTime && (

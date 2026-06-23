@@ -55,7 +55,9 @@ export async function getLatestRunInfo(): Promise<LatestRunInfo> {
       ORDER BY id DESC LIMIT 1
     `;
     if (!rows[0]) return null;
-    return { id: Number(rows[0].id), completedAt: rows[0].completed_at as string };
+    // completed_at is TIMESTAMPTZ → postgres.js returns a Date; normalize to an ISO
+    // string (already tz-aware, so the page must NOT append a "Z").
+    return { id: Number(rows[0].id), completedAt: new Date(rows[0].completed_at as string | Date).toISOString() };
   }
   const [dirRun, geoGeo, full, usrUsers] = await Promise.all([
     latestBySource("%"),

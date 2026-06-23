@@ -174,7 +174,7 @@ async function main() {
   } else {
     console.log(`IPs: all ${toScan.length.toLocaleString()} cached from previous scans`);
   }
-  const resolved = [...ipMap.values()].filter(Boolean).length;
+  const resolved = toScan.filter(url => ipMap.get(url)).length;
   console.log(`  ${resolved.toLocaleString()} of ${toScan.length.toLocaleString()} resolved\n`);
 
   const DID_BATCH_SIZE = 10_000;

@@ -1,4 +1,6 @@
-import { getDb } from "./schema";
+import { existsSync, readFileSync } from "fs";
+import path from "path";
+import sql from "./pg";
 import {
   getOverviewStats, getCountryDistribution, getReposByCountry,
   getVersionDistribution, getHostingProviders, getCloudflareBreakdown,
@@ -17,6 +19,25 @@ export type { OverviewStats, CountryCount, CountryRepoCount, VersionCount,
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 const dashboardCache = new Map<boolean, { data: DashboardData; expires: number }>();
 
+const DISK_CACHE_DIR = path.join(process.cwd(), "cache");
+const DISK_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+function diskCachePath(hideBsky: boolean) {
+  return path.join(DISK_CACHE_DIR, hideBsky ? "dashboard-hidebsky.json" : "dashboard.json");
+}
+
+function tryLoadDiskCache(hideBsky: boolean): DashboardData | null {
+  try {
+    const f = diskCachePath(hideBsky);
+    if (!existsSync(f)) return null;
+    const { data, writtenAt } = JSON.parse(readFileSync(f, "utf8"));
+    if (Date.now() - new Date(writtenAt).getTime() > DISK_CACHE_MAX_AGE_MS) return null;
+    return data as DashboardData;
+  } catch {
+    return null;
+  }
+}
+
 // ── Run info ──────────────────────────────────────────────────────────────────
 
 export interface LatestRunInfo {
@@ -25,22 +46,29 @@ export interface LatestRunInfo {
   usrRun: { id: number; completedAt: string } | null;
 }
 
-export function getLatestRunInfo(): LatestRunInfo {
-  const db = getDb();
-  function latestBySource(pattern: string) {
-    const row = db
-      .prepare(
-        `SELECT id, completed_at as completedAt FROM collection_runs
-         WHERE status = 'completed' AND source LIKE ?
-         ORDER BY id DESC LIMIT 1`
-      )
-      .get(pattern) as { id: number; completedAt: string } | undefined;
-    return row ?? null;
+export async function getLatestRunInfo(): Promise<LatestRunInfo> {
+  async function latestBySource(pattern: string) {
+    const rows = await sql`
+      SELECT id, completed_at
+      FROM health.collection_runs
+      WHERE status = 'completed' AND source LIKE ${pattern}
+      ORDER BY id DESC LIMIT 1
+    `;
+    if (!rows[0]) return null;
+    // completed_at is TIMESTAMPTZ → postgres.js returns a Date; normalize to an ISO
+    // string (already tz-aware, so the page must NOT append a "Z").
+    return { id: Number(rows[0].id), completedAt: new Date(rows[0].completed_at as string | Date).toISOString() };
   }
+  const [dirRun, geoGeo, full, usrUsers] = await Promise.all([
+    latestBySource("%"),
+    latestBySource("%geo%"),
+    latestBySource("%full%"),
+    latestBySource("%users%"),
+  ]);
   return {
-    dirRun: latestBySource("%"),
-    geoRun: latestBySource("%geo%") ?? latestBySource("%full%"),
-    usrRun: latestBySource("%users%") ?? latestBySource("%full%"),
+    dirRun,
+    geoRun: geoGeo ?? full,
+    usrRun: usrUsers ?? full,
   };
 }
 
@@ -69,29 +97,20 @@ export interface DashboardData {
   providerLocations: PdsProviderLocation[];
 }
 
-export function getDashboardData(hideBsky = false): DashboardData {
+export function getDashboardData(hideBsky = false): DashboardData | null {
+  // 1. Hot in-memory cache (fastest path)
   const cached = dashboardCache.get(hideBsky);
-  if (cached && Date.now() < cached.expires) {
-    return cached.data;
+  if (cached && Date.now() < cached.expires) return cached.data;
+
+  // 2. Disk cache written by `npm run analysis:dashboard-cache` (non-blocking)
+  const disk = tryLoadDiskCache(hideBsky);
+  if (disk) {
+    dashboardCache.set(hideBsky, { data: disk, expires: Date.now() + CACHE_TTL_MS });
+    return disk;
   }
 
-  const topPdsRaw = getTopPdsByScan(10, hideBsky);
-
-  const data: DashboardData = {
-    runInfo: getLatestRunInfo(),
-    stats: getOverviewStats(hideBsky),
-    countries: getCountryDistribution(hideBsky),
-    reposByCountry: getReposByCountry(hideBsky),
-    versions: getVersionDistribution(hideBsky),
-    providers: getHostingProviders(hideBsky),
-    cdnBreakdown: getCloudflareBreakdown(hideBsky),
-    userDist: getUserDistribution(hideBsky),
-    topPds: topPdsRaw.map(p => ({ url: p.url, repoCount: p.repoCount, activeCount: p.activeCount, country: null })),
-    concentration: getConcentrationStats(hideBsky),
-    locations: getPdsLocations(hideBsky),
-    providerLocations: getPdsLocationsWithProvider(hideBsky),
-  };
-
-  dashboardCache.set(hideBsky, { data, expires: Date.now() + CACHE_TTL_MS });
-  return data;
+  // 3. No cache available — return null so the page can render a loading state
+  //    rather than blocking the event loop for ~51 seconds.
+  //    Run `npm run analysis:dashboard-cache` to populate the disk cache.
+  return null;
 }

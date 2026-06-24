@@ -2,6 +2,7 @@
  * Long-running Jetstream collector that tracks:
  *   1. Daily account activity (did_activity_daily) — one row per (did, date), bitmask of collections used
  *   2. Delete events (delete_events_daily) — daily counts by event type
+ *   2b. Per-DID post deletes (post_deletes_daily) — app.bsky.feed.post deletes per (did, date)
  *   3. Starter pack joins (starterpack_joins_daily)
  *   4. Per-DID language usage (did_langs)
  *   5. Non-bsky collection activity (collection_activity) — event counts per (collection, DID)
@@ -34,8 +35,7 @@
  */
 
 import WebSocket from "ws";
-import { getActivityDb } from "../db/activity-schema";
-import { getPlcDb } from "../db/plc-schema";
+import sql from "../db/pg";
 import { bufferPost, flushScorer, scorerShutdown } from "./post-scorer";
 
 // Bitmask assignments for activity_types column.
@@ -149,6 +149,11 @@ const activityBuffer = new Map<string, number>();
 // Delete buffer: "date|event_type" → count
 const deleteBuffer = new Map<string, number>();
 
+// Per-DID post-delete buffer: "did|date" → count (app.bsky.feed.post deletes only).
+// delete_events_daily only keeps aggregate-by-collection counts; this attributes
+// post deletes to the account doing them so we can see who deletes posts.
+const postDeleteBuffer = new Map<string, number>();
+
 // Starter pack join buffer: "starterpack_uri|date" → count
 const starterpackBuffer = new Map<string, number>();
 
@@ -179,6 +184,7 @@ const didWebResolved = new Set<string>();
 let lastCursor = 0;
 let totalActivityFlushed = 0;
 let totalDeletesFlushed = 0;
+let totalPostDeletesFlushed = 0;
 let totalStarterpackFlushed = 0;
 let totalLangDIDsFlushed = 0;
 let totalCollectionsFlushed = 0;
@@ -207,7 +213,7 @@ async function resolveDidWebPds(did: string): Promise<string | null> {
   }
 }
 
-// Resolve any newly-seen did:web DIDs and write discovered PDS URLs to plcDb.
+// Resolve any newly-seen did:web DIDs and write discovered PDS URLs to plc.did_web_pds.
 // Runs async alongside each flush; does not block the main event loop.
 async function resolveAndStoreDidWebs() {
   if (didWebSeen.size === 0) return;
@@ -216,38 +222,30 @@ async function resolveAndStoreDidWebs() {
   didWebSeen.clear();
   if (toResolve.length === 0) return;
 
-  const plcDb = getPlcDb();
-
-  // Check which ones we've already stored with a successful resolution
-  const alreadyStored = new Set(
-    (plcDb.prepare(`SELECT did FROM did_web_pds WHERE pds_url IS NOT NULL`).all() as { did: string }[])
-      .map(r => r.did)
-  );
+  const stored = await sql<{ did: string }[]>`SELECT did FROM plc.did_web_pds WHERE pds_url IS NOT NULL`;
+  const alreadyStored = new Set(stored.map(r => r.did));
   const fresh = toResolve.filter(d => !alreadyStored.has(d));
-  // Warm the resolved cache
   for (const d of alreadyStored) didWebResolved.add(d);
   if (fresh.length === 0) return;
-
-  const upsert = plcDb.prepare(`
-    INSERT INTO did_web_pds (did, pds_url, first_seen, last_seen, resolved_at)
-    VALUES (?, ?, datetime('now'), datetime('now'), datetime('now'))
-    ON CONFLICT (did) DO UPDATE SET
-      pds_url     = COALESCE(excluded.pds_url, pds_url),
-      last_seen   = excluded.last_seen,
-      resolved_at = CASE WHEN excluded.pds_url IS NOT NULL THEN excluded.resolved_at ELSE resolved_at END
-  `);
 
   const CONCURRENCY = 5;
   let discovered = 0;
   for (let i = 0; i < fresh.length; i += CONCURRENCY) {
     const batch = fresh.slice(i, i + CONCURRENCY);
-    const results = await Promise.all(batch.map(async did => ({ did, pdsUrl: await resolveDidWebPds(did) })));
-    plcDb.transaction(() => {
-      for (const { did, pdsUrl } of results) {
-        upsert.run(did, pdsUrl);
-        if (pdsUrl) { didWebResolved.add(did); discovered++; }
-      }
-    })();
+    const results = await Promise.all(batch.map(async did => ({ did, pds_url: await resolveDidWebPds(did) })));
+    await sql`
+      INSERT INTO plc.did_web_pds ${sql(results.map(r => ({
+        did: r.did, pds_url: r.pds_url,
+        first_seen: new Date(), last_seen: new Date(), resolved_at: new Date(),
+      })))}
+      ON CONFLICT (did) DO UPDATE SET
+        pds_url     = COALESCE(EXCLUDED.pds_url, plc.did_web_pds.pds_url),
+        last_seen   = EXCLUDED.last_seen,
+        resolved_at = CASE WHEN EXCLUDED.pds_url IS NOT NULL THEN EXCLUDED.resolved_at ELSE plc.did_web_pds.resolved_at END
+    `;
+    for (const { did, pds_url } of results) {
+      if (pds_url) { didWebResolved.add(did); discovered++; }
+    }
   }
 
   if (discovered > 0) {
@@ -255,24 +253,14 @@ async function resolveAndStoreDidWebs() {
   }
 }
 
-// Snapshot all in-memory buffers and clear them. Fast and synchronous — call this
-// at the top of any flush so new incoming events accumulate in fresh buffers while
-// we write the snapshot to SQLite.
+// Snapshot all in-memory buffers and clear them. Synchronous — call this at the top
+// of flush() so new incoming events accumulate in fresh buffers while we write to PG.
+// Collection row-count check is done async before this call in flush().
 function snapshotBuffers() {
-  // Check collection_activity row count and pause if over the limit (fast COUNT query)
-  if (!collectionTrackingPaused && collectionBuffer.size > 0) {
-    const db = getActivityDb();
-    const { n } = db.prepare(`SELECT COUNT(*) AS n FROM collection_activity`).get() as { n: number };
-    if (n >= MAX_COLLECTION_ROWS) {
-      console.warn(`[activity] collection_activity has ${n.toLocaleString()} rows (limit ${MAX_COLLECTION_ROWS.toLocaleString()}). Pausing collection tracking.`);
-      collectionTrackingPaused = true;
-      collectionBuffer.clear();
-    }
-  }
-
   const snapshot = {
     activityRows:    [...activityBuffer.entries()],
     deleteRows:      [...deleteBuffer.entries()],
+    postDeleteRows:  [...postDeleteBuffer.entries()],
     starterpackRows: [...starterpackBuffer.entries()],
     langRows:        [...langBuffer.entries()],
     langStatsRows:   [...langStatsBuffer.entries()],
@@ -284,6 +272,7 @@ function snapshotBuffers() {
   };
   activityBuffer.clear();
   deleteBuffer.clear();
+  postDeleteBuffer.clear();
   starterpackBuffer.clear();
   langBuffer.clear();
   langStatsBuffer.clear();
@@ -295,11 +284,12 @@ function snapshotBuffers() {
 }
 
 function logFlush(snapshot: ReturnType<typeof snapshotBuffers>) {
-  const { activityRows, deleteRows, starterpackRows, langRows, langStatsRows, collectionRows, feedGenRows, feedLikeRows } = snapshot;
+  const { activityRows, deleteRows, postDeleteRows, starterpackRows, langRows, langStatsRows, collectionRows, feedGenRows, feedLikeRows } = snapshot;
   const postsThisFlush  = langStatsRows.reduce((s, [, v]) => s + v.total, 0);
   const taggedThisFlush = langStatsRows.reduce((s, [, v]) => s + v.tagged, 0);
   totalActivityFlushed    += activityRows.length;
   totalDeletesFlushed     += deleteRows.reduce((s, [, c]) => s + c, 0);
+  totalPostDeletesFlushed += postDeleteRows.reduce((s, [, c]) => s + c, 0);
   totalStarterpackFlushed += starterpackRows.reduce((s, [, c]) => s + c, 0);
   totalLangDIDsFlushed    += langRows.length;
   totalCollectionsFlushed += collectionRows.length;
@@ -308,207 +298,193 @@ function logFlush(snapshot: ReturnType<typeof snapshotBuffers>) {
   const tagPct = postsThisFlush > 0 ? ((taggedThisFlush / postsThisFlush) * 100).toFixed(1) : "—";
   const collectionNote = collectionTrackingPaused ? " [collection tracking PAUSED]" : ` collections=${collectionRows.length.toLocaleString()}`;
   console.log(
-    `[activity] Flushed activity=${activityRows.length.toLocaleString()} deletes=${deleteRows.length} types starterpack=${starterpackRows.length} uris lang=${langRows.length.toLocaleString()} did×lang (${tagPct}% tagged)${collectionNote} feeds=${feedGenRows.length} feed_likes=${feedLikeRows.reduce((s, [, c]) => s + c, 0)} | ` +
-    `totals: activity=${totalActivityFlushed.toLocaleString()} deletes=${totalDeletesFlushed.toLocaleString()} starterpack=${totalStarterpackFlushed.toLocaleString()} lang_dids=${totalLangDIDsFlushed.toLocaleString()} collections=${totalCollectionsFlushed.toLocaleString()} feed_gens=${totalFeedGensFlushed.toLocaleString()} feed_likes=${totalFeedLikesFlushed.toLocaleString()} | ` +
+    `[activity] Flushed activity=${activityRows.length.toLocaleString()} deletes=${deleteRows.length} types postdel=${postDeleteRows.length.toLocaleString()} dids starterpack=${starterpackRows.length} uris lang=${langRows.length.toLocaleString()} did×lang (${tagPct}% tagged)${collectionNote} feeds=${feedGenRows.length} feed_likes=${feedLikeRows.reduce((s, [, c]) => s + c, 0)} | ` +
+    `totals: activity=${totalActivityFlushed.toLocaleString()} deletes=${totalDeletesFlushed.toLocaleString()} postdel=${totalPostDeletesFlushed.toLocaleString()} starterpack=${totalStarterpackFlushed.toLocaleString()} lang_dids=${totalLangDIDsFlushed.toLocaleString()} collections=${totalCollectionsFlushed.toLocaleString()} feed_gens=${totalFeedGensFlushed.toLocaleString()} feed_likes=${totalFeedLikesFlushed.toLocaleString()} | ` +
     `events=${totalEvents.toLocaleString()} | cursor=${snapshot.cursorToSave}`
   );
 }
 
-function prepareStatements(db: ReturnType<typeof getActivityDb>) {
-  return {
-    upsertActivity: db.prepare(`
-      INSERT INTO did_activity_daily (did, date, activity_types) VALUES (?, ?, ?)
-      ON CONFLICT (did, date) DO UPDATE SET activity_types = activity_types | excluded.activity_types
-    `),
-    upsertDelete: db.prepare(`
-      INSERT INTO delete_events_daily (date, event_type, count) VALUES (?, ?, ?)
-      ON CONFLICT (date, event_type) DO UPDATE SET count = count + excluded.count
-    `),
-    upsertStarterpack: db.prepare(`
-      INSERT INTO starterpack_joins_daily (starterpack_uri, date, count) VALUES (?, ?, ?)
-      ON CONFLICT (starterpack_uri, date) DO UPDATE SET count = count + excluded.count
-    `),
-    upsertLang: db.prepare(`
-      INSERT INTO did_langs (did, lang, post_count, last_seen) VALUES (?, ?, ?, datetime('now'))
-      ON CONFLICT (did, lang) DO UPDATE SET
-        post_count = post_count + excluded.post_count,
-        last_seen  = excluded.last_seen
-    `),
-    upsertLangStats: db.prepare(`
-      INSERT INTO lang_stats (date, total_posts, tagged_posts, updated_at) VALUES (?, ?, ?, datetime('now'))
-      ON CONFLICT (date) DO UPDATE SET
-        total_posts  = total_posts  + excluded.total_posts,
-        tagged_posts = tagged_posts + excluded.tagged_posts,
-        updated_at   = excluded.updated_at
-    `),
-    upsertCollection: db.prepare(`
-      INSERT INTO collection_activity (collection, did, date, event_count)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT (collection, did, date) DO UPDATE SET event_count = event_count + excluded.event_count
-    `),
-    saveCursor: db.prepare(`
-      INSERT INTO jetstream_cursor (id, cursor, updated_at)
-      VALUES (1, ?, datetime('now'))
-      ON CONFLICT (id) DO UPDATE SET cursor = excluded.cursor, updated_at = excluded.updated_at
-    `),
-    upsertFeedGen: db.prepare(`
-      INSERT INTO feed_generators (uri, creator_did, display_name, description, first_seen)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT (uri) DO UPDATE SET
-        display_name = coalesce(excluded.display_name, display_name),
-        description  = coalesce(excluded.description,  description),
-        deleted_at   = NULL
-    `),
-    markFeedGenDeleted: db.prepare(`
-      UPDATE feed_generators SET deleted_at = datetime('now') WHERE uri = ?
-    `),
-    upsertFeedLike: db.prepare(`
-      INSERT INTO feed_generator_likes_daily (feed_uri, date, likes)
-      VALUES (?, ?, ?)
-      ON CONFLICT (feed_uri, date) DO UPDATE SET likes = likes + excluded.likes
-    `),
-  };
-}
-
 // Async flush: snapshots buffers immediately (so new events accumulate while we write),
-// then writes to SQLite in chunks of ACTIVITY_CHUNK_SIZE, yielding to the event loop
-// between chunks. This prevents the TCP receive buffer from filling up during large
-// flushes on a grown did_activity_daily table.
-const ACTIVITY_CHUNK_SIZE = 2_000;
+// then upserts to Postgres in chunks, yielding between chunks to keep the event loop
+// responsive during backfill when events arrive faster than writes can drain.
+const ACTIVITY_CHUNK_SIZE = 5_000;
 
 async function flush() {
   if (activityBuffer.size === 0 && deleteBuffer.size === 0 && starterpackBuffer.size === 0 && langBuffer.size === 0 && collectionBuffer.size === 0 && feedGenBuffer.size === 0 && feedGenDeleteBuffer.size === 0 && feedLikeBuffer.size === 0) return;
 
+  // Async collection row-count check before snapshotting buffers.
+  if (!collectionTrackingPaused && collectionBuffer.size > 0) {
+    const [{ n }] = await sql<{ n: number }[]>`SELECT COUNT(*)::int AS n FROM activity.collection_activity`;
+    if (n >= MAX_COLLECTION_ROWS) {
+      console.warn(`[activity] collection_activity has ${n.toLocaleString()} rows (limit ${MAX_COLLECTION_ROWS.toLocaleString()}). Pausing collection tracking.`);
+      collectionTrackingPaused = true;
+      collectionBuffer.clear();
+    }
+  }
+
   const snapshot = snapshotBuffers();
-  const { activityRows, deleteRows, starterpackRows, langRows, langStatsRows, collectionRows, feedGenRows, feedGenDeletes, feedLikeRows, cursorToSave } = snapshot;
+  const { activityRows, deleteRows, postDeleteRows, starterpackRows, langRows, langStatsRows, collectionRows, feedGenRows, feedGenDeletes, feedLikeRows, cursorToSave } = snapshot;
 
-  const db = getActivityDb();
-  const stmts = prepareStatements(db);
-
-  // Write activity in chunks, yielding between each so the event loop stays responsive.
+  // did_activity_daily — chunked upsert with bitwise OR merge.
   for (let i = 0; i < activityRows.length; i += ACTIVITY_CHUNK_SIZE) {
-    db.transaction(() => {
-      for (const [entry, bits] of activityRows.slice(i, i + ACTIVITY_CHUNK_SIZE)) {
-        const pipe = entry.indexOf("|");
-        stmts.upsertActivity.run(entry.slice(0, pipe), entry.slice(pipe + 1), bits);
-      }
-    })();
+    const chunk = activityRows.slice(i, i + ACTIVITY_CHUNK_SIZE).map(([entry, bits]) => {
+      const pipe = entry.indexOf("|");
+      return { did: entry.slice(0, pipe), date: entry.slice(pipe + 1), activity_types: bits };
+    });
+    await sql`
+      INSERT INTO activity.did_activity_daily ${sql(chunk, "did", "date", "activity_types")}
+      ON CONFLICT (did, date) DO UPDATE SET
+        activity_types = did_activity_daily.activity_types | EXCLUDED.activity_types
+    `;
     if (i + ACTIVITY_CHUNK_SIZE < activityRows.length) {
       await new Promise<void>(resolve => setImmediate(resolve));
     }
   }
 
-  // Write lang rows in chunks too — also grows large.
+  // did_langs — chunked upsert accumulating post counts.
+  const now = new Date();
   for (let i = 0; i < langRows.length; i += ACTIVITY_CHUNK_SIZE) {
-    db.transaction(() => {
-      for (const [key, count] of langRows.slice(i, i + ACTIVITY_CHUNK_SIZE)) {
-        const pipe = key.indexOf("|");
-        stmts.upsertLang.run(key.slice(0, pipe), key.slice(pipe + 1), count);
-      }
-    })();
+    const chunk = langRows.slice(i, i + ACTIVITY_CHUNK_SIZE).map(([key, count]) => {
+      const pipe = key.indexOf("|");
+      return { did: key.slice(0, pipe), lang: key.slice(pipe + 1), post_count: count, last_seen: now };
+    });
+    await sql`
+      INSERT INTO activity.did_langs ${sql(chunk, "did", "lang", "post_count", "last_seen")}
+      ON CONFLICT (did, lang) DO UPDATE SET
+        post_count = did_langs.post_count + EXCLUDED.post_count,
+        last_seen  = EXCLUDED.last_seen
+    `;
     if (i + ACTIVITY_CHUNK_SIZE < langRows.length) {
       await new Promise<void>(resolve => setImmediate(resolve));
     }
   }
 
-  // All remaining tables are small — write them in one transaction with the cursor save.
-  db.transaction(() => {
-    for (const [key, count] of deleteRows) {
-      const pipe = key.indexOf("|");
-      stmts.upsertDelete.run(key.slice(0, pipe), key.slice(pipe + 1), count);
-    }
-    for (const [key, count] of starterpackRows) {
-      const pipe = key.indexOf("|");
-      stmts.upsertStarterpack.run(key.slice(0, pipe), key.slice(pipe + 1), count);
-    }
-    for (const [key, count] of collectionRows) {
-      const [collection, did, date] = key.split("|");
-      stmts.upsertCollection.run(collection, did, date, count);
-    }
-    for (const [uri, meta] of feedGenRows) {
-      stmts.upsertFeedGen.run(uri, meta.creatorDid, meta.displayName, meta.description, meta.firstSeen);
-    }
-    for (const uri of feedGenDeletes) {
-      stmts.markFeedGenDeleted.run(uri);
-    }
-    for (const [key, count] of feedLikeRows) {
-      const pipe = key.lastIndexOf("|");
-      stmts.upsertFeedLike.run(key.slice(0, pipe), key.slice(pipe + 1), count);
-    }
-    for (const [date, { total, tagged }] of langStatsRows) {
-      if (total > 0) stmts.upsertLangStats.run(date, total, tagged);
-    }
-    if (cursorToSave > 0) stmts.saveCursor.run(cursorToSave);
-  })();
-
-  // Truncate the WAL after every flush — auto-checkpoint only copies frames (PASSIVE mode)
-  // and never shrinks the WAL file. TRUNCATE zeroes it while we're the sole connection.
-  db.pragma("wal_checkpoint(TRUNCATE)");
-
-  logFlush(snapshot);
-}
-
-// Synchronous flush for shutdown — can't await in signal handlers.
-function flushSync() {
-  if (activityBuffer.size === 0 && deleteBuffer.size === 0 && starterpackBuffer.size === 0 && langBuffer.size === 0 && collectionBuffer.size === 0 && feedGenBuffer.size === 0 && feedGenDeleteBuffer.size === 0 && feedLikeBuffer.size === 0) return;
-
-  const snapshot = snapshotBuffers();
-  const { activityRows, deleteRows, starterpackRows, langRows, langStatsRows, collectionRows, feedGenRows, feedGenDeletes, feedLikeRows, cursorToSave } = snapshot;
-
-  const db = getActivityDb();
-  const stmts = prepareStatements(db);
-
-  db.transaction(() => {
-    for (const [entry, bits] of activityRows) {
+  // post_deletes_daily — one row per (did, date); can be many distinct DIDs per
+  // flush, so chunk + yield like did_activity_daily (3 cols, ~21K-row param cap).
+  for (let i = 0; i < postDeleteRows.length; i += ACTIVITY_CHUNK_SIZE) {
+    const chunk = postDeleteRows.slice(i, i + ACTIVITY_CHUNK_SIZE).map(([entry, count]) => {
       const pipe = entry.indexOf("|");
-      stmts.upsertActivity.run(entry.slice(0, pipe), entry.slice(pipe + 1), bits);
+      return { did: entry.slice(0, pipe), date: entry.slice(pipe + 1), count };
+    });
+    await sql`
+      INSERT INTO activity.post_deletes_daily ${sql(chunk, "did", "date", "count")}
+      ON CONFLICT (did, date) DO UPDATE SET count = post_deletes_daily.count + EXCLUDED.count
+    `;
+    if (i + ACTIVITY_CHUNK_SIZE < postDeleteRows.length) {
+      await new Promise<void>(resolve => setImmediate(resolve));
     }
-    for (const [key, count] of deleteRows) {
-      const pipe = key.indexOf("|");
-      stmts.upsertDelete.run(key.slice(0, pipe), key.slice(pipe + 1), count);
-    }
-    for (const [key, count] of starterpackRows) {
-      const pipe = key.indexOf("|");
-      stmts.upsertStarterpack.run(key.slice(0, pipe), key.slice(pipe + 1), count);
-    }
-    for (const [key, count] of langRows) {
-      const pipe = key.indexOf("|");
-      stmts.upsertLang.run(key.slice(0, pipe), key.slice(pipe + 1), count);
-    }
-    for (const [key, count] of collectionRows) {
-      const [collection, did, date] = key.split("|");
-      stmts.upsertCollection.run(collection, did, date, count);
-    }
-    for (const [uri, meta] of feedGenRows) {
-      stmts.upsertFeedGen.run(uri, meta.creatorDid, meta.displayName, meta.description, meta.firstSeen);
-    }
-    for (const uri of feedGenDeletes) {
-      stmts.markFeedGenDeleted.run(uri);
-    }
-    for (const [key, count] of feedLikeRows) {
-      const pipe = key.lastIndexOf("|");
-      stmts.upsertFeedLike.run(key.slice(0, pipe), key.slice(pipe + 1), count);
-    }
-    for (const [date, { total, tagged }] of langStatsRows) {
-      if (total > 0) stmts.upsertLangStats.run(date, total, tagged);
-    }
-    if (cursorToSave > 0) stmts.saveCursor.run(cursorToSave);
-  })();
+  }
 
-  db.pragma("wal_checkpoint(TRUNCATE)");
+  // collection_activity is unbounded per flush (one row per collection×did×date) and
+  // starterpack_joins can grow large too — batch both to stay under Postgres's
+  // 65,534-parameter limit (4 / 3 cols per row respectively).
+  for (let i = 0; i < collectionRows.length; i += ACTIVITY_CHUNK_SIZE) {
+    const chunk = collectionRows.slice(i, i + ACTIVITY_CHUNK_SIZE).map(([key, count]) => {
+      const [collection, did, date] = key.split("|");
+      return { collection, did, date, event_count: count };
+    });
+    await sql`
+      INSERT INTO activity.collection_activity ${sql(chunk, "collection", "did", "date", "event_count")}
+      ON CONFLICT (collection, did, date) DO UPDATE SET
+        event_count = collection_activity.event_count + EXCLUDED.event_count
+    `;
+  }
+  for (let i = 0; i < starterpackRows.length; i += ACTIVITY_CHUNK_SIZE) {
+    const chunk = starterpackRows.slice(i, i + ACTIVITY_CHUNK_SIZE).map(([key, count]) => {
+      const pipe = key.indexOf("|");
+      return { starterpack_uri: key.slice(0, pipe), date: key.slice(pipe + 1), count };
+    });
+    await sql`
+      INSERT INTO activity.starterpack_joins_daily ${sql(chunk, "starterpack_uri", "date", "count")}
+      ON CONFLICT (starterpack_uri, date) DO UPDATE SET count = starterpack_joins_daily.count + EXCLUDED.count
+    `;
+  }
+
+  // Small tables (bounded by event-type / distinct-feed / date cardinality) — fire in parallel.
+  await Promise.all([
+    deleteRows.length > 0 && sql`
+      INSERT INTO activity.delete_events_daily ${sql(deleteRows.map(([key, count]) => {
+        const pipe = key.indexOf("|");
+        return { date: key.slice(0, pipe), event_type: key.slice(pipe + 1), count };
+      }), "date", "event_type", "count")}
+      ON CONFLICT (date, event_type) DO UPDATE SET count = delete_events_daily.count + EXCLUDED.count
+    `,
+    feedGenRows.length > 0 && sql`
+      INSERT INTO activity.feed_generators ${sql(feedGenRows.map(([uri, meta]) => ({
+        uri, creator_did: meta.creatorDid, display_name: meta.displayName,
+        description: meta.description, first_seen: meta.firstSeen,
+      })), "uri", "creator_did", "display_name", "description", "first_seen")}
+      ON CONFLICT (uri) DO UPDATE SET
+        display_name = COALESCE(EXCLUDED.display_name, feed_generators.display_name),
+        description  = COALESCE(EXCLUDED.description,  feed_generators.description),
+        deleted_at   = NULL
+    `,
+    feedGenDeletes.length > 0 && sql`
+      UPDATE activity.feed_generators SET deleted_at = NOW()
+      WHERE uri = ANY(${feedGenDeletes})
+    `,
+    feedLikeRows.length > 0 && sql`
+      INSERT INTO activity.feed_generator_likes_daily ${sql(feedLikeRows.map(([key, count]) => {
+        const pipe = key.lastIndexOf("|");
+        return { feed_uri: key.slice(0, pipe), date: key.slice(pipe + 1), likes: count };
+      }), "feed_uri", "date", "likes")}
+      ON CONFLICT (feed_uri, date) DO UPDATE SET likes = feed_generator_likes_daily.likes + EXCLUDED.likes
+    `,
+    langStatsRows.filter(([, v]) => v.total > 0).length > 0 && sql`
+      INSERT INTO activity.lang_stats ${sql(langStatsRows.filter(([, v]) => v.total > 0).map(([date, { total, tagged }]) => ({
+        date, total_posts: total, tagged_posts: tagged, updated_at: now,
+      })), "date", "total_posts", "tagged_posts", "updated_at")}
+      ON CONFLICT (date) DO UPDATE SET
+        total_posts  = lang_stats.total_posts  + EXCLUDED.total_posts,
+        tagged_posts = lang_stats.tagged_posts + EXCLUDED.tagged_posts,
+        updated_at   = EXCLUDED.updated_at
+    `,
+  ].filter(Boolean));
+
+  // Save cursor only after all data writes succeed — ensures we can replay safely on failure.
+  if (cursorToSave > 0) {
+    await sql`
+      INSERT INTO activity.jetstream_cursor (id, cursor, updated_at)
+      VALUES (1, ${BigInt(cursorToSave)}, NOW())
+      ON CONFLICT (id) DO UPDATE SET cursor = EXCLUDED.cursor, updated_at = EXCLUDED.updated_at
+    `;
+  }
+
   logFlush(snapshot);
 }
 
-function pruneOldRows() {
-  const db = getActivityDb();
+// Serialize all flushes. flush() is fired from four places (timer, pressure-flush,
+// reconnect-close, shutdown); nothing stopped two from running at once, and two
+// concurrent flush() calls grab different pooled connections and run INSERT ... ON
+// CONFLICT on did_activity_daily in different key orders → 40P01 self-deadlock
+// (and lost flushes => undercounts on the additive tables). flushNow() runs flushes
+// one at a time on a promise chain. Callers that arrive while a flush is already
+// queued (not yet started) coalesce onto that queued run, and the returned promise
+// resolves only when their covering flush completes — so the pressure path can still
+// await an actual drain before it resumes the socket.
+let flushChain: Promise<void> = Promise.resolve();
+let flushQueued = false;
+function flushNow(): Promise<void> {
+  if (flushQueued) return flushChain;       // a not-yet-started flush will cover us
+  flushQueued = true;
+  flushChain = flushChain
+    .catch(() => {})                        // a prior failure must not break the chain
+    .then(() => { flushQueued = false; return flush(); });
+  return flushChain;
+}
+
+async function pruneOldRows() {
   const cutoff = new Date(Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000)
     .toISOString().slice(0, 10);
-  const a = db.prepare(`DELETE FROM did_activity_daily WHERE date < ?`).run(cutoff);
-  const d = db.prepare(`DELETE FROM delete_events_daily WHERE date < ?`).run(cutoff);
-  db.prepare(`DELETE FROM lang_stats WHERE date < ?`).run(cutoff);
-  db.prepare(`DELETE FROM collection_activity WHERE date < ?`).run(cutoff);
-  if (a.changes > 0 || d.changes > 0) {
-    console.log(`[activity] Pruned ${a.changes.toLocaleString()} activity + ${d.changes.toLocaleString()} delete rows older than ${cutoff}`);
+  const [a, d] = await Promise.all([
+    sql`DELETE FROM activity.did_activity_daily WHERE date < ${cutoff}`,
+    sql`DELETE FROM activity.delete_events_daily WHERE date < ${cutoff}`,
+    sql`DELETE FROM activity.post_deletes_daily WHERE date < ${cutoff}`,
+    sql`DELETE FROM activity.lang_stats WHERE date < ${cutoff}`,
+    sql`DELETE FROM activity.collection_activity WHERE date < ${cutoff}`,
+  ]);
+  if (a.count > 0 || d.count > 0) {
+    console.log(`[activity] Pruned ${a.count.toLocaleString()} activity + ${d.count.toLocaleString()} delete rows older than ${cutoff}`);
   }
 }
 
@@ -522,15 +498,10 @@ const STALL_TIMEOUT_MS = 120_000;
 // Client-side ping keeps the server from closing idle connections.
 const PING_INTERVAL_MS = 30_000;
 
+// lastCursor is loaded from PG at startup in main(); on reconnect we pass whatever
+// we last observed so the relay resumes from the right position.
 function connect() {
-  const db = getActivityDb();
-  const cursorRow = db.prepare(`SELECT cursor FROM jetstream_cursor WHERE id = 1`).get() as { cursor: number } | undefined;
-
-  let cursor = cursorRow?.cursor;
-  if (BACKFILL_HOURS !== null) {
-    cursor = (Date.now() - BACKFILL_HOURS * 60 * 60 * 1000) * 1000;
-    console.log(`[activity] Backfill mode: overriding cursor to ${BACKFILL_HOURS}h ago (${new Date(cursor / 1000).toISOString()})`);
-  }
+  const cursor = lastCursor || undefined;
 
   const relay = JETSTREAM_RELAYS[relayIdx % JETSTREAM_RELAYS.length];
   const url = `${relay}?${COLLECTION_PARAMS}${cursor ? `&cursor=${cursor}` : ""}`;
@@ -667,6 +638,12 @@ function connect() {
           // Record-level delete by collection
           recordDelete(`${date}|record:${evt.commit.collection}`);
 
+          // Per-DID attribution for post deletes (who deletes posts, how many)
+          if (evt.commit.collection === "app.bsky.feed.post") {
+            const pkey = `${evt.did}|${date}`;
+            postDeleteBuffer.set(pkey, (postDeleteBuffer.get(pkey) ?? 0) + 1);
+          }
+
           // Feed generator deletes: mark the URI so we can tombstone the row
           if (evt.commit.collection === "app.bsky.feed.generator") {
             feedGenDeleteBuffer.add(`at://${evt.did}/app.bsky.feed.generator/${evt.commit.rkey}`);
@@ -688,7 +665,7 @@ function connect() {
         pressureFlushPending = true;
         ws.pause();
         if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
-        flush()
+        flushNow()
           .catch(err => console.error("[activity] pressure flush error:", err))
           .finally(() => {
             pressureFlushPending = false;
@@ -712,7 +689,7 @@ function connect() {
 
   ws.on("close", (code, reason) => {
     cleanup();
-    flushSync();
+    flushNow().catch(err => console.error("[activity] close flush error:", err));
     relayIdx++;
     const next = JETSTREAM_RELAYS[relayIdx % JETSTREAM_RELAYS.length];
     const why = code !== 1000 ? ` (code ${code}${reason?.length ? `: ${reason}` : ""})` : "";
@@ -724,31 +701,36 @@ function connect() {
 async function main() {
   console.log(`\n=== Jetstream Activity Collector ===`);
 
+  // Load cursor from PG (or compute backfill start).
   if (BACKFILL_HOURS !== null) {
-    const db = getActivityDb();
     const backfillStartMs   = Date.now() - BACKFILL_HOURS * 60 * 60 * 1000;
+    lastCursor              = backfillStartMs * 1000;
     const backfillDate      = new Date(backfillStartMs).toISOString().slice(0, 10);
-    // If the cursor starts mid-day UTC, that date is only partially covered by the replay.
-    // Deleting it would wipe midnight→cursor data we can't recover. Instead, start deletes
-    // from the next day (fully covered). The partial start day may slightly double-count
-    // its overlap window, which is acceptable vs. data loss.
     const midnightMs        = new Date(backfillDate + "T00:00:00.000Z").getTime();
     const isPartialStartDay = backfillStartMs > midnightMs + 1000;
     const deleteFromDate    = isPartialStartDay
       ? new Date(midnightMs + 86_400_000).toISOString().slice(0, 10)
       : backfillDate;
-    console.log(`[activity] Clearing additive daily tables from ${deleteFromDate} to prevent double-counting on backfill...`
+    console.log(`[activity] Backfill mode: cursor set to ${BACKFILL_HOURS}h ago (${new Date(backfillStartMs).toISOString()})`);
+    console.log(`[activity] Clearing additive daily tables from ${deleteFromDate} to prevent double-counting...`
       + (isPartialStartDay ? ` (skipping partial start date ${backfillDate})` : ""));
-    db.prepare(`DELETE FROM delete_events_daily WHERE date >= ?`).run(deleteFromDate);
-    db.prepare(`DELETE FROM starterpack_joins_daily WHERE date >= ?`).run(deleteFromDate);
-    db.prepare(`DELETE FROM feed_generator_likes_daily WHERE date >= ?`).run(deleteFromDate);
-    db.prepare(`DELETE FROM lang_stats WHERE date >= ?`).run(deleteFromDate);
-    // collection_activity uses (collection, did, date) PK — replaying events only inflates
+    // collection_activity uses (collection, did, date) PK — replaying only inflates
     // event_count, not unique DID counts. No delete needed; backfill upserts safely.
+    await Promise.all([
+      sql`DELETE FROM activity.delete_events_daily WHERE date >= ${deleteFromDate}`,
+      sql`DELETE FROM activity.post_deletes_daily WHERE date >= ${deleteFromDate}`,
+      sql`DELETE FROM activity.starterpack_joins_daily WHERE date >= ${deleteFromDate}`,
+      sql`DELETE FROM activity.feed_generator_likes_daily WHERE date >= ${deleteFromDate}`,
+      sql`DELETE FROM activity.lang_stats WHERE date >= ${deleteFromDate}`,
+    ]);
+  } else {
+    const rows = await sql<{ cursor: string }[]>`SELECT cursor FROM activity.jetstream_cursor WHERE id = 1`;
+    lastCursor = rows[0] ? Number(rows[0].cursor) : 0;
+    if (lastCursor) console.log(`[activity] Resuming from cursor ${lastCursor} (${new Date(lastCursor / 1000).toISOString()})`);
   }
 
   setInterval(() => {
-    flush()
+    flushNow()
       .then(() => pruneOldRows())
       .then(() => resolveAndStoreDidWebs())
       .catch(err => console.error("[activity] flush error:", err));
@@ -761,9 +743,11 @@ async function main() {
   for (const sig of ["SIGINT", "SIGTERM"]) {
     process.on(sig, () => {
       console.log(`\n[activity] ${sig} received, flushing...`);
-      flushSync();
-      scorerShutdown();
-      process.exit(0);
+      flushNow()
+        .then(() => scorerShutdown())
+        .then(() => sql.end())
+        .then(() => process.exit(0))
+        .catch(() => process.exit(1));
     });
   }
 

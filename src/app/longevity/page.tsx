@@ -25,14 +25,16 @@ function ChartCard({ title, subtitle, children }: { title: string; subtitle?: st
 }
 
 export default async function LongevityPage() {
-  const pdsAgeDataAll    = getPdsAgeData(1);
+  const [pdsAgeDataAll, cohortData, activeCreations, activeCreationsNoBsky, timestamp, creationLastRun, activePdsCount] = await Promise.all([
+    getPdsAgeData(1),
+    getAccountCohortCounts(),
+    getActiveCreationTimeseriesWeekly(false),
+    getActiveCreationTimeseriesWeekly(true),
+    getPlcDataTimestamp(),
+    getActiveCreationLastRun(),
+    getActivePdsCount(),
+  ]);
   const pdsAgeData       = pdsAgeDataAll.filter(r => r.total_accounts >= 5);
-  const cohortData       = getAccountCohortCounts();
-  const activeCreations  = getActiveCreationTimeseriesWeekly(false);
-  const activeCreationsNoBsky = getActiveCreationTimeseriesWeekly(true);
-  const timestamp        = getPlcDataTimestamp();
-  const creationLastRun  = getActiveCreationLastRun();
-  const activePdsCount   = getActivePdsCount();
 
   const totalAccounts = cohortData.reduce((s, r) => s + r.count, 0);
   const cohortBuckets = cohortData.map(r => ({ name: r.cohort, value: r.count }));

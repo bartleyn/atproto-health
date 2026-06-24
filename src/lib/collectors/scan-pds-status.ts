@@ -15,7 +15,7 @@
  */
 
 import { promises as dns } from "dns";
-import { getPlcDb } from "../db/plc-schema";
+import sql, { withDbRetry } from "../db/pg";
 import { junkPdsFilter } from "../db/plc-queries";
 import { scanPdsRepos, type RepoInfo, type StatusCounts, type NonActiveRepo } from "./pds-repos";
 import { describeServer } from "./pds-details";
@@ -90,37 +90,35 @@ async function runWithConcurrency<T>(
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 async function main() {
-  const db = getPlcDb();
   const today = new Date().toISOString().slice(0, 10);
 
   console.log(`\n=== PDS Repo Status Scanner ===`);
   console.log(`Snapshot date: ${today}`);
   console.log(`Concurrency:   ${CONCURRENCY}`);
 
-  // Get all PDSes from our DB, ordered by account count desc
   let pdsList: string[];
   if (onlyList) {
     pdsList = onlyList;
     console.log(`Mode: specific PDSes (${pdsList.length})\n`);
   } else {
-    // PDS sources: did:plc accounts (plc_did_pds) + did:web accounts (did_web_pds)
-    const plcRows = db
-      .prepare(`SELECT pds_url FROM plc_did_pds WHERE ${junkPdsFilter()} GROUP BY pds_url ORDER BY COUNT(*) DESC`)
-      .all() as { pds_url: string }[];
-    const pdsSet = new Map<string, number>(); // url → approx account count
+    const [plcRows, didWebRows] = await Promise.all([
+      sql.unsafe<{ pds_url: string }[]>(
+        `SELECT pds_url FROM plc.plc_did_pds WHERE ${junkPdsFilter()} GROUP BY pds_url ORDER BY COUNT(*) DESC`
+      ),
+      sql.unsafe<{ pds_url: string }[]>(
+        `SELECT DISTINCT pds_url FROM plc.did_web_pds WHERE pds_url IS NOT NULL AND ${junkPdsFilter()}`
+      ),
+    ]);
+
+    const pdsSet = new Map<string, number>();
     for (const r of plcRows) {
       pdsSet.set(r.pds_url.replace(/\/+$/, "").replace(/^http:\/\//, "https://"), 0);
     }
-
-    const didWebRows = db
-      .prepare(`SELECT DISTINCT pds_url FROM did_web_pds WHERE pds_url IS NOT NULL AND ${junkPdsFilter()}`)
-      .all() as { pds_url: string }[];
     let didWebAdded = 0;
     for (const r of didWebRows) {
       const url = r.pds_url.replace(/\/+$/, "").replace(/^http:\/\//, "https://");
       if (!pdsSet.has(url)) { pdsSet.set(url, 0); didWebAdded++; }
     }
-
     console.log(`PDS sources: ${plcRows.length.toLocaleString()} from PLC did:plc + ${didWebAdded.toLocaleString()} additional from did:web discovery`);
 
     pdsList = [...pdsSet.keys()].filter(url => {
@@ -128,31 +126,28 @@ async function main() {
       if (isTrump(url)     && !includeTrump) return false;
       return true;
     });
-
-    const total = pdsSet.size;
-    const skipped = total - pdsList.length;
+    const skipped = pdsSet.size - pdsList.length;
     console.log(`PDSes to scan: ${pdsList.length.toLocaleString()} (${skipped.toLocaleString()} skipped — pass --include-bsky / --include-trump to include)\n`);
   }
 
   // Skip PDSes already snapshotted today
-  const alreadyDone = new Set(
-    (db.prepare(`SELECT pds_url FROM pds_repo_status_snapshots WHERE snapshot_date = ? AND is_partial = 0`).all(today) as { pds_url: string }[])
-      .map(r => r.pds_url)
-  );
+  const alreadyDoneRows = await sql<{ pds_url: string }[]>`
+    SELECT pds_url FROM plc.pds_repo_status_snapshots
+    WHERE snapshot_date = ${today} AND is_partial = 0
+  `;
+  const alreadyDone = new Set(alreadyDoneRows.map(r => r.pds_url));
 
-  // Skip PDSes whose most recent completed scan returned 0 repos AND was within
-  // the last 7 days — re-check them weekly in case they come back online.
-  const emptyRecently = new Set(
-    (db.prepare(`
-      SELECT pds_url FROM (
-        SELECT pds_url, total_scanned, snapshot_date,
-          ROW_NUMBER() OVER (PARTITION BY pds_url ORDER BY snapshot_date DESC) AS rn
-        FROM pds_repo_status_snapshots WHERE is_partial = 0
-      )
-      WHERE rn = 1 AND total_scanned = 0
-        AND snapshot_date >= date('now', '-7 days')
-    `).all() as { pds_url: string }[]).map(r => r.pds_url)
-  );
+  // Skip PDSes whose most recent completed scan returned 0 repos AND was within 7 days
+  const emptyRecentlyRows = await sql<{ pds_url: string }[]>`
+    SELECT pds_url FROM (
+      SELECT pds_url, total_scanned, snapshot_date,
+        ROW_NUMBER() OVER (PARTITION BY pds_url ORDER BY snapshot_date DESC) AS rn
+      FROM plc.pds_repo_status_snapshots WHERE is_partial = 0
+    ) t
+    WHERE rn = 1 AND total_scanned = 0
+      AND snapshot_date >= (CURRENT_DATE - 7)::text
+  `;
+  const emptyRecently = new Set(emptyRecentlyRows.map(r => r.pds_url));
 
   const toScan = pdsList.filter(p => !alreadyDone.has(p) && !emptyRecently.has(p));
   const skippedEmpty = pdsList.filter(p => !alreadyDone.has(p) && emptyRecently.has(p)).length;
@@ -161,18 +156,17 @@ async function main() {
     console.log(`Resuming: ${alreadyDone.size.toLocaleString()} done today, ${skippedEmpty.toLocaleString()} skipped (empty <7d ago), ${toScan.length.toLocaleString()} remaining\n`);
   }
 
-  // Build IP map: reuse cached IPs from previous snapshots, only DNS-resolve unknowns.
-  const cachedIps = db.prepare(`
+  // Build IP map from cached previous snapshots
+  const cachedIpRows = await sql<{ pds_url: string; ip_address: string }[]>`
     SELECT pds_url, ip_address FROM (
       SELECT pds_url, ip_address,
         ROW_NUMBER() OVER (PARTITION BY pds_url ORDER BY snapshot_date DESC) AS rn
-      FROM pds_repo_status_snapshots WHERE ip_address IS NOT NULL
-    ) WHERE rn = 1
-  `).all() as { pds_url: string; ip_address: string }[];
+      FROM plc.pds_repo_status_snapshots WHERE ip_address IS NOT NULL
+    ) t WHERE rn = 1
+  `;
+  const ipMap = new Map<string, string | null>(cachedIpRows.map(r => [r.pds_url, r.ip_address]));
 
-  const ipMap = new Map<string, string | null>(cachedIps.map(r => [r.pds_url, r.ip_address]));
   const needResolve = toScan.filter(url => !ipMap.has(url));
-
   if (needResolve.length > 0) {
     console.log(`Resolving IPs for ${needResolve.length.toLocaleString()} new PDSes (${toScan.length - needResolve.length} cached)...`);
     const freshIps = await resolveAll(needResolve);
@@ -180,60 +174,10 @@ async function main() {
   } else {
     console.log(`IPs: all ${toScan.length.toLocaleString()} cached from previous scans`);
   }
-  const resolved = [...ipMap.values()].filter(Boolean).length;
+  const resolved = toScan.filter(url => ipMap.get(url)).length;
   console.log(`  ${resolved.toLocaleString()} of ${toScan.length.toLocaleString()} resolved\n`);
 
-  const upsert = db.prepare(`
-    INSERT INTO pds_repo_status_snapshots
-      (pds_url, snapshot_date, active, deactivated, deleted, takendown, suspended, other, total_scanned, is_sampled, did_plc_count, did_web_count, is_partial, scanned_at, ip_address,
-       invite_code_required, is_online, version)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(pds_url, snapshot_date) DO UPDATE SET
-      active = excluded.active, deactivated = excluded.deactivated,
-      deleted = excluded.deleted, takendown = excluded.takendown,
-      suspended = excluded.suspended, other = excluded.other,
-      total_scanned = excluded.total_scanned,
-      did_plc_count = excluded.did_plc_count,
-      did_web_count = excluded.did_web_count,
-      is_partial = excluded.is_partial,
-      scanned_at = excluded.scanned_at,
-      ip_address = excluded.ip_address,
-      invite_code_required = excluded.invite_code_required,
-      is_online = excluded.is_online,
-      version = COALESCE(excluded.version, version)
-  `);
-
-  const upsertDidStatus = db.prepare(`
-    INSERT INTO did_repo_status (did, status, pds_url, scanned_at)
-    VALUES (?, ?, ?, ?)
-    ON CONFLICT(did) DO UPDATE SET
-      status     = excluded.status,
-      pds_url    = excluded.pds_url,
-      scanned_at = excluded.scanned_at
-  `);
-
-  const upsertDidInRepo = db.prepare(`
-    INSERT INTO did_in_repo (did, pds_url, scanned_at, first_scanned_at)
-    VALUES (?, ?, ?, ?)
-    ON CONFLICT(did) DO UPDATE SET
-      pds_url    = excluded.pds_url,
-      scanned_at = excluded.scanned_at
-  `);
-
   const DID_BATCH_SIZE = 10_000;
-
-  const writeDidBatch = db.transaction((pdsUrl: string, batch: RepoInfo[]) => {
-    for (const r of batch) {
-      upsertDidInRepo.run(r.did, pdsUrl, scannedAt, scannedAt);
-    }
-  });
-
-  const writeNonActive = db.transaction((pdsUrl: string, nonActive: NonActiveRepo[]) => {
-    for (const r of nonActive) {
-      upsertDidStatus.run(r.did, r.status, pdsUrl, scannedAt);
-    }
-  });
-
   let done = 0;
   let errors = 0;
   let totalActive = 0;
@@ -249,17 +193,22 @@ async function main() {
     let partial = false;
     let repoBatch: RepoInfo[] = [];
 
-    const flushBatch = () => {
-      if (repoBatch.length > 0) {
-        writeDidBatch(pdsUrl, repoBatch);
-        totalDidInRepo += repoBatch.length;
-        repoBatch = [];
-      }
+    const flushBatch = async () => {
+      if (repoBatch.length === 0) return;
+      const batch = repoBatch.splice(0);
+      await withDbRetry(() => sql`
+        INSERT INTO plc.did_in_repo ${sql(
+          batch.map(r => ({ did: r.did, pds_url: pdsUrl, scanned_at: scannedAt, first_scanned_at: scannedAt })),
+          "did", "pds_url", "scanned_at", "first_scanned_at"
+        )}
+        ON CONFLICT (did) DO UPDATE SET pds_url = EXCLUDED.pds_url, scanned_at = EXCLUDED.scanned_at
+      `, "did_in_repo");
+      totalDidInRepo += batch.length;
     };
 
-    const onRepo = (repo: RepoInfo) => {
+    const onRepo = async (repo: RepoInfo) => {
       repoBatch.push(repo);
-      if (repoBatch.length >= DID_BATCH_SIZE) flushBatch();
+      if (repoBatch.length >= DID_BATCH_SIZE) await flushBatch();
     };
 
     let inviteCodeRequired: number | null = null;
@@ -279,36 +228,71 @@ async function main() {
         inviteCodeRequired = desc.inviteCodeRequired ? 1 : 0;
       }
       version = ver;
-      isOnline = 1; // got a response from the PDS
+      isOnline = 1;
       if (partial) {
         errors++;
-        if (errors <= 20) {
-          console.error(`  ⚠ ${pdsUrl}: partial scan (${counts.total.toLocaleString()} repos)`);
-        }
+        if (errors <= 20) console.error(`  ⚠ ${pdsUrl}: partial scan (${counts.total.toLocaleString()} repos)`);
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       errors++;
-      if (errors <= 20) {
-        console.error(`  ✗ ${pdsUrl}: ${err}`);
-      }
-      // Write an offline row so the dashboard reflects current status
-      upsert.run(pdsUrl, today, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, scannedAt, ipMap.get(pdsUrl) ?? null, inviteCodeRequired, 0, version);
+      if (errors <= 20) console.error(`  ✗ ${pdsUrl}: ${err}`);
+      await withDbRetry(() => sql`
+        INSERT INTO plc.pds_repo_status_snapshots
+          (pds_url, snapshot_date, active, deactivated, deleted, takendown, suspended, other,
+           total_scanned, is_sampled, did_plc_count, did_web_count, is_partial, scanned_at, ip_address,
+           invite_code_required, is_online, version)
+        VALUES (${pdsUrl}, ${today}, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ${scannedAt},
+                ${ipMap.get(pdsUrl) ?? null}, ${inviteCodeRequired}, 0, ${version})
+        ON CONFLICT (pds_url, snapshot_date) DO UPDATE SET
+          active = 0, deactivated = 0, deleted = 0, takendown = 0, suspended = 0, other = 0,
+          total_scanned = 0, is_partial = 0, scanned_at = EXCLUDED.scanned_at,
+          ip_address = EXCLUDED.ip_address, invite_code_required = EXCLUDED.invite_code_required,
+          is_online = 0, version = COALESCE(EXCLUDED.version, plc.pds_repo_status_snapshots.version)
+      `, "pds_repo_status_snapshots");
       return;
     }
 
-    flushBatch(); // write any remaining DIDs
+    await flushBatch();
 
-    upsert.run(
-      pdsUrl, today,
-      counts?.active ?? 0, counts?.deactivated ?? 0, counts?.deleted ?? 0,
-      counts?.takendown ?? 0, counts?.suspended ?? 0, counts?.other ?? 0,
-      counts?.total ?? 0, counts?.didPlc ?? 0, counts?.didWeb ?? 0,
-      partial ? 1 : 0, scannedAt, ipMap.get(pdsUrl) ?? null,
-      inviteCodeRequired, isOnline, version
-    );
+    await withDbRetry(() => sql`
+      INSERT INTO plc.pds_repo_status_snapshots
+        (pds_url, snapshot_date, active, deactivated, deleted, takendown, suspended, other,
+         total_scanned, is_sampled, did_plc_count, did_web_count, is_partial, scanned_at, ip_address,
+         invite_code_required, is_online, version)
+      VALUES (
+        ${pdsUrl}, ${today},
+        ${counts?.active ?? 0}, ${counts?.deactivated ?? 0}, ${counts?.deleted ?? 0},
+        ${counts?.takendown ?? 0}, ${counts?.suspended ?? 0}, ${counts?.other ?? 0},
+        ${counts?.total ?? 0}, 0, ${counts?.didPlc ?? 0}, ${counts?.didWeb ?? 0},
+        ${partial ? 1 : 0}, ${scannedAt}, ${ipMap.get(pdsUrl) ?? null},
+        ${inviteCodeRequired}, ${isOnline}, ${version}
+      )
+      ON CONFLICT (pds_url, snapshot_date) DO UPDATE SET
+        active = EXCLUDED.active, deactivated = EXCLUDED.deactivated,
+        deleted = EXCLUDED.deleted, takendown = EXCLUDED.takendown,
+        suspended = EXCLUDED.suspended, other = EXCLUDED.other,
+        total_scanned = EXCLUDED.total_scanned,
+        did_plc_count = EXCLUDED.did_plc_count, did_web_count = EXCLUDED.did_web_count,
+        is_partial = EXCLUDED.is_partial, scanned_at = EXCLUDED.scanned_at,
+        ip_address = EXCLUDED.ip_address,
+        invite_code_required = EXCLUDED.invite_code_required,
+        is_online = EXCLUDED.is_online,
+        version = COALESCE(EXCLUDED.version, plc.pds_repo_status_snapshots.version)
+    `, "pds_repo_status_snapshots");
 
     if (nonActive.length > 0) {
-      writeNonActive(pdsUrl, nonActive);
+      // Batched to stay under Postgres's 65,534-parameter limit (4 cols/row).
+      for (let i = 0; i < nonActive.length; i += DID_BATCH_SIZE) {
+        const batch = nonActive.slice(i, i + DID_BATCH_SIZE);
+        await withDbRetry(() => sql`
+          INSERT INTO plc.did_repo_status ${sql(
+            batch.map(r => ({ did: r.did, status: r.status, pds_url: pdsUrl, scanned_at: scannedAt })),
+            "did", "status", "pds_url", "scanned_at"
+          )}
+          ON CONFLICT (did) DO UPDATE SET
+            status = EXCLUDED.status, pds_url = EXCLUDED.pds_url, scanned_at = EXCLUDED.scanned_at
+        `, "did_repo_status");
+      }
       totalNonActive += nonActive.length;
     }
 
@@ -341,8 +325,9 @@ async function main() {
     console.log(`  Deletion rate:   ${rate}%`);
   }
   console.log(`\nQuery results:`);
-  console.log(`  npx tsx src/lib/collectors/scan-pds-status.ts --only <pds_url>`);
-  console.log(`  Or query: SELECT * FROM pds_repo_status_snapshots WHERE snapshot_date = '${today}' ORDER BY active DESC;`);
+  console.log(`  SELECT * FROM plc.pds_repo_status_snapshots WHERE snapshot_date = '${today}' ORDER BY active DESC;`);
+
+  await sql.end();
 }
 
 main().catch(err => {

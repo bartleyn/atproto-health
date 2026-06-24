@@ -62,7 +62,7 @@ export async function describeServer(pdsUrl: string): Promise<DescribeServerResp
 
 export async function fetchPdsDetails(
   pdsUrl: string,
-  onRepo?: (repo: RepoInfo) => void,
+  onRepo?: (repo: RepoInfo) => void | Promise<void>,
 ): Promise<PdsDetails> {
   const [desc, scanResult] = await Promise.allSettled([
     describeServer(pdsUrl),
@@ -88,8 +88,8 @@ export async function fetchPdsDetails(
 
 export interface FetchAllOptions {
   concurrency?: number;
-  onRepo?: (pdsUrl: string, repo: RepoInfo) => void;
-  onPdsDone?: (pdsUrl: string, details: PdsDetails) => void;
+  onRepo?: (pdsUrl: string, repo: RepoInfo) => void | Promise<void>;
+  onPdsDone?: (pdsUrl: string, details: PdsDetails) => void | Promise<void>;
 }
 
 /**
@@ -112,7 +112,10 @@ export async function fetchAllPdsDetails(
         onRepo ? (repo) => onRepo(url, repo) : undefined,
       );
       results.set(url, details);
-      onPdsDone?.(url, details);
+      // Must await: onPdsDone does DB writes; if left floating, sql.end() in the
+      // caller's finally block tears down the pool mid-write (CONNECTION_ENDED)
+      // and silently drops the last PDSes' snapshots.
+      await onPdsDone?.(url, details);
       completed++;
       if (completed % 100 === 0 || completed === pdsUrls.length) {
         console.log(`[pds-details] ${completed}/${pdsUrls.length} PDSes queried`);

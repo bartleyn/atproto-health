@@ -6,6 +6,7 @@
  */
 
 import { backfillPlcCreations } from "./plc-creations";
+import sql from "../db/pg";
 
 async function main() {
   console.log("\n=== PLC Account Creations Backfill ===\n");
@@ -18,6 +19,8 @@ async function main() {
   console.log(`\nDone in ${elapsed}m`);
   console.log(`  Ops scanned:      ${opsScanned.toLocaleString()}`);
   console.log(`  Creations found:  ${creationsFound.toLocaleString()}`);
+
+  await sql.end();
 }
 
 main().catch((err) => {

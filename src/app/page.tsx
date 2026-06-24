@@ -15,6 +15,15 @@ export default async function Home({
   const params = await searchParams;
   const hideBsky = params.hideBsky === "1";
 
+  const dashboardData = getDashboardData(hideBsky);
+  if (!dashboardData) {
+    return (
+      <main style={{ padding: "2rem", fontFamily: "monospace" }}>
+        <h2>Dashboard cache is cold.</h2>
+        <p>Run <code>npm run analysis:dashboard-cache</code> to populate it, then reload.</p>
+      </main>
+    );
+  }
   const {
     runInfo,
     stats,
@@ -28,7 +37,7 @@ export default async function Home({
     concentration,
     locations,
     providerLocations,
-  } = getDashboardData(hideBsky);
+  } = dashboardData;
 
   // Join pds_lang_summary with providerLocations geo data by URL.
   // Normalize URLs by stripping trailing slashes — main DB stores them WITH trailing slash
@@ -40,12 +49,14 @@ export default async function Home({
   // bsky.network providerLocations — used to geo-locate the virtual 'bsky.network' lang row
   const bskyProviderLocs = providerLocations.filter(p => isBskyUrl(p.url));
 
-  const lastScanTime = getLastScanTime();
-  const allTopPds = getTopPdsByScan(Infinity, hideBsky);
+  const [lastScanTime, allTopPds, bskyShardCounts, langRows] = await Promise.all([
+    getLastScanTime(),
+    getTopPdsByScan(Infinity, hideBsky),
+    getBskyShardCounts(),
+    getPdsLangSummary(hideBsky),
+  ]);
   const scanTopPds = allTopPds.slice(0, 15);
-  const bskyShardCounts = getBskyShardCounts();
   const collectionPdsData = getCollectionPdsData(hideBsky);
-  const langRows = getPdsLangSummary(hideBsky);
   const langLocations: PdsLangLocation[] = langRows.flatMap(row => {
     // Legacy collapsed entry (pre-re-aggregation): distribute evenly across unique bsky cities.
     // Distributing per-city (not per-shard) avoids inflating cities that have many shards.
@@ -64,7 +75,7 @@ export default async function Home({
     if (!geo?.city) return [];
     return [{ url: row.pds_url, city: geo.city, country: geo.country, lang: row.lang, dids: row.dids }];
   });
-  const topLangs = getTopLangs(25, hideBsky);
+  const topLangs = await getTopLangs(25, hideBsky);
 
   // Build namespace locations: group collection_activity by (nsRoot, pds) then geo-join.
   // nsRoot = first two NSID parts (e.g. "blue.flashes" from "blue.flashes.feed.post").
@@ -171,19 +182,19 @@ export default async function Home({
           {runInfo.dirRun && (
             <p>
               Directory:{" "}
-              {new Date(runInfo.dirRun.completedAt + "Z").toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
+              {new Date(runInfo.dirRun.completedAt).toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
             </p>
           )}
           {runInfo.geoRun && (
             <p>
               Geo:{" "}
-              {new Date(runInfo.geoRun.completedAt + "Z").toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
+              {new Date(runInfo.geoRun.completedAt).toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
             </p>
           )}
           {runInfo.usrRun && (
             <p>
               Users:{" "}
-              {new Date(runInfo.usrRun.completedAt + "Z").toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
+              {new Date(runInfo.usrRun.completedAt).toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}
             </p>
           )}
           {lastScanTime && (

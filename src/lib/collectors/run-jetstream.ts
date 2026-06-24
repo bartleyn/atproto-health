@@ -6,7 +6,7 @@
  *   npm run sample -- --duration 300    # 5-minute sample
  */
 
-import { getDb } from "../db/schema";
+import sql from "../db/pg";
 import { sampleJetstream } from "./jetstream-sample";
 
 const args = process.argv.slice(2);
@@ -18,25 +18,18 @@ async function main() {
   console.log(`\n=== Jetstream Firehose Sample (${durationSec}s) ===\n`);
 
   const result = await sampleJetstream(durationSec);
-  const db = getDb();
 
-  db.prepare(
-    `INSERT INTO firehose_samples (
-      duration_ms, total_events, total_interactions, resolved_interactions,
-      cross_pds, same_pds, events_per_second, by_type, federation, top_cross_pds_pairs
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    result.durationMs,
-    result.totalEvents,
-    result.totalInteractions,
-    result.resolvedInteractions,
-    result.crossPds,
-    result.samePds,
-    result.eventsPerSecond,
-    JSON.stringify(result.byType),
-    JSON.stringify(result.federation),
-    JSON.stringify(result.topCrossPdsPairs)
-  );
+  await sql`
+    INSERT INTO health.firehose_samples
+      (duration_ms, total_events, total_interactions, resolved_interactions,
+       cross_pds, same_pds, events_per_second, by_type, federation, top_cross_pds_pairs)
+    VALUES (
+      ${result.durationMs}, ${result.totalEvents}, ${result.totalInteractions},
+      ${result.resolvedInteractions}, ${result.crossPds}, ${result.samePds},
+      ${result.eventsPerSecond}, ${sql.json(result.byType)},
+      ${sql.json(result.federation)}, ${sql.json(result.topCrossPdsPairs)}
+    )
+  `;
 
   const crossRate = result.resolvedInteractions > 0
     ? ((result.crossPds / result.resolvedInteractions) * 100).toFixed(1)
@@ -88,7 +81,9 @@ async function main() {
   console.log();
 }
 
-main().catch((err) => {
-  console.error("Sampling failed:", err);
-  process.exit(1);
-});
+main()
+  .catch((err) => {
+    console.error("Sampling failed:", err);
+    process.exit(1);
+  })
+  .finally(() => sql.end());

@@ -47,13 +47,11 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.2.1",
-    "@types/better-sqlite3": "^7.6.13",
     "@types/d3-sankey": "^0.12.5",
     "@types/node": "^25.3.5",
     "@types/react": "^19.2.14",
     "@types/react-simple-maps": "^3.0.6",
     "@types/ws": "^8.18.1",
-    "better-sqlite3": "^12.6.2",
     "eslint": "^9.39.4",
     "eslint-config-next": "^16.1.6",
     "postcss": "^8.5.8",

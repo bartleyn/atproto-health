@@ -28,12 +28,16 @@ export async function computeAndSaveCollectionPdsData(hideBsky: boolean): Promis
   const bskyFilter = hideBsky
     ? `AND p.pds_url NOT LIKE '%bsky.network%' AND p.pds_url != 'https://bsky.social'`
     : "";
+  // Aggregate at the namespace-root grain (first two NSID parts, e.g. "site.standard")
   const data = await sql.unsafe(`
-    SELECT ca.collection, p.pds_url, COUNT(DISTINCT ca.did)::int AS unique_dids
+    SELECT split_part(ca.collection, '.', 1) || '.' || split_part(ca.collection, '.', 2) AS collection,
+           p.pds_url, COUNT(DISTINCT ca.did)::int AS unique_dids
     FROM activity.collection_activity ca
     JOIN plc.plc_did_pds p ON ca.did = p.did
-    WHERE 1=1 ${bskyFilter}
-    GROUP BY ca.collection, p.pds_url
+    WHERE ca.collection NOT LIKE 'app.bsky.%'
+      AND ca.collection NOT LIKE 'chat.bsky.%'
+      ${bskyFilter}
+    GROUP BY 1, 2
   `) as unknown as CollectionPdsRow[];
   mkdirSync(path.join(process.cwd(), "cache"), { recursive: true });
   writeFileSync(collectionDiskPath(hideBsky), JSON.stringify({ data, writtenAt: new Date().toISOString() }, null, 0));

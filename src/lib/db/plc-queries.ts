@@ -38,6 +38,10 @@ export interface EcosystemStats {
 }
 
 const BSKY_NETWORK_LABEL = "bsky.network";
+// The bare apex bsky.network is Bluesky's atproto RELAY, not a PDS. It answers
+// sync.listRepos (network-wide) but not describeServer, so the scanner mistakes it
+// for a PDS with a bogus ~10M repo count. Exclude it from PDS aggregations.
+const RELAY_HOSTS = new Set(["https://bsky.network", "bsky.network"]);
 const TRUMP_PDS = "https://pds.trump.com";
 const TOP_N = 10;
 
@@ -520,6 +524,9 @@ export async function getTopPdsByScan(limit = 15, hideBsky = false): Promise<Sca
   const ipGroups = new Map<string, { url: string; repoCount: number; activeCount: number; snapshot_date: string }>();
 
   for (const r of rows) {
+    // Skip the relay apex — it's not a PDS (see RELAY_HOSTS); folding it anywhere
+    // would either inflate bsky.social or resurrect the phantom bsky.network entry.
+    if (RELAY_HOSTS.has(r.url)) continue;
     if (isBsky(r.url)) {
       bskyRepos  += r.total_scanned;
       bskyActive += r.active;
@@ -592,8 +599,8 @@ export async function getAccountCohortCounts(): Promise<AccountCohortRow[]> {
         WHEN week < '2025-01-01' THEN 'Nov–Dec 2024 (exodus)'
         WHEN week < '2025-07-01' THEN '2025 H1'
         WHEN week < '2026-01-01' THEN '2025 H2'
-        WHEN week < '2026-04-11' THEN '2026 (pre-analysis)'
-        ELSE '2026 (in-window)'
+        WHEN week < '2026-07-01' THEN '2026 H1'
+        ELSE '2026 H2'
       END AS cohort,
       SUM(count)::int AS count
     FROM plc.active_creation_weekly
@@ -670,7 +677,7 @@ export async function getMigrationJourneyStats(): Promise<MigrationJourneyStats>
   const rows = await sql.unsafe(`
     SELECT migration_count, COUNT(*)::int AS users
     FROM (
-      SELECT did, COUNT(*) AS migration_count
+      SELECT did, COUNT(*)::int AS migration_count
       FROM plc.plc_migrations
       WHERE NOT (
         (from_pds LIKE '%bsky.network' OR from_pds = 'https://bsky.social')

@@ -20,7 +20,6 @@ const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 const dashboardCache = new Map<boolean, { data: DashboardData; expires: number }>();
 
 const DISK_CACHE_DIR = path.join(process.cwd(), "cache");
-const DISK_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 function diskCachePath(hideBsky: boolean) {
   return path.join(DISK_CACHE_DIR, hideBsky ? "dashboard-hidebsky.json" : "dashboard.json");
@@ -30,8 +29,9 @@ function tryLoadDiskCache(hideBsky: boolean): DashboardData | null {
   try {
     const f = diskCachePath(hideBsky);
     if (!existsSync(f)) return null;
-    const { data, writtenAt } = JSON.parse(readFileSync(f, "utf8"));
-    if (Date.now() - new Date(writtenAt).getTime() > DISK_CACHE_MAX_AGE_MS) return null;
+    const { data } = JSON.parse(readFileSync(f, "utf8"));
+    // Serve the disk cache regardless of age — a stale dashboard is better than
+    // an "expired/no data" state on a cold restart. Freshness is the collector's job.
     return data as DashboardData;
   } catch {
     return null;

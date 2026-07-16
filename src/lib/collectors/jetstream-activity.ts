@@ -107,6 +107,12 @@ const THIRD_PARTY_PREFIXES = [
   "store.lexicon.*",                  // ATStore
   "store.tz2at.*",                    // tz2at
   "actor.rpg.*",                      // RPG Actor
+  "social.mu.*",                      // Mu social
+  "app.certified.*",                  // Certified app
+  "app.studynext.*",                  // Study next
+  "dev.cocore.*",                     // Cocore distributed AI
+  "tech.transparencia.*",             // Transparencia Tech News
+  "community.gifthood.*",             // gifthood
 ];
 
 const WANTED_COLLECTIONS = [

@@ -122,6 +122,23 @@ CREATE TABLE IF NOT EXISTS activity.feed_generator_likes_daily (
 CREATE INDEX IF NOT EXISTS idx_feed_generator_likes_date
   ON activity.feed_generator_likes_daily(date);
 
+-- Catalog of starter packs (app.bsky.graph.starterpack). Backfilled per-creator via
+-- getActorStarterPacks (backfill-starter-packs.ts) and kept live by jetstream-activity.
+CREATE TABLE IF NOT EXISTS activity.starter_packs (
+  uri             TEXT        NOT NULL PRIMARY KEY,
+  creator_did     TEXT        NOT NULL,
+  name            TEXT,
+  description     TEXT,
+  list_uri        TEXT,               -- record.list (AT-URI of the member list)
+  created_at      TIMESTAMPTZ,        -- record.createdAt
+  joined_all_time INTEGER,            -- joinedAllTimeCount from the view (popularity)
+  first_seen      TEXT        NOT NULL, -- YYYY-MM-DD
+  deleted_at      TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_starter_packs_creator
+  ON activity.starter_packs(creator_did);
+
 CREATE TABLE IF NOT EXISTS activity.score_dlq (
   id            BIGSERIAL   PRIMARY KEY,
   posts_json    TEXT        NOT NULL,

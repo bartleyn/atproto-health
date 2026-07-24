@@ -22,6 +22,7 @@
     "seed:manual-geo": "npx tsx --env-file .env src/lib/collectors/seed-manual-geo.ts",
     "collect:skywatch": "npx tsx --env-file .env src/lib/collectors/skywatch-labels.ts",
     "collect:bsky-mod": "npx tsx --env-file .env src/lib/collectors/skywatch-labels.ts bsky-mod",
+    "collect:stechlab": "npx tsx --env-file .env src/lib/collectors/skywatch-labels.ts stechlab",
     "collect:activity": "npx tsx --env-file .env src/lib/collectors/jetstream-activity.ts",
     "scan:pds-status": "npx tsx --env-file .env src/lib/collectors/scan-pds-status.ts",
     "analysis:build": "npx tsx --env-file .env src/lib/analysis/build-analysis-db.ts",

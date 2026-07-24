@@ -1,0 +1,8 @@
+# Pure-pip deps for the GNN fraud pipeline (versions pinned to the local dev env).
+# torch + pyg-lib are NOT here — they need platform-specific wheel indexes (see README "GPU spot box").
+torch_geometric==2.8.0
+ogb
+scikit-learn
+pyarrow
+pandas
+numpy

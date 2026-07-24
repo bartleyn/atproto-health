@@ -43,7 +43,17 @@ const LABELERS: Record<string, {
     did:         "did:plc:ar7c4by46qjdydhdevvrndac",
     table:       "plc.bsky_mod_labels",
     cursorTable: "plc.bsky_mod_labels_cursor",
-    labelFilter: ["spam", "impersonation"],
+    labelFilter: ["spam", "impersonation", "inauthentic", "security", "engagement-farming"],
+  },
+  // Behavioral/activity labeler: 25 "inform"-severity activity labels (post/reply volume, 24/7
+  // posting gaps, follow/unfollow churn, profile-metadata churn, same-URL spam). No labelFilter =
+  // collect all of them as activity-proxy FEATURES. Negations are skipped + rows never deleted, so a
+  // row = "this account was EVER flagged with this label" (labeled_at = most recent occurrence).
+  stechlab: {
+    endpoint:    "https://labels.stech-gcp-labels.com",
+    did:         "did:plc:oubsyca6hhgqhmbbk27lvs7c",
+    table:       "plc.stechlab_labels",
+    cursorTable: "plc.stechlab_labels_cursor",
   },
 };
 
@@ -84,6 +94,28 @@ async function fetchPage(cursor?: string, limit = PAGE_SIZE): Promise<QueryLabel
   return res.json() as Promise<QueryLabelsResponse>;
 }
 
+/**
+ * Backfill-only resilient fetch. This labeler returns HTTP 500 when a page of the default size spans
+ * a record it can't serialize; the SAME cursor succeeds at a smaller limit (verified: 250/200 -> 500,
+ * 50/100 -> 200). Shrink the limit on any 5xx (250->100->50->25->10->1); if even limit=1 5xx's, the
+ * poison record sits exactly at `cursor` -> return null so the caller can skip it. Non-5xx errors
+ * (network/4xx) propagate so we still fail loudly on real problems.
+ */
+async function fetchPageResilient(cursor: string | undefined, maxLimit: number): Promise<QueryLabelsResponse | null> {
+  const ladder = [maxLimit, 100, 50, 25, 10, 1].filter((l, i, a) => l <= maxLimit && a.indexOf(l) === i);
+  for (const limit of ladder) {
+    try {
+      const page = await fetchPage(cursor, limit);
+      if (limit < maxLimit) console.log(`  (recovered at limit=${limit}, cursor=${cursor})`);
+      return page;
+    } catch (e) {
+      if (!/HTTP 5\d\d/.test(String(e))) throw e;   // real error -> propagate
+      // 5xx -> shrink and retry
+    }
+  }
+  return null;   // even limit=1 5xx'd -> unservable record at this cursor
+}
+
 /** Filter a raw page to the labels we store and upsert them. Returns # inserted. */
 async function ingestLabels(labels: RawLabel[]): Promise<number> {
   const batch: { did: string; label: string; labeled_at: string }[] = [];
@@ -118,11 +150,22 @@ async function backfill(opts: { from?: string; to?: number; step: number }) {
   console.log(`\nBackfill mode: step=${opts.step}, limit=${BACKFILL_LIMIT}` +
     `${opts.from ? `, from=${opts.from}` : ""}${opts.to ? `, to=${opts.to}` : ""}`);
 
+  const MAX_POISON_SKIPS = 200;   // guard: give up if we hit a long unservable stretch
   let cursor = opts.from;
-  let totalFetched = 0, totalInserted = 0, pages = 0, jumpSteps = 0;
+  let totalFetched = 0, totalInserted = 0, pages = 0, jumpSteps = 0, poisonSkips = 0;
 
   while (true) {
-    const page = await fetchPage(cursor, BACKFILL_LIMIT);
+    const page = await fetchPageResilient(cursor, BACKFILL_LIMIT);
+    if (page === null) {
+      // Unservable record exactly at `cursor` (500s even at limit=1): step over it and continue.
+      if (++poisonSkips > MAX_POISON_SKIPS) {
+        console.error(`  Stopping: ${poisonSkips} consecutive unservable records at cursor=${cursor}`);
+        break;
+      }
+      cursor = String((cursor ? Number(cursor) : 0) + 1);
+      continue;
+    }
+    poisonSkips = 0;
     pages++;
     totalFetched += page.labels.length;
     totalInserted += await ingestLabels(page.labels);

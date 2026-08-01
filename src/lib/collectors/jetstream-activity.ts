@@ -47,6 +47,10 @@ import type { Sql, TransactionSql } from "postgres";
 import sql from "../db/pg";
 
 import { bufferPost, flushScorer, scorerShutdown } from "./post-scorer";
+import { edgesFromEvent, type EdgeRow, type CommitEvent } from "./edge-capture";
+import { ParquetPartsSink } from "./edge-sinks";
+import { existsSync } from "node:fs";
+import path from "node:path";
 
 // Transaction handle carrying the pool's custom types (bigint), so ${BigInt(...)} still typechecks.
 type Tx = TransactionSql<typeof sql extends Sql<infer T> ? T : never>;
@@ -179,6 +183,20 @@ const maxCollectionRowsIdx = args.indexOf("--max-collection-rows");
 const MAX_COLLECTION_ROWS = maxCollectionRowsIdx >= 0 ? parseInt(args[maxCollectionRowsIdx + 1], 10) : 5_000_000;
 const scorerIntervalIdx = args.indexOf("--scorer-interval");
 const SCORER_FLUSH_INTERVAL_MS = (scorerIntervalIdx >= 0 ? parseInt(args[scorerIntervalIdx + 1], 10) : 300) * 1000;
+
+// Edge capture: land the raw directed edges (follow/block/repost/like/reply/quote) the stream
+// already carries as a compact, append-only Parquet dataset on the external drive, to feed weekly
+// incremental ER. Best-effort: a miniext outage logs and is skipped, never blocking the cursor or
+// crashing the activity pipeline (the quarterly snapshot scan is the correctness backstop).
+// Opt-in (CAPTURE_EDGES=1): ~22K edges/min is ~1 GB/day of Parquet.
+const EDGES_DIR = process.env.EDGES_DIR ?? "/Volumes/miniext/edges";
+const CAPTURE_EDGES = process.env.CAPTURE_EDGES === "1";        // default off
+const CAPTURE_LIKES = process.env.CAPTURE_LIKES !== "0";        // default on; likes ≈71% of edges
+// High firehose volume (~22K edges/min): bin-pack ~200K rows / 5 min per part, compact daily.
+let edgeSink: ParquetPartsSink | null = null;
+const edgeRowBuffer: EdgeRow[] = [];
+let edgeDay = new Date().toISOString().slice(0, 10);           // UTC day, for rollover compaction
+let totalEdgesFlushed = 0;
 
 // Activity buffer: "did|date" → bitmask of activity_types seen
 const activityBuffer = new Map<string, number>();
@@ -458,6 +476,7 @@ function snapshotBuffers() {
     feedLikeRows:    [...feedLikeBuffer.entries()],
     feedLikeEdges:   [...feedLikeEdgeBuffer.entries()],
     feedUnlikes:     [...feedUnlikeBuffer],
+    edgeRows:        edgeRowBuffer.splice(0),     // append-only edge events since last flush
     cursorToSave:    lastCursor,
   };
   activityBuffer.clear();
@@ -501,6 +520,9 @@ function restoreSnapshot(s: Snapshot) {
   const newerProfiles = profileBuffer.splice(0, profileBuffer.length);
   for (const r of s.profileRows) profileBuffer.push(r);
   for (const r of newerProfiles) profileBuffer.push(r);
+  const newerEdges = edgeRowBuffer.splice(0, edgeRowBuffer.length);
+  for (const r of s.edgeRows) edgeRowBuffer.push(r);
+  for (const r of newerEdges) edgeRowBuffer.push(r);
   for (const [uri, meta] of s.feedGenRows) if (!feedGenBuffer.has(uri)) feedGenBuffer.set(uri, meta);
   for (const uri of s.feedGenDeletes) feedGenDeleteBuffer.add(uri);
   // A later like or unlike of the same edge supersedes the snapshot's.
@@ -533,7 +555,7 @@ function logFlush(snapshot: ReturnType<typeof snapshotBuffers>) {
   const tagPct = postsThisFlush > 0 ? ((taggedThisFlush / postsThisFlush) * 100).toFixed(1) : "—";
   const collectionNote = collectionTrackingPaused ? " [collection tracking PAUSED]" : ` collections=${collectionRows.length.toLocaleString()}`;
   console.log(
-    `[activity] Flushed activity=${activityRows.length.toLocaleString()} deletes=${deleteRows.length} types postdel=${postDeleteRows.length.toLocaleString()} dids starterpack=${starterpackRows.length} uris lang=${langRows.length.toLocaleString()} did×lang (${tagPct}% tagged)${collectionNote} feeds=${feedGenRows.length} feed_likes=${feedLikeRows.reduce((s, [, c]) => s + c, 0)} unlikes=${feedUnlikes.length} profiles=${profileRows.length.toLocaleString()} | ` +
+    `[activity] Flushed activity=${activityRows.length.toLocaleString()} deletes=${deleteRows.length} types postdel=${postDeleteRows.length.toLocaleString()} dids starterpack=${starterpackRows.length} uris lang=${langRows.length.toLocaleString()} did×lang (${tagPct}% tagged)${collectionNote} feeds=${feedGenRows.length} feed_likes=${feedLikeRows.reduce((s, [, c]) => s + c, 0)} unlikes=${feedUnlikes.length} profiles=${profileRows.length.toLocaleString()} edges=${snapshot.edgeRows.length.toLocaleString()} (Σ${totalEdgesFlushed.toLocaleString()}) | ` +
     `totals: activity=${totalActivityFlushed.toLocaleString()} deletes=${totalDeletesFlushed.toLocaleString()} postdel=${totalPostDeletesFlushed.toLocaleString()} starterpack=${totalStarterpackFlushed.toLocaleString()} lang_dids=${totalLangDIDsFlushed.toLocaleString()} collections=${totalCollectionsFlushed.toLocaleString()} feed_gens=${totalFeedGensFlushed.toLocaleString()} feed_likes=${totalFeedLikesFlushed.toLocaleString()} profiles=${totalProfilesFlushed.toLocaleString()} | ` +
     `events=${totalEvents.toLocaleString()} | cursor=${snapshot.cursorToSave}`
   );
@@ -555,7 +577,8 @@ async function flush() {
     activityBuffer.size === 0 && deleteBuffer.size === 0 && postDeleteBuffer.size === 0 &&
     starterpackBuffer.size === 0 && langBuffer.size === 0 && langStatsBuffer.size === 0 &&
     collectionBuffer.size === 0 && feedGenBuffer.size === 0 && feedGenDeleteBuffer.size === 0 &&
-    feedLikeBuffer.size === 0 && profileBuffer.length === 0;
+    feedLikeBuffer.size === 0 && profileBuffer.length === 0 &&
+    edgeRowBuffer.length === 0;
   if (nothingBuffered) return;
 
   // Async collection row-count check before snapshotting buffers.
@@ -581,6 +604,24 @@ async function flush() {
     }
     throw err;
   }
+
+  // Edge capture is best-effort and runs AFTER the cursor is saved: a miniext outage must never
+  // block the activity pipeline or stall the cursor. Lost edges are re-derivable by the quarterly
+  // snapshot scan. The sink bin-packs internally; we just hand it the flush's edge rows.
+  if (edgeSink && snapshot.edgeRows.length) {
+    try {
+      await edgeSink.write(snapshot.edgeRows);
+      totalEdgesFlushed += snapshot.edgeRows.length;
+      const today = new Date().toISOString().slice(0, 10);
+      if (today !== edgeDay) {                     // UTC day rolled over → compact the parts
+        edgeDay = today;
+        await edgeSink.compact();
+      }
+    } catch (e) {
+      console.error("[edges] write failed (continuing, scan will backfill):", (e as Error).message);
+    }
+  }
+
 
   logFlush(snapshot);
 }
@@ -852,6 +893,12 @@ function connect() {
       }
 
       if (evt.kind === "commit") {
+        // Edge capture (both create and delete ops) — one pure call covers all edge relations.
+        if (edgeSink) {
+          const er = edgesFromEvent(evt as unknown as CommitEvent, { captureLikes: CAPTURE_LIKES });
+          for (const r of er) edgeRowBuffer.push(r);
+        }
+
         if (evt.commit.operation === "create") {
           // Activity: track which collection types were seen per (did, date)
           const collection = evt.commit.collection;
@@ -1060,6 +1107,18 @@ async function main() {
   for (const r of likeKeyRows) feedLikeKeys.set(`${r.liker_did}|${r.like_rkey}`, r.feed_uri);
   console.log(`[activity] Loaded ${feedLikeKeys.size.toLocaleString()} feed-like keys for unlike matching`);
 
+  // Init edge capture only if the target drive is mounted — otherwise disable it loudly rather than
+  // erroring every flush. The activity pipeline runs regardless.
+  if (CAPTURE_EDGES) {
+    const parent = path.dirname(EDGES_DIR);
+    if (existsSync(parent)) {
+      edgeSink = new ParquetPartsSink(EDGES_DIR, 200_000, 5 * 60_000);
+      console.log(`[edges] capturing -> ${EDGES_DIR} (likes=${CAPTURE_LIKES ? "on" : "off"})`);
+    } else {
+      console.warn(`[edges] ${parent} not mounted — edge capture DISABLED (mount the drive or set EDGES_DIR)`);
+    }
+  }
+
   setInterval(() => {
     flushNow()
       .then(() => pruneOldRows())
@@ -1075,6 +1134,7 @@ async function main() {
     process.on(sig, () => {
       console.log(`\n[activity] ${sig} received, flushing...`);
       flushNow()
+        .then(() => edgeSink?.compact())          // merge the day's edge parts before exit
         .then(() => scorerShutdown())
         .then(() => sql.end())
         .then(() => process.exit(0))

@@ -37,20 +37,24 @@ export type EdgeOp = "c" | "d";
 export interface EdgeRow {
   dt: string;        // UTC date partition, YYYY-MM-DD
   src: string;       // actor DID (record author)
-  rel: string;       // follow | block | repost | like | reply | quote
-  dst: string | null; // subject DID or post URI; null for deletes
+  rel: string;       // follow|block|repost|like|reply|quote|listitem|list|listblock
+  dst: string | null; // subject DID or post/list URI; null for deletes
   rkey: string;      // record key (TID)
   t: number;         // firehose event time, microseconds since epoch
   op: EdgeOp;        // c(reate) | d(elete)
+  ctx: string | null; // extra context; currently the list URI for listitem edges, else null
 }
 
 // collection -> relation for records whose delete we can attribute by (collection, rkey). Posts are
 // handled separately because one post can yield reply AND/OR quote edges under the same rkey.
 const COLLECTION_REL: Record<string, string> = {
-  "app.bsky.graph.follow": "follow",
-  "app.bsky.graph.block":  "block",
-  "app.bsky.feed.repost":  "repost",
-  "app.bsky.feed.like":    "like",
+  "app.bsky.graph.follow":    "follow",
+  "app.bsky.graph.block":     "block",
+  "app.bsky.feed.repost":     "repost",
+  "app.bsky.feed.like":       "like",
+  "app.bsky.graph.listitem":  "listitem",  // actor adds subject DID to a list (list URI in ctx)
+  "app.bsky.graph.listblock": "listblock", // actor subscribes to a moderation/block list (dst=list URI)
+  "app.bsky.graph.list":      "list",      // actor creates a list (dst = the list's own URI)
 };
 
 const dtOf = (timeUs: number) => new Date(timeUs / 1000).toISOString().slice(0, 10);
@@ -77,7 +81,7 @@ export interface CommitEvent {
 export function edgesFromEvent(evt: CommitEvent, opts: { captureLikes: boolean }): EdgeRow[] {
   const { operation, collection, rkey, record } = evt.commit;
   const dt = dtOf(evt.time_us);
-  const base = { dt, src: evt.did, rkey, t: evt.time_us };
+  const base = { dt, src: evt.did, rkey, t: evt.time_us, ctx: null as string | null };
 
   if (operation === "delete") {
     // Post deletes can drop a reply and/or a quote sharing this rkey; emit one row per possible rel
@@ -123,13 +127,30 @@ export function edgesFromEvent(evt: CommitEvent, opts: { captureLikes: boolean }
       }
       return out;
     }
+    case "app.bsky.graph.listitem": {
+      // actor adds subject DID to their list; keep the list URI in ctx so downstream can group
+      // memberships by list (list-stuffing / curated-list coordination signal).
+      const dst = typeof record.subject === "string" ? record.subject : null;
+      const listUri = typeof record.list === "string" ? record.list : null;
+      return dst ? [{ ...base, rel: "listitem", dst, op: "c", ctx: listUri }] : [];
+    }
+    case "app.bsky.graph.listblock": {
+      // actor subscribes to someone's moderation/block list; dst = the subscribed list URI.
+      const dst = typeof record.subject === "string" ? record.subject : null;
+      return dst ? [{ ...base, rel: "listblock", dst, op: "c" }] : [];
+    }
+    case "app.bsky.graph.list": {
+      // actor creates a list; no second party, so dst = the list's own URI (node-as-edge for parity
+      // with the old social-graph capture; low volume).
+      return [{ ...base, rel: "list", dst: `at://${evt.did}/app.bsky.graph.list/${rkey}`, op: "c" }];
+    }
     default:
       return [];
   }
 }
 
 const NDJSON_COLS =
-  "{src:'VARCHAR', rel:'VARCHAR', dst:'VARCHAR', rkey:'VARCHAR', t:'BIGINT', op:'VARCHAR'}";
+  "{src:'VARCHAR', rel:'VARCHAR', dst:'VARCHAR', rkey:'VARCHAR', t:'BIGINT', op:'VARCHAR', ctx:'VARCHAR'}";
 
 /**
  * Write a batch of edges as compact zstd Parquet part files, one per date partition, under
@@ -154,7 +175,7 @@ export async function writeEdgeParts(rows: EdgeRow[], dir: string, partId: numbe
     const pqTmp = `${stem}.parquet.tmp`;
     const pqOut = `${stem}.parquet`;
     // src/rel/rkey/op are non-null; dst is null for deletes. JSON.stringify emits null cleanly.
-    const body = drs.map(r => JSON.stringify({ src: r.src, rel: r.rel, dst: r.dst, rkey: r.rkey, t: r.t, op: r.op })).join("\n");
+    const body = drs.map(r => JSON.stringify({ src: r.src, rel: r.rel, dst: r.dst, rkey: r.rkey, t: r.t, op: r.op, ctx: r.ctx ?? null })).join("\n");
     await writeFile(ndTmp, body);
     try {
       await execFileAsync("duckdb", ["-c",
@@ -171,9 +192,12 @@ export async function writeEdgeParts(rows: EdgeRow[], dir: string, partId: numbe
 }
 
 /**
- * Compact all part-*.parquet in a finished day's partition into a single dt=<date>.parquet, then
- * remove the parts. Idempotent-ish: if the merged file already exists it's overwritten from whatever
- * parts remain. No-op when the partition has no parts. Call on date-rollover for the *previous* day.
+ * Compact the part-*.parquet in a day's partition into a single c-<ts>.parquet WITHIN the same
+ * dt=<date>/ dir, then remove just those parts. Staying inside the partition dir keeps the dataset
+ * Hive-globbable (`edges/dt=*​/*.parquet` with hive_partitioning). Reads only part-* (never the
+ * c-* it writes), so re-running on a day that gained new parts merges them into a fresh c-* file
+ * without self-reading. No-op when the partition has no parts. Call on date-rollover for the
+ * previous day (and on shutdown for the current one).
  */
 export async function compactDay(dir: string, dt: string): Promise<boolean> {
   const partDir = path.join(dir, `dt=${dt}`);
@@ -184,12 +208,13 @@ export async function compactDay(dir: string, dt: string): Promise<boolean> {
     return false; // partition doesn't exist
   }
   if (parts.length === 0) return false;
-  const mergedTmp = path.join(dir, `dt=${dt}.parquet.tmp`);
-  const mergedOut = path.join(dir, `dt=${dt}.parquet`);
+  const ts = Date.now();
+  const mergedTmp = path.join(partDir, `.c-${ts}.parquet.tmp`);
+  const mergedOut = path.join(partDir, `c-${ts}.parquet`);
   await execFileAsync("duckdb", ["-c",
     `COPY (SELECT * FROM read_parquet('${path.join(partDir, "part-*.parquet")}')) ` +
     `TO '${mergedTmp}' (FORMAT parquet, COMPRESSION zstd);`]);
   await rename(mergedTmp, mergedOut);
-  await rm(partDir, { recursive: true, force: true });
+  for (const p of parts) await rm(path.join(partDir, p), { force: true });  // drop only merged parts
   return true;
 }

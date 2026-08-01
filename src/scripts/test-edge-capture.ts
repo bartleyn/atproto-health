@@ -5,6 +5,7 @@
  */
 import { execFile } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import path from "node:path";
@@ -53,6 +54,18 @@ async function main() {
   const profile = edgesFromEvent(commit("did:plc:alice", "app.bsky.actor.profile", "self", { displayName: "A" }), { captureLikes: true });
   check("profile -> 0 edges", profile.length === 0);
 
+  const listitem = edgesFromEvent(commit("did:plc:alice", "app.bsky.graph.listitem", "r10", { subject: "did:plc:bob", list: "at://did:plc:alice/app.bsky.graph.list/L1" }), { captureLikes: true });
+  check("listitem -> edge alice->bob with list uri in ctx", listitem.length === 1 && listitem[0].rel === "listitem" && listitem[0].dst === "did:plc:bob" && listitem[0].ctx === "at://did:plc:alice/app.bsky.graph.list/L1");
+
+  const listblock = edgesFromEvent(commit("did:plc:alice", "app.bsky.graph.listblock", "r11", { subject: "at://did:plc:carol/app.bsky.graph.list/L2" }), { captureLikes: true });
+  check("listblock -> edge to subscribed list uri", listblock.length === 1 && listblock[0].rel === "listblock" && listblock[0].dst!.includes("/app.bsky.graph.list/"));
+
+  const listCreate = edgesFromEvent(commit("did:plc:alice", "app.bsky.graph.list", "L3", { name: "my list", purpose: "app.bsky.graph.defs#curatelist" }), { captureLikes: true });
+  check("list create -> self edge to own list uri", listCreate.length === 1 && listCreate[0].rel === "list" && listCreate[0].dst === "at://did:plc:alice/app.bsky.graph.list/L3");
+
+  const unlistitem = edgesFromEvent(commit("did:plc:alice", "app.bsky.graph.listitem", "r10", undefined, "delete"), { captureLikes: true });
+  check("listitem delete -> 1 delete row", unlistitem.length === 1 && unlistitem[0].op === "d" && unlistitem[0].rel === "listitem" && unlistitem[0].dst === null);
+
   const unfollow = edgesFromEvent(commit("did:plc:alice", "app.bsky.graph.follow", "r1", undefined, "delete"), { captureLikes: true });
   check("unfollow -> 1 delete row, dst null", unfollow.length === 1 && unfollow[0].op === "d" && unfollow[0].dst === null && unfollow[0].rel === "follow");
 
@@ -62,7 +75,8 @@ async function main() {
   // --- 2. write two parts + compact + read back ---
   const dir = await mkdtemp(path.join(tmpdir(), "edgecap-"));
   try {
-    const batch1 = [...follow, ...block, ...repost, ...like, ...reply, ...quote, ...replyQuote, ...unfollow, ...postDelete];
+    const batch1 = [...follow, ...block, ...repost, ...like, ...reply, ...quote, ...replyQuote,
+                    ...listitem, ...listblock, ...listCreate, ...unlistitem, ...unfollow, ...postDelete];
     const batch2 = edgesFromEvent(commit("did:plc:dave", "app.bsky.graph.follow", "r9", { subject: "did:plc:erin" }), { captureLikes: true });
     const w1 = await writeEdgeParts(batch1, dir, "0001");
     const w2 = await writeEdgeParts(batch2, dir, "0002");
@@ -77,20 +91,26 @@ async function main() {
     const merged = await compactDay(dir, DAY);
     check("compactDay merged", merged === true);
 
+    // compaction writes c-*.parquet INSIDE dt=<DAY>/ and removes the parts — glob the dir
+    const mergedGlob = path.join(dir, "dt=" + DAY, "*.parquet");
     const { stdout: postCount } = await execFileAsync("duckdb", ["-noheader", "-list", "-c",
-      `SELECT COUNT(*) FROM read_parquet('${path.join(dir, "dt=" + DAY + ".parquet")}');`]);
+      `SELECT COUNT(*) FROM read_parquet('${mergedGlob}');`]);
     check(`merged file has ${expected} rows`, parseInt(postCount.trim(), 10) === expected);
 
     const { stdout: shape } = await execFileAsync("duckdb", ["-noheader", "-list", "-c",
       `SELECT rel, op, COUNT(*) c, COUNT(*) FILTER (WHERE dst IS NULL) null_dst ` +
-      `FROM read_parquet('${path.join(dir, "dt=" + DAY + ".parquet")}') GROUP BY 1,2 ORDER BY 1,2;`]);
+      `FROM read_parquet('${mergedGlob}') GROUP BY 1,2 ORDER BY 1,2;`]);
     console.log("\n-- merged dataset (rel|op|count|null-dst) --\n" + shape.trim());
 
     // creates must have non-null dst; deletes must have null dst
     const { stdout: bad } = await execFileAsync("duckdb", ["-noheader", "-list", "-c",
-      `SELECT COUNT(*) FROM read_parquet('${path.join(dir, "dt=" + DAY + ".parquet")}') ` +
+      `SELECT COUNT(*) FROM read_parquet('${mergedGlob}') ` +
       `WHERE (op='c' AND dst IS NULL) OR (op='d' AND dst IS NOT NULL);`]);
     check("no create-with-null-dst or delete-with-dst", parseInt(bad.trim(), 10) === 0);
+
+    // the c-* file must live inside the partition dir (Hive-globbable), not as a top-level file
+    const topLevel = path.join(dir, "dt=" + DAY + ".parquet");
+    check("no top-level dt=<date>.parquet (stays in partition dir)", !existsSync(topLevel));
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

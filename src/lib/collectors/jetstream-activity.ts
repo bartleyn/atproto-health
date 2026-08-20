@@ -27,7 +27,7 @@
  *
  * Usage:
  *   npm run collect:activity
- *   npm run collect:activity -- --retention-days 90
+ *   npm run collect:activity -- --retention-days 90   (opt in to pruning; off by default)
  *   npm run collect:activity -- --no-collection-tracking
  *   npm run collect:activity -- --max-collection-rows 1000000
  *   npm run collect:activity -- --no-scoring
@@ -140,7 +140,10 @@ const BUFFER_FLUSH_THRESHOLD = 200_000;
 
 const args = process.argv.slice(2);
 const retentionIdx = args.indexOf("--retention-days");
-const RETENTION_DAYS = retentionIdx >= 0 ? parseInt(args[retentionIdx + 1], 10) : 90;
+// Retention is OFF by default. These tables are the only long-run history of
+// daily activity, and the prune below silently deletes anything backfilled from
+// the legacy sqlite archive. Pass --retention-days N (N > 0) to re-enable it.
+const RETENTION_DAYS = retentionIdx >= 0 ? parseInt(args[retentionIdx + 1], 10) : 0;
 const backfillIdx = args.indexOf("--backfill-hours");
 const BACKFILL_HOURS = backfillIdx >= 0 ? parseInt(args[backfillIdx + 1], 10) : null;
 const NO_COLLECTION_TRACKING = args.includes("--no-collection-tracking");
@@ -480,6 +483,9 @@ function flushNow(): Promise<void> {
 }
 
 async function pruneOldRows() {
+  // No retention configured (or a non-numeric value): keep everything. Without
+  // this guard a zero/NaN cutoff would resolve to today and wipe the tables.
+  if (!Number.isFinite(RETENTION_DAYS) || RETENTION_DAYS <= 0) return;
   const cutoff = new Date(Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000)
     .toISOString().slice(0, 10);
   const [a, d] = await Promise.all([
@@ -535,7 +541,7 @@ function connect() {
     const collectionStatus = NO_COLLECTION_TRACKING
       ? "DISABLED (--no-collection-tracking)"
       : `enabled, pauses at ${MAX_COLLECTION_ROWS.toLocaleString()} rows`;
-    console.log(`[activity] Connected. Retention: ${RETENTION_DAYS}d. Flushing every ${FLUSH_INTERVAL_MS / 1000}s. Collection tracking: ${collectionStatus}`);
+    console.log(`[activity] Connected. Retention: ${RETENTION_DAYS > 0 ? `${RETENTION_DAYS}d` : "off (keep all history)"}. Flushing every ${FLUSH_INTERVAL_MS / 1000}s. Collection tracking: ${collectionStatus}`);
     resetStallTimer();
     pingTimer = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) ws.ping();

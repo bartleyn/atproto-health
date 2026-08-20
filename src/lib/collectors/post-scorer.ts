@@ -60,7 +60,14 @@ const SCORE_CONCURRENCY = 2;
 const DLQ_SCORE_TIMEOUT_MS  = 50_000;
 const LIVE_SCORE_TIMEOUT_MS = 30_000;
 
+// The firehose produces posts far faster than the scoring API consumes them:
+// Capping the queue turns that into graceful degradation: scoring becomes a SAMPLE of the
+// firehose (whatever the API can keep up with) instead of an unbounded backlog. Will keep working on speeding up scoring
+const _maxBufIdx = _args.indexOf("--scorer-max-buffer");
+const SCORER_MAX_BUFFER = _maxBufIdx >= 0 ? parseInt(_args[_maxBufIdx + 1], 10) : 100_000;
+
 let scorerBuffer: BufferedPost[] = [];
+let _droppedSinceFlush = 0;
 let _storage: Storage | null = null;
 let _flushing = false;
 
@@ -71,6 +78,10 @@ function getStorage(): Storage {
 
 export function bufferPost(post: BufferedPost): void {
   if (!SCORER_ENABLED) return;
+  if (scorerBuffer.length >= SCORER_MAX_BUFFER) {
+    _droppedSinceFlush++;
+    return;
+  }
   scorerBuffer.push(post);
 }
 
@@ -210,6 +221,8 @@ export async function flushScorer(): Promise<void> {
 
     const posts = scorerBuffer;
     scorerBuffer = [];
+    const dropped = _droppedSinceFlush;
+    _droppedSinceFlush = 0;
     if (posts.length === 0) return;
 
     const chunks: BufferedPost[][] = [];
@@ -236,7 +249,10 @@ export async function flushScorer(): Promise<void> {
 
     const filtered = MIN_TOXICITY > 0 ? ` (min-toxicity=${MIN_TOXICITY})` : "";
     const failedNote = failed > 0 ? `, ${failed} to DLQ` : "";
-    console.log(`[scorer] Flushed ${succeeded} posts${filtered}${failedNote} (${chunks.length} batches)`);
+    // Surface the shortfall: a persistently non-zero drop count means the scoring API is the
+    // bottleneck, not a blip. It used to be invisible because the backlog just ate the heap.
+    const dropNote = dropped > 0 ? `, dropped ${dropped} over cap ${SCORER_MAX_BUFFER}` : "";
+    console.log(`[scorer] Flushed ${succeeded} posts${filtered}${failedNote}${dropNote} (${chunks.length} batches)`);
 
   } finally {
     _flushing = false;

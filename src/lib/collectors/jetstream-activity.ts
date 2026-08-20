@@ -178,6 +178,10 @@ const feedGenBuffer = new Map<string, { creatorDid: string; displayName: string 
 const feedGenDeleteBuffer = new Set<string>();
 // Feed like buffer: "feed_uri|date" → count (only likes targeting a feed generator)
 const feedLikeBuffer = new Map<string, number>();
+// Feed like edges: "feed_uri|liker_did" → like createdAt. Keeps the user dimension the
+// daily counter throws away, so feeds.feed_likes stays current after the historical
+// getLikes backfill. Map (not Set) so a repeat within a flush window collapses to one row.
+const feedLikeEdgeBuffer = new Map<string, string>();
 
 // Guard so a single pressure flush is in-flight at a time
 let pressureFlushPending = false;
@@ -274,6 +278,7 @@ function snapshotBuffers() {
     feedGenRows:     [...feedGenBuffer.entries()],
     feedGenDeletes:  [...feedGenDeleteBuffer],
     feedLikeRows:    [...feedLikeBuffer.entries()],
+    feedLikeEdges:   [...feedLikeEdgeBuffer.entries()],
     cursorToSave:    lastCursor,
   };
   activityBuffer.clear();
@@ -286,6 +291,7 @@ function snapshotBuffers() {
   feedGenBuffer.clear();
   feedGenDeleteBuffer.clear();
   feedLikeBuffer.clear();
+  feedLikeEdgeBuffer.clear();
   return snapshot;
 }
 
@@ -329,7 +335,7 @@ async function flush() {
   }
 
   const snapshot = snapshotBuffers();
-  const { activityRows, deleteRows, postDeleteRows, starterpackRows, langRows, langStatsRows, collectionRows, feedGenRows, feedGenDeletes, feedLikeRows, cursorToSave } = snapshot;
+  const { activityRows, deleteRows, postDeleteRows, starterpackRows, langRows, langStatsRows, collectionRows, feedGenRows, feedGenDeletes, feedLikeRows, feedLikeEdges, cursorToSave } = snapshot;
 
   // did_activity_daily — chunked upsert with bitwise OR merge.
   for (let i = 0; i < activityRows.length; i += ACTIVITY_CHUNK_SIZE) {
@@ -435,6 +441,18 @@ async function flush() {
         return { feed_uri: key.slice(0, pipe), date: key.slice(pipe + 1), likes: count };
       }), "feed_uri", "date", "likes")}
       ON CONFLICT (feed_uri, date) DO UPDATE SET likes = feed_generator_likes_daily.likes + EXCLUDED.likes
+    `,
+    feedLikeEdges.length > 0 && sql`
+      INSERT INTO feeds.feed_likes ${sql(feedLikeEdges.map(([key, createdAt]) => {
+        const pipe = key.lastIndexOf("|");
+        return {
+          feed_uri:   key.slice(0, pipe),
+          liker_did:  key.slice(pipe + 1),
+          created_at: createdAt,
+          source:     "jetstream",
+        };
+      }), "feed_uri", "liker_did", "created_at", "source")}
+      ON CONFLICT (feed_uri, liker_did) DO NOTHING
     `,
     langStatsRows.filter(([, v]) => v.total > 0).length > 0 && sql`
       INSERT INTO activity.lang_stats ${sql(langStatsRows.filter(([, v]) => v.total > 0).map(([date, { total, tagged }]) => ({
@@ -638,6 +656,12 @@ function connect() {
             if (typeof subjectUri === "string" && subjectUri.includes("/app.bsky.feed.generator/")) {
               const lkey = `${subjectUri}|${date}`;
               feedLikeBuffer.set(lkey, (feedLikeBuffer.get(lkey) ?? 0) + 1);
+              // Keep the liker DID too — this is the user×feed matrix the recommender trains on
+              const createdAt = evt.commit.record?.createdAt;
+              feedLikeEdgeBuffer.set(
+                `${subjectUri}|${evt.did}`,
+                typeof createdAt === "string" ? createdAt : new Date().toISOString(),
+              );
             }
           }
         } else if (evt.commit.operation === "delete") {

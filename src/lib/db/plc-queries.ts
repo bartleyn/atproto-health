@@ -91,6 +91,7 @@ export function junkPdsFilter(col = "pds_url") {
     AND ${col} NOT LIKE '%.home'
     AND ${col} NOT LIKE '%.home/%'
     AND ${col} NOT LIKE '%.home:%'
+    AND ${col} NOT LIKE '%//bsky.network%'
     AND length(${col}) <= 200
   `;
 }

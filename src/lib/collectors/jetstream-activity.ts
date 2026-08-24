@@ -7,6 +7,12 @@
  *   4. Per-DID language usage (did_langs)
  *   5. Non-bsky collection activity (collection_activity) — event counts per (collection, DID)
  *      for any collection outside app.bsky.* and chat.bsky.*
+ *   6. Profile records (profile_records + profile_field_history) — avatar/banner blob CIDs,
+ *      display name, bio. Captured for entity resolution: a blob CID is a content hash, so
+ *      an identical avatar CID on two accounts means the same image bytes were uploaded to
+ *      both repos. Unlike every other tracker here, this one also listens to `update`
+ *      operations — a profile record is created once and edited thereafter, so creates
+ *      alone would miss almost every profile change on an existing account.
  *
  * Subscribes to a curated wantedCollections list: all bitmask collections + known non-bsky appviews.
  * Unfiltered subscription (no wantedCollections) overwhelms Node's event loop at ~30-50K events/sec.
@@ -35,6 +41,7 @@
  */
 
 import WebSocket from "ws";
+import { createHash } from "crypto";
 import sql from "../db/pg";
 import { bufferPost, flushScorer, scorerShutdown } from "./post-scorer";
 
@@ -175,6 +182,41 @@ const langStatsBuffer = new Map<string, { total: number; tagged: number }>();
 const collectionBuffer = new Map<string, number>();
 let collectionTrackingPaused = NO_COLLECTION_TRACKING;
 
+// Profile buffer: APPEND-ONLY list of observed app.bsky.actor.profile versions.
+// Not keyed by DID — rotation is the entity-resolution signal, so every distinct version
+// is kept rather than collapsed to latest state. Records are whole-document, so a field
+// missing from a newer version means the user removed it.
+type ProfileRow = {
+  did: string;
+  observed_at: Date;
+  operation: string;
+  source: string;
+  display_name: string | null;
+  description: string | null;
+  avatar_cid: string | null;
+  banner_cid: string | null;
+  joined_via_starterpack_uri: string | null;
+  pinned_post_uri: string | null;
+  self_labels: string[] | null;
+  record_created_at: Date | null;
+  content_hash: string;
+};
+const profileBuffer: ProfileRow[] = [];
+
+// did → content_hash of the last version we appended. Clients (and PDS rewrites) re-emit
+// byte-identical profile records; without this every rewrite would add a duplicate row.
+// Bounded so a long-running process can't grow it without limit — profile events run
+// ~18-20K/day network-wide, so this stays small in practice.
+//
+// Two generations, not one map we clear: keys accumulate per distinct DID, so the cap is
+// reachable in a few weeks, and a plain clear() would make the next event for EVERY did
+// look new and append a burst of duplicate rows. On overflow the current map is retired to
+// `olderProfileHash` and still consulted for reads, so dedupe survives the rollover at a
+// bounded 2x memory.
+let recentProfileHash = new Map<string, string>();
+let olderProfileHash = new Map<string, string>();
+const LAST_PROFILE_HASH_MAX = 200_000;
+
 // Feed generator buffer: uri → { creatorDid, displayName, description, firstSeen }
 const feedGenBuffer = new Map<string, { creatorDid: string; displayName: string | null; description: string | null; firstSeen: string }>();
 // Feed generator deletes: set of URIs that received a delete event this flush window
@@ -203,6 +245,7 @@ let totalLangDIDsFlushed = 0;
 let totalCollectionsFlushed = 0;
 let totalFeedGensFlushed = 0;
 let totalFeedLikesFlushed = 0;
+let totalProfilesFlushed = 0;
 let totalEvents = 0;
 
 // Resolve a did:web DID document and return the #atproto_pds service endpoint.
@@ -266,6 +309,81 @@ async function resolveAndStoreDidWebs() {
   }
 }
 
+// Extract the CID from a lexicon blob. Jetstream emits the current form
+//   { $type: "blob", ref: { $link: "bafkrei..." }, mimeType, size }
+// but legacy records still carry the pre-blob-migration form { cid, mimeType }.
+// The CID is a content hash — the same image uploaded to two repos yields the same
+// string, which is exactly what makes it an entity-resolution key.
+function blobCid(blob: unknown): string | null {
+  if (!blob || typeof blob !== "object") return null;
+  const b = blob as { ref?: { $link?: unknown }; cid?: unknown };
+  const link = b.ref?.$link ?? b.cid;
+  return typeof link === "string" && link.length > 0 ? link : null;
+}
+
+function asString(v: unknown, maxLen: number): string | null {
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  return t.length > 0 ? t.slice(0, maxLen) : null;
+}
+
+// Buffer one app.bsky.actor.profile version. Called for both `create` and `update`
+// commits — the record is the full document either way. Appends rather than replaces;
+// only a byte-identical repeat of the version we last appended is skipped.
+function recordProfile(did: string, record: Record<string, unknown> | undefined, operation: string) {
+  if (!record) return;
+
+  const labels = record.labels as { values?: { val?: unknown }[] } | undefined;
+  const selfLabels = Array.isArray(labels?.values)
+    ? labels.values.map(v => v?.val).filter((v): v is string => typeof v === "string")
+    : [];
+  const createdAt = asString(record.createdAt, 64);
+  const parsedCreatedAt = createdAt ? new Date(createdAt) : null;
+
+  const displayName = asString(record.displayName, 640);
+  const description = asString(record.description, 2560);
+  const avatarCid   = blobCid(record.avatar);
+  const bannerCid   = blobCid(record.banner);
+  const starterPack = asString((record.joinedViaStarterPack as { uri?: unknown })?.uri, 512);
+  const pinnedPost  = asString((record.pinnedPost as { uri?: unknown })?.uri, 512);
+
+  // Hash the identity-bearing fields only. pinnedPost changes constantly and says nothing
+  // about who runs the account, so including it would append a row on every pin change.
+  // NUL-joined, not space-joined: these fields contain spaces, so a space separator would make
+  // {name:"a b", bio:"c"} and {name:"a", bio:"b c"} hash identically, and a real edit that
+  // shifted a word across the name/bio boundary would be silently dropped as a no-op.
+  // Written as a backslash-u escape, never a raw NUL byte — a literal NUL in the source makes
+  // grep, diff, and most editors treat this whole file as binary.
+  const contentHash = createHash("md5")
+    .update([displayName, description, avatarCid, bannerCid, starterPack, selfLabels.join(",")].join("\u0000"))
+    .digest("hex");
+
+  if (recentProfileHash.get(did) === contentHash || olderProfileHash.get(did) === contentHash) return;
+  if (recentProfileHash.size >= LAST_PROFILE_HASH_MAX) {
+    olderProfileHash = recentProfileHash;
+    recentProfileHash = new Map();
+  }
+  recentProfileHash.set(did, contentHash);
+
+  profileBuffer.push({
+    did,
+    observed_at:                new Date(),
+    operation,
+    source:                     "jetstream",
+    display_name:               displayName,
+    description,
+    avatar_cid:                 avatarCid,
+    banner_cid:                 bannerCid,
+    joined_via_starterpack_uri: starterPack,
+    pinned_post_uri:            pinnedPost,
+    self_labels:                selfLabels.length > 0 ? selfLabels : null,
+    // Clients set createdAt inconsistently and sometimes garble it; keep only sane dates.
+    record_created_at:          parsedCreatedAt && !Number.isNaN(parsedCreatedAt.getTime())
+                                  ? parsedCreatedAt : null,
+    content_hash:               contentHash,
+  });
+}
+
 // Snapshot all in-memory buffers and clear them. Synchronous — call this at the top
 // of flush() so new incoming events accumulate in fresh buffers while we write to PG.
 // Collection row-count check is done async before this call in flush().
@@ -278,6 +396,7 @@ function snapshotBuffers() {
     langRows:        [...langBuffer.entries()],
     langStatsRows:   [...langStatsBuffer.entries()],
     collectionRows:  collectionTrackingPaused ? [] : [...collectionBuffer.entries()],
+    profileRows:     profileBuffer.splice(0, profileBuffer.length),
     feedGenRows:     [...feedGenBuffer.entries()],
     feedGenDeletes:  [...feedGenDeleteBuffer],
     feedLikeRows:    [...feedLikeBuffer.entries()],
@@ -299,7 +418,7 @@ function snapshotBuffers() {
 }
 
 function logFlush(snapshot: ReturnType<typeof snapshotBuffers>) {
-  const { activityRows, deleteRows, postDeleteRows, starterpackRows, langRows, langStatsRows, collectionRows, feedGenRows, feedLikeRows } = snapshot;
+  const { activityRows, deleteRows, postDeleteRows, starterpackRows, langRows, langStatsRows, collectionRows, profileRows, feedGenRows, feedLikeRows } = snapshot;
   const postsThisFlush  = langStatsRows.reduce((s, [, v]) => s + v.total, 0);
   const taggedThisFlush = langStatsRows.reduce((s, [, v]) => s + v.tagged, 0);
   totalActivityFlushed    += activityRows.length;
@@ -310,11 +429,12 @@ function logFlush(snapshot: ReturnType<typeof snapshotBuffers>) {
   totalCollectionsFlushed += collectionRows.length;
   totalFeedGensFlushed    += feedGenRows.length;
   totalFeedLikesFlushed   += feedLikeRows.reduce((s, [, c]) => s + c, 0);
+  totalProfilesFlushed    += profileRows.length;
   const tagPct = postsThisFlush > 0 ? ((taggedThisFlush / postsThisFlush) * 100).toFixed(1) : "—";
   const collectionNote = collectionTrackingPaused ? " [collection tracking PAUSED]" : ` collections=${collectionRows.length.toLocaleString()}`;
   console.log(
-    `[activity] Flushed activity=${activityRows.length.toLocaleString()} deletes=${deleteRows.length} types postdel=${postDeleteRows.length.toLocaleString()} dids starterpack=${starterpackRows.length} uris lang=${langRows.length.toLocaleString()} did×lang (${tagPct}% tagged)${collectionNote} feeds=${feedGenRows.length} feed_likes=${feedLikeRows.reduce((s, [, c]) => s + c, 0)} | ` +
-    `totals: activity=${totalActivityFlushed.toLocaleString()} deletes=${totalDeletesFlushed.toLocaleString()} postdel=${totalPostDeletesFlushed.toLocaleString()} starterpack=${totalStarterpackFlushed.toLocaleString()} lang_dids=${totalLangDIDsFlushed.toLocaleString()} collections=${totalCollectionsFlushed.toLocaleString()} feed_gens=${totalFeedGensFlushed.toLocaleString()} feed_likes=${totalFeedLikesFlushed.toLocaleString()} | ` +
+    `[activity] Flushed activity=${activityRows.length.toLocaleString()} deletes=${deleteRows.length} types postdel=${postDeleteRows.length.toLocaleString()} dids starterpack=${starterpackRows.length} uris lang=${langRows.length.toLocaleString()} did×lang (${tagPct}% tagged)${collectionNote} feeds=${feedGenRows.length} feed_likes=${feedLikeRows.reduce((s, [, c]) => s + c, 0)} profiles=${profileRows.length.toLocaleString()} | ` +
+    `totals: activity=${totalActivityFlushed.toLocaleString()} deletes=${totalDeletesFlushed.toLocaleString()} postdel=${totalPostDeletesFlushed.toLocaleString()} starterpack=${totalStarterpackFlushed.toLocaleString()} lang_dids=${totalLangDIDsFlushed.toLocaleString()} collections=${totalCollectionsFlushed.toLocaleString()} feed_gens=${totalFeedGensFlushed.toLocaleString()} feed_likes=${totalFeedLikesFlushed.toLocaleString()} profiles=${totalProfilesFlushed.toLocaleString()} | ` +
     `events=${totalEvents.toLocaleString()} | cursor=${snapshot.cursorToSave}`
   );
 }
@@ -323,9 +443,20 @@ function logFlush(snapshot: ReturnType<typeof snapshotBuffers>) {
 // then upserts to Postgres in chunks, yielding between chunks to keep the event loop
 // responsive during backfill when events arrive faster than writes can drain.
 const ACTIVITY_CHUNK_SIZE = 5_000;
+// profile_records has 13 columns; 65,534 / 13 = 5,041 rows max per statement.
+const PROFILE_CHUNK_SIZE = 4_000;
 
 async function flush() {
-  if (activityBuffer.size === 0 && deleteBuffer.size === 0 && starterpackBuffer.size === 0 && langBuffer.size === 0 && collectionBuffer.size === 0 && feedGenBuffer.size === 0 && feedGenDeleteBuffer.size === 0 && feedLikeBuffer.size === 0) return;
+  // Every buffer snapshotted below must appear here, or its rows sit unflushed until some
+  // OTHER buffer happens to be non-empty. postDeleteBuffer and langStatsBuffer were missing:
+  // masked today because a post delete also writes deleteBuffer and lang stats accompany
+  // posts in activityBuffer, but that is a coincidence of the current call sites, not a rule.
+  const nothingBuffered =
+    activityBuffer.size === 0 && deleteBuffer.size === 0 && postDeleteBuffer.size === 0 &&
+    starterpackBuffer.size === 0 && langBuffer.size === 0 && langStatsBuffer.size === 0 &&
+    collectionBuffer.size === 0 && feedGenBuffer.size === 0 && feedGenDeleteBuffer.size === 0 &&
+    feedLikeBuffer.size === 0 && profileBuffer.length === 0;
+  if (nothingBuffered) return;
 
   // Async collection row-count check before snapshotting buffers.
   if (!collectionTrackingPaused && collectionBuffer.size > 0) {
@@ -338,7 +469,7 @@ async function flush() {
   }
 
   const snapshot = snapshotBuffers();
-  const { activityRows, deleteRows, postDeleteRows, starterpackRows, langRows, langStatsRows, collectionRows, feedGenRows, feedGenDeletes, feedLikeRows, feedLikeEdges, cursorToSave } = snapshot;
+  const { activityRows, deleteRows, postDeleteRows, starterpackRows, langRows, langStatsRows, collectionRows, profileRows, feedGenRows, feedGenDeletes, feedLikeRows, feedLikeEdges, cursorToSave } = snapshot;
 
   // did_activity_daily — chunked upsert with bitwise OR merge.
   for (let i = 0; i < activityRows.length; i += ACTIVITY_CHUNK_SIZE) {
@@ -386,6 +517,22 @@ async function flush() {
       ON CONFLICT (did, date) DO UPDATE SET count = post_deletes_daily.count + EXCLUDED.count
     `;
     if (i + ACTIVITY_CHUNK_SIZE < postDeleteRows.length) {
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
+  }
+
+  // profile_records — APPEND-ONLY, no ON CONFLICT: every observed version is a new row,
+  // because avatar/name rotation is the entity-resolution signal. 13 columns, so the
+  // chunk is smaller than ACTIVITY_CHUNK_SIZE to stay under the 65,534-parameter limit.
+  for (let i = 0; i < profileRows.length; i += PROFILE_CHUNK_SIZE) {
+    const chunk = profileRows.slice(i, i + PROFILE_CHUNK_SIZE);
+    await sql`
+      INSERT INTO activity.profile_records ${sql(chunk,
+        "did", "observed_at", "operation", "source", "display_name", "description",
+        "avatar_cid", "banner_cid", "joined_via_starterpack_uri", "pinned_post_uri",
+        "self_labels", "record_created_at", "content_hash")}
+    `;
+    if (i + PROFILE_CHUNK_SIZE < profileRows.length) {
       await new Promise<void>(resolve => setImmediate(resolve));
     }
   }
@@ -643,6 +790,7 @@ function connect() {
               const spKey = `${uri}|${date}`;
               starterpackBuffer.set(spKey, (starterpackBuffer.get(spKey) ?? 0) + 1);
             }
+            recordProfile(evt.did, evt.commit.record, "create");
           }
 
           // Feed generator creates: capture URI + metadata from the record
@@ -669,6 +817,16 @@ function connect() {
                 typeof createdAt === "string" ? createdAt : new Date().toISOString(),
               );
             }
+          }
+        } else if (evt.commit.operation === "update") {
+          // The only `update` we act on. Every other tracker here is create-driven, but a
+          // profile record is created once at signup and edited forever after — so the
+          // edits, which are exactly the avatar/name rotations we care about, arrive
+          // solely as updates. Deliberately does NOT touch did_activity_daily: those bits
+          // have always meant "created a record of this type", and quietly widening them
+          // would break comparability with every day already collected.
+          if (evt.commit.collection === "app.bsky.actor.profile") {
+            recordProfile(evt.did, evt.commit.record, "update");
           }
         } else if (evt.commit.operation === "delete") {
           // Record-level delete by collection

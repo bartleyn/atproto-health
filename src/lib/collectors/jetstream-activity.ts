@@ -217,8 +217,8 @@ let recentProfileHash = new Map<string, string>();
 let olderProfileHash = new Map<string, string>();
 const LAST_PROFILE_HASH_MAX = 200_000;
 
-// Feed generator buffer: uri → { creatorDid, displayName, description, firstSeen }
-const feedGenBuffer = new Map<string, { creatorDid: string; displayName: string | null; description: string | null; firstSeen: string }>();
+// Feed generator buffer: uri → { creatorDid, displayName, description, serviceDid, firstSeen }
+const feedGenBuffer = new Map<string, { creatorDid: string; displayName: string | null; description: string | null; serviceDid: string | null; firstSeen: string }>();
 // Feed generator deletes: set of URIs that received a delete event this flush window
 const feedGenDeleteBuffer = new Set<string>();
 // Feed like buffer: "feed_uri|date" → count (only likes targeting a feed generator)
@@ -574,11 +574,12 @@ async function flush() {
     feedGenRows.length > 0 && sql`
       INSERT INTO activity.feed_generators ${sql(feedGenRows.map(([uri, meta]) => ({
         uri, creator_did: meta.creatorDid, display_name: meta.displayName,
-        description: meta.description, first_seen: meta.firstSeen,
-      })), "uri", "creator_did", "display_name", "description", "first_seen")}
+        description: meta.description, service_did: meta.serviceDid, first_seen: meta.firstSeen,
+      })), "uri", "creator_did", "display_name", "description", "service_did", "first_seen")}
       ON CONFLICT (uri) DO UPDATE SET
         display_name = COALESCE(EXCLUDED.display_name, feed_generators.display_name),
         description  = COALESCE(EXCLUDED.description,  feed_generators.description),
+        service_did  = COALESCE(EXCLUDED.service_did,  feed_generators.service_did),
         deleted_at   = NULL
     `,
     feedGenDeletes.length > 0 && sql`
@@ -793,13 +794,18 @@ function connect() {
             recordProfile(evt.did, evt.commit.record, "create");
           }
 
-          // Feed generator creates: capture URI + metadata from the record
+          // Feed generator creates: capture URI + metadata from the record. `record.did` is
+          // the SERVICE that serves the feed's algorithm (a builder platform like SkyFeed, or
+          // a bespoke self-hosted generator) — distinct from creatorDid, the owning account,
+          // which is never shared across feeds. Required by the lexicon, present on every
+          // create event; previously read here but discarded.
           if (collection === "app.bsky.feed.generator") {
             const uri = `at://${evt.did}/app.bsky.feed.generator/${evt.commit.rkey}`;
             feedGenBuffer.set(uri, {
               creatorDid:  evt.did,
               displayName: evt.commit.record?.displayName ?? null,
               description: evt.commit.record?.description ?? null,
+              serviceDid:  typeof evt.commit.record?.did === "string" ? evt.commit.record.did : null,
               firstSeen:   date,
             });
           }

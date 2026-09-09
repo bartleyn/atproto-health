@@ -120,6 +120,7 @@ const THIRD_PARTY_PREFIXES = [
   "dev.cocore.*",                     // Cocore distributed AI
   "tech.transparencia.*",             // Transparencia Tech News
   "community.gifthood.*",             // gifthood
+  "com.bsky38.*",                     // Bsky38
 ];
 
 const WANTED_COLLECTIONS = [

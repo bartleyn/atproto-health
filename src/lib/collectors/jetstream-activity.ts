@@ -794,11 +794,7 @@ function connect() {
             recordProfile(evt.did, evt.commit.record, "create");
           }
 
-          // Feed generator creates: capture URI + metadata from the record. `record.did` is
-          // the SERVICE that serves the feed's algorithm (a builder platform like SkyFeed, or
-          // a bespoke self-hosted generator) — distinct from creatorDid, the owning account,
-          // which is never shared across feeds. Required by the lexicon, present on every
-          // create event; previously read here but discarded.
+          // Feed generator creates
           if (collection === "app.bsky.feed.generator") {
             const uri = `at://${evt.did}/app.bsky.feed.generator/${evt.commit.rkey}`;
             feedGenBuffer.set(uri, {

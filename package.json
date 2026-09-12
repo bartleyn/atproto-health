@@ -28,7 +28,10 @@
     "analysis:build": "npx tsx --env-file .env src/lib/analysis/build-analysis-db.ts",
     "analysis": "npx tsx --env-file .env src/lib/analysis/activity-crosstabs.ts",
     "analysis:retention": "npx tsx --env-file .env src/lib/analysis/retention-cohorts.ts",
-    "analysis:dashboard-cache": "npx tsx --env-file .env src/lib/analysis/dashboard-cache.ts"
+    "analysis:dashboard-cache": "npx tsx --env-file .env src/lib/analysis/dashboard-cache.ts",
+    "analysis:matviews": "npx tsx --env-file .env src/lib/analysis/refresh-matviews.ts",
+    "analysis:marts": "npx tsx --env-file .env src/lib/analysis/refresh-analytics-marts.ts",
+    "analysis:cache": "npx tsx --env-file .env src/lib/analysis/analytics-cache.ts"
   },
   "keywords": [],
   "author": "",

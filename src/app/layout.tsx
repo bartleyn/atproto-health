@@ -26,6 +26,9 @@ export default function RootLayout({
             <Link href="/longevity" className="text-gray-400 underline hover:text-gray-100 transition-colors">
               PDS & Repo Ages
             </Link>
+            <Link href="/analytics" className="text-gray-400 underline hover:text-gray-100 transition-colors">
+              Analytics
+            </Link>
           </div>
         </nav>
         {children}

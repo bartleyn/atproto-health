@@ -52,7 +52,9 @@ const SCORER_ENABLED = !_args.includes("--no-scoring");
 // DLQ: retry up to 10 times with exponential backoff (5m, 20m, 45m … ~8h cap).
 // Large payloads (e.g. from shutdown) are split into SCORE_BATCH_SIZE chunks on enqueue
 const DLQ_MAX_ATTEMPTS = 10;
-const DLQ_DRAIN_LIMIT  = 50;
+// Rows per flush the inline drain will attempt. Set to 0 in case running local DLQ draining
+const _dlqLimitIdx = _args.indexOf("--dlq-drain-limit");
+const DLQ_DRAIN_LIMIT = _dlqLimitIdx >= 0 ? parseInt(_args[_dlqLimitIdx + 1], 10) : 50;
 const SCORE_BATCH_SIZE  = 50;
 const SCORE_CONCURRENCY = 4;
 const DLQ_SCORE_TIMEOUT_MS  = 50_000;
@@ -60,7 +62,7 @@ const LIVE_SCORE_TIMEOUT_MS = 30_000;
 
 // Max buffer size to prevent blowup of scoring input:output 
 const _maxBufIdx = _args.indexOf("--scorer-max-buffer");
-const SCORER_MAX_BUFFER = _maxBufIdx >= 0 ? parseInt(_args[_maxBufIdx + 1], 10) : 100_000;
+const SCORER_MAX_BUFFER = _maxBufIdx >= 0 ? parseInt(_args[_maxBufIdx + 1], 10) : 250_000;
 
 const METRICS_RETENTION_DAYS = 30;
 const METRICS_PRUNE_INTERVAL_MS = 60 * 60_000;
@@ -91,12 +93,7 @@ function getStorage(): Storage {
  * Run `worker` over `items` with at most `limit` in flight, starting the next item
  * as soon as any one finishes.
  *
- * This replaces a lock-step loop that awaited a whole group of `limit` before
- * starting the next, so every group cost max(latency) instead of mean(latency).
- * Against the observed scorer latency spread (mean 5,998ms, p95 7,919ms) that
- * barrier wastes 8.9% at concurrency 2 and 16.2% at 4.
- *
- * `worker` must handle its own errors; a rejection here would abandon the rest.
+ * `worker` must handle its own errors
  */
 async function _runPool<T>(
   items: T[],
@@ -147,8 +144,6 @@ async function _enqueueDlq(posts: BufferedPost[], error: string, attempts: numbe
       attempts,
       last_error: error,
       next_retry_at: nextRetry,
-      // Recorded at insert so DLQ depth in posts is a SUM of a column rather than
-      // a json_array_length over the whole (multi-GB) table.
       post_count: slice.length,
     });
   }
@@ -230,6 +225,7 @@ async function _scoreAndUpload(
 }
 
 async function _drainDlq(): Promise<void> {
+  if (DLQ_DRAIN_LIMIT <= 0) return;
   const now = new Date().toISOString();
 
   const rows = await sql<{ id: number; posts_json: string; attempts: number }[]>`
@@ -242,22 +238,27 @@ async function _drainDlq(): Promise<void> {
 
   if (rows.length === 0) return;
 
-  // Drained through the same worker pool as live scoring. T
+  // Drained through the same worker pool as live scoring. 
   await _runPool(rows, SCORE_CONCURRENCY, async row => {
     const posts = JSON.parse(row.posts_json) as BufferedPost[];
 
-    // Re-chunk oversized rows (e.g. from pre-fix shutdown saves) into smaller rows and drop the original.
-    if (posts.length > SCORE_BATCH_SIZE) {
-      await sql`DELETE FROM activity.score_dlq WHERE id = ${row.id}`;
-      // Carry the attempt count over. Passing 0 here reset the counter on every
-      // re-chunk, so rows could never reach DLQ_MAX_ATTEMPTS and never aged out.
-      await _enqueueDlq(posts, row.attempts > 0 ? "re-chunked from oversized row" : "initial enqueue", row.attempts);
-      console.log(`[scorer] DLQ batch ${row.id} re-chunked ${posts.length} posts into ${Math.ceil(posts.length / SCORE_BATCH_SIZE)} rows`);
-      return;
-    }
-
     try {
-      await _scoreAndUpload(posts, DLQ_SCORE_TIMEOUT_MS, "dlq");
+      let scored = 0;
+      try {
+        for (let i = 0; i < posts.length; i += SCORE_BATCH_SIZE) {
+          await _scoreAndUpload(posts.slice(i, i + SCORE_BATCH_SIZE), DLQ_SCORE_TIMEOUT_MS, "dlq");
+          scored = Math.min(i + SCORE_BATCH_SIZE, posts.length);
+        }
+      } catch (err) {
+        // re-queue only what is still unscored
+        if (scored > 0) {
+          await sql`DELETE FROM activity.score_dlq WHERE id = ${row.id}`;
+          await _enqueueDlq(posts.slice(scored), String(err), row.attempts + 1);
+          console.warn(`[scorer] DLQ batch ${row.id} partial: ${scored}/${posts.length} scored, ${posts.length - scored} re-queued: ${err}`);
+          return;
+        }
+        throw err;
+      }
       await sql`DELETE FROM activity.score_dlq WHERE id = ${row.id}`;
       console.log(`[scorer] DLQ batch ${row.id} retry succeeded (${posts.length} posts)`);
     } catch (err) {

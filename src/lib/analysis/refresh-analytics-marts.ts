@@ -7,35 +7,6 @@
  *
  *   npm run analysis:marts
  *
- * These are plain tables, not full-rebuild materialized views: historical rows
- * are stable once written (an already-closed week/day/cohort doesn't change),
- * so each run only recomputes a small trailing window rather than all of
- * history. This matters a lot for dau_mau_daily specifically — its trailing
- * 28-day distinct-active-DID count costs ~2.5 minutes PER DATE against the
- * 195M-row activity.did_activity_daily table (measured directly; a naive
- * correlated BETWEEN join made Postgres seq-scan the whole table per date and
- * took multiple *hours* for 8 dates — the LATERAL form below is what makes the
- * per-date cost an index-only range scan instead). A weekly run recomputing a
- * ~10-day trailing window costs well under half an hour; rebuilding all of
- * history costs the whole table's day-count times that, which is why the
- * first backfill on an empty table is expected to take hours and should be
- * kicked off with `nohup` rather than run inline.
- *
- * dau_mau_daily additionally retains only a trailing HISTORY_DAYS window —
- * older rows are pruned each run so the table (and its cost) don't grow
- * unboundedly. wau_by_cohort and retention_cohorts keep full history; neither
- * has dau_mau_daily's per-row cost problem (wau_by_cohort is a single
- * GROUP BY, retention_cohorts joins on exact date equality, not a range).
- *
- * IMPORTANT: every "since"/boundary value below is resolved to a plain JS
- * string BEFORE being used in any query, and only plain strings are
- * interpolated into the DELETE/INSERT statements — never a reusable
- * `sql\`...\`` fragment. Reusing a parameterized postgres.js fragment across
- * more than one top-level tagged-template call was tried first and silently
- * corrupted parameter binding (a real run failed with
- * `invalid input syntax for type date: "20703"` — a mangled value from a
- * different placeholder). Plain-value interpolation is re-parameterized fresh
- * for every query, so it doesn't have this failure mode.
  */
 import sql from "../db/pg";
 
@@ -67,10 +38,7 @@ async function refreshWauByCohort() {
   console.log(`wau_by_cohort: recomputing weeks since ${max_week ?? "(full history — first run)"} (from ${since})`);
   const started = Date.now();
 
-  // week_start is computed from the activity date by shifting BACKWARD up to
-  // 6 days (the legacy Monday-anchored formula below), so an activity date of
-  // `since` can produce a week_start earlier than `since` — widen the delete
-  // bound by a week so it always covers every week_start the insert can produce.
+  // Widen the delete bound by a week so it always covers every week_start the insert can produce.
   const deleteSince = addDays(since, -7);
 
   await sql.begin(async tx => {
@@ -134,7 +102,7 @@ async function refreshDauMauDaily() {
     console.log(`  delete (pre-insert window clear): ${del1.count} rows`);
     // LATERAL forces Postgres to plan the MAU window as a per-date index range
     // scan (Index Cond) instead of materializing + nested-looping the whole
-    // 195M-row table per date (Join Filter) — see the module comment.
+    // 195M-row table per date (Join Filter)
     const ins = await tx`
       INSERT INTO analysis.dau_mau_daily (date, dau, mau, dau_mau_pct)
       SELECT

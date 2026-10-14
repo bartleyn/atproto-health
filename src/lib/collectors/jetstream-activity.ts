@@ -14,7 +14,8 @@
  *      operations — a profile record is created once and edited thereafter, so creates
  *      alone would miss almost every profile change on an existing account.
  *
- * Subscribes to a curated wantedCollections list: all bitmask collections + known non-bsky appviews.
+ * Subscribes to a curated wantedCollections list: all bitmask collections + a few extra
+ * app.bsky collections + known non-bsky appviews.
  * Unfiltered subscription (no wantedCollections) overwhelms Node's event loop at ~30-50K events/sec.
  * Add new non-bsky collections to THIRD_PARTY_COLLECTIONS as new appviews are discovered.
  *
@@ -121,10 +122,24 @@ const THIRD_PARTY_PREFIXES = [
   "tech.transparencia.*",             // Transparencia Tech News
   "community.gifthood.*",             // gifthood
   "com.bsky38.*",                     // Bsky38
+  "tech.scios.*",                     // Scios rrgi graph
+  "is.currents.*",                    // Currents feed saves
+  "at.podping.*",                     // Podping podcast updates
+  "town.delve.*",                     // Delve social
+  "net.atmowx.*",                     // Atmowx weather observations
+  "at.adsb.*",                        // ADS-B flight records
+  "cc.lefht.*",                       // lefht mesh sightings
+];
+
+// app.bsky collections subscribed without a bitmask bit
+const EXTRA_BSKY_COLLECTIONS = [
+  "app.bsky.labeler.service",         // Labeler declarations
+  "app.bsky.actor.status",            // Live-now status
 ];
 
 const WANTED_COLLECTIONS = [
   ...Object.keys(ACTIVITY_BITS),
+  ...EXTRA_BSKY_COLLECTIONS,
   ...THIRD_PARTY_PREFIXES,
 ];
 const COLLECTION_PARAMS = WANTED_COLLECTIONS.map(c => `wantedCollections=${encodeURIComponent(c)}`).join("&");
@@ -822,12 +837,6 @@ function connect() {
             }
           }
         } else if (evt.commit.operation === "update") {
-          // The only `update` we act on. Every other tracker here is create-driven, but a
-          // profile record is created once at signup and edited forever after — so the
-          // edits, which are exactly the avatar/name rotations we care about, arrive
-          // solely as updates. Deliberately does NOT touch did_activity_daily: those bits
-          // have always meant "created a record of this type", and quietly widening them
-          // would break comparability with every day already collected.
           if (evt.commit.collection === "app.bsky.actor.profile") {
             recordProfile(evt.did, evt.commit.record, "update");
           }

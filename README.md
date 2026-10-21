@@ -2,7 +2,7 @@
 
 A Next.js dashboard for monitoring the health of the AT Protocol ecosystem. Tracks PDS (Personal Data Server) instances across the network — geographic distribution, hosting providers, software versions, user counts, federation activity, account age, and migration patterns.
 
-All rendering is server-side. Data lives in a local SQLite database populated by collection scripts you run manually or on a cron.
+All rendering is server-side. Data lives in a local Postgres database populated by collection scripts you run manually or on a cron.
 
 ## Pages
 
@@ -19,7 +19,7 @@ npm install
 npm run dev
 ```
 
-The SQLite database is created automatically on first run. The dashboard shows a "No data collected yet" message until you run at least one collection.
+The Postgres database is created automatically on first run. The dashboard shows a "No data collected yet" message until you run at least one collection.
 
 ## Data collection
 
@@ -72,12 +72,11 @@ Two separate pipelines that share a SQLite database:
 
 **Federation classification** — The Jetstream sampler distinguishes true cross-party federation from Bluesky-internal cross-shard traffic between `*.host.bsky.network` shards and `bsky.social`. See `isBskyHosted()` in `jetstream-sample.ts`.
 
-**`better-sqlite3` in Next.js** — The package is listed in `serverExternalPackages` in `next.config.ts` so Next.js doesn't bundle it.
 
 ## Stack
 
 - Next.js 16 (App Router, Turbopack)
-- SQLite via better-sqlite3
+- Postgres
 - Recharts + react-simple-maps + d3-sankey
 - Tailwind CSS v4
 - TypeScript + tsx for collection scripts

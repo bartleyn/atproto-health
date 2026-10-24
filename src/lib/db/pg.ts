@@ -4,9 +4,15 @@ if (!process.env.DATABASE_URL) {
   throw new Error("DATABASE_URL is not set");
 }
 
+// Long-running collectors set PG_IDLE_TIMEOUT=0 to keep pooled connections open. With the
+// 30s default and a 60s flush interval every flush reconnects, and each new backend has to
+// open PG_VERSION on the external tablespace — the step that fails with EINTR. Short scripts
+// keep the default so idle connections don't hold the process open.
+const idleTimeout = process.env.PG_IDLE_TIMEOUT !== undefined ? Number(process.env.PG_IDLE_TIMEOUT) : 30;
+
 const sql = postgres(process.env.DATABASE_URL, {
   max: 10,
-  idle_timeout: 30,
+  idle_timeout: idleTimeout,
   connect_timeout: 30,
   types: {
     // Return bigint columns as JS number rather than string.

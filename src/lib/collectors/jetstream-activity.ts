@@ -242,7 +242,12 @@ const feedLikeBuffer = new Map<string, number>();
 // Feed like edges: "feed_uri|liker_did" → like createdAt. Keeps the user dimension the
 // daily counter throws away, so feeds.feed_likes stays current after the historical
 // getLikes backfill. Map (not Set) so a repeat within a flush window collapses to one row.
-const feedLikeEdgeBuffer = new Map<string, string>();
+const feedLikeEdgeBuffer = new Map<string, { createdAt: string; rkey: string }>();
+// "liker_did|rkey" → feed_uri for every feed like we hold an rkey for, so an unlike (a
+// delete naming only did + rkey) can be matched without querying PG for every like delete.
+const feedLikeKeys = new Map<string, string>();
+// Unlikes to apply: "feed_uri|liker_did" (the edge PK)
+const feedUnlikeBuffer = new Set<string>();
 
 // Guard so a single pressure flush is in-flight at a time
 let pressureFlushPending = false;
@@ -417,6 +422,7 @@ function snapshotBuffers() {
     feedGenDeletes:  [...feedGenDeleteBuffer],
     feedLikeRows:    [...feedLikeBuffer.entries()],
     feedLikeEdges:   [...feedLikeEdgeBuffer.entries()],
+    feedUnlikes:     [...feedUnlikeBuffer],
     cursorToSave:    lastCursor,
   };
   activityBuffer.clear();
@@ -430,11 +436,12 @@ function snapshotBuffers() {
   feedGenDeleteBuffer.clear();
   feedLikeBuffer.clear();
   feedLikeEdgeBuffer.clear();
+  feedUnlikeBuffer.clear();
   return snapshot;
 }
 
 function logFlush(snapshot: ReturnType<typeof snapshotBuffers>) {
-  const { activityRows, deleteRows, postDeleteRows, starterpackRows, langRows, langStatsRows, collectionRows, profileRows, feedGenRows, feedLikeRows } = snapshot;
+  const { activityRows, deleteRows, postDeleteRows, starterpackRows, langRows, langStatsRows, collectionRows, profileRows, feedGenRows, feedLikeRows, feedUnlikes } = snapshot;
   const postsThisFlush  = langStatsRows.reduce((s, [, v]) => s + v.total, 0);
   const taggedThisFlush = langStatsRows.reduce((s, [, v]) => s + v.tagged, 0);
   totalActivityFlushed    += activityRows.length;
@@ -449,7 +456,7 @@ function logFlush(snapshot: ReturnType<typeof snapshotBuffers>) {
   const tagPct = postsThisFlush > 0 ? ((taggedThisFlush / postsThisFlush) * 100).toFixed(1) : "—";
   const collectionNote = collectionTrackingPaused ? " [collection tracking PAUSED]" : ` collections=${collectionRows.length.toLocaleString()}`;
   console.log(
-    `[activity] Flushed activity=${activityRows.length.toLocaleString()} deletes=${deleteRows.length} types postdel=${postDeleteRows.length.toLocaleString()} dids starterpack=${starterpackRows.length} uris lang=${langRows.length.toLocaleString()} did×lang (${tagPct}% tagged)${collectionNote} feeds=${feedGenRows.length} feed_likes=${feedLikeRows.reduce((s, [, c]) => s + c, 0)} profiles=${profileRows.length.toLocaleString()} | ` +
+    `[activity] Flushed activity=${activityRows.length.toLocaleString()} deletes=${deleteRows.length} types postdel=${postDeleteRows.length.toLocaleString()} dids starterpack=${starterpackRows.length} uris lang=${langRows.length.toLocaleString()} did×lang (${tagPct}% tagged)${collectionNote} feeds=${feedGenRows.length} feed_likes=${feedLikeRows.reduce((s, [, c]) => s + c, 0)} unlikes=${feedUnlikes.length} profiles=${profileRows.length.toLocaleString()} | ` +
     `totals: activity=${totalActivityFlushed.toLocaleString()} deletes=${totalDeletesFlushed.toLocaleString()} postdel=${totalPostDeletesFlushed.toLocaleString()} starterpack=${totalStarterpackFlushed.toLocaleString()} lang_dids=${totalLangDIDsFlushed.toLocaleString()} collections=${totalCollectionsFlushed.toLocaleString()} feed_gens=${totalFeedGensFlushed.toLocaleString()} feed_likes=${totalFeedLikesFlushed.toLocaleString()} profiles=${totalProfilesFlushed.toLocaleString()} | ` +
     `events=${totalEvents.toLocaleString()} | cursor=${snapshot.cursorToSave}`
   );
@@ -485,7 +492,7 @@ async function flush() {
   }
 
   const snapshot = snapshotBuffers();
-  const { activityRows, deleteRows, postDeleteRows, starterpackRows, langRows, langStatsRows, collectionRows, profileRows, feedGenRows, feedGenDeletes, feedLikeRows, feedLikeEdges, cursorToSave } = snapshot;
+  const { activityRows, deleteRows, postDeleteRows, starterpackRows, langRows, langStatsRows, collectionRows, profileRows, feedGenRows, feedGenDeletes, feedLikeRows, feedLikeEdges, feedUnlikes, cursorToSave } = snapshot;
 
   // did_activity_daily — chunked upsert with bitwise OR merge.
   for (let i = 0; i < activityRows.length; i += ACTIVITY_CHUNK_SIZE) {
@@ -610,16 +617,23 @@ async function flush() {
       ON CONFLICT (feed_uri, date) DO UPDATE SET likes = feed_generator_likes_daily.likes + EXCLUDED.likes
     `,
     feedLikeEdges.length > 0 && sql`
-      INSERT INTO feeds.feed_likes ${sql(feedLikeEdges.map(([key, createdAt]) => {
+      INSERT INTO feeds.feed_likes ${sql(feedLikeEdges.map(([key, { createdAt, rkey }]) => {
         const pipe = key.lastIndexOf("|");
         return {
           feed_uri:   key.slice(0, pipe),
           liker_did:  key.slice(pipe + 1),
           created_at: createdAt,
           source:     "jetstream",
+          like_rkey:  rkey,
         };
-      }), "feed_uri", "liker_did", "created_at", "source")}
-      ON CONFLICT (feed_uri, liker_did) DO NOTHING
+      }), "feed_uri", "liker_did", "created_at", "source", "like_rkey")}
+      ON CONFLICT (feed_uri, liker_did) DO UPDATE SET like_rkey = EXCLUDED.like_rkey
+    `,
+    feedUnlikes.length > 0 && sql`
+      DELETE FROM feeds.feed_likes f
+      USING unnest(${feedUnlikes.map(k => k.slice(0, k.lastIndexOf("|")))}::text[],
+                   ${feedUnlikes.map(k => k.slice(k.lastIndexOf("|") + 1))}::text[]) AS u(feed_uri, liker_did)
+      WHERE f.feed_uri = u.feed_uri AND f.liker_did = u.liker_did
     `,
     langStatsRows.filter(([, v]) => v.total > 0).length > 0 && sql`
       INSERT INTO activity.lang_stats ${sql(langStatsRows.filter(([, v]) => v.total > 0).map(([date, { total, tagged }]) => ({
@@ -830,10 +844,13 @@ function connect() {
               feedLikeBuffer.set(lkey, (feedLikeBuffer.get(lkey) ?? 0) + 1);
               // Keep the liker DID too — this is the user×feed matrix the recommender trains on
               const createdAt = evt.commit.record?.createdAt;
-              feedLikeEdgeBuffer.set(
-                `${subjectUri}|${evt.did}`,
-                typeof createdAt === "string" ? createdAt : new Date().toISOString(),
-              );
+              const edgeKey = `${subjectUri}|${evt.did}`;
+              feedLikeEdgeBuffer.set(edgeKey, {
+                createdAt: typeof createdAt === "string" ? createdAt : new Date().toISOString(),
+                rkey:      evt.commit.rkey,
+              });
+              feedUnlikeBuffer.delete(edgeKey);   // a re-like supersedes an unlike in this window
+              feedLikeKeys.set(`${evt.did}|${evt.commit.rkey}`, subjectUri);
             }
           }
         } else if (evt.commit.operation === "update") {
@@ -848,6 +865,18 @@ function connect() {
           if (evt.commit.collection === "app.bsky.feed.post") {
             const pkey = `${evt.did}|${date}`;
             postDeleteBuffer.set(pkey, (postDeleteBuffer.get(pkey) ?? 0) + 1);
+          }
+
+          // Unlikes: remove the edge if this like record was one of our feed likes
+          if (evt.commit.collection === "app.bsky.feed.like") {
+            const likeKey = `${evt.did}|${evt.commit.rkey}`;
+            const feedUri = feedLikeKeys.get(likeKey);
+            if (feedUri) {
+              feedLikeKeys.delete(likeKey);
+              const edgeKey = `${feedUri}|${evt.did}`;
+              // liked and unliked within one flush window: drop the pending insert instead
+              if (!feedLikeEdgeBuffer.delete(edgeKey)) feedUnlikeBuffer.add(edgeKey);
+            }
           }
 
           // Feed generator deletes: mark the URI so we can tombstone the row
@@ -934,6 +963,13 @@ async function main() {
     lastCursor = rows[0] ? Number(rows[0].cursor) : 0;
     if (lastCursor) console.log(`[activity] Resuming from cursor ${lastCursor} (${new Date(lastCursor / 1000).toISOString()})`);
   }
+
+  // Feed likes we can match an unlike against (only rows captured with an rkey)
+  const likeKeyRows = await sql<{ feed_uri: string; liker_did: string; like_rkey: string }[]>`
+    SELECT feed_uri, liker_did, like_rkey FROM feeds.feed_likes WHERE like_rkey IS NOT NULL
+  `;
+  for (const r of likeKeyRows) feedLikeKeys.set(`${r.liker_did}|${r.like_rkey}`, r.feed_uri);
+  console.log(`[activity] Loaded ${feedLikeKeys.size.toLocaleString()} feed-like keys for unlike matching`);
 
   setInterval(() => {
     flushNow()

@@ -1,16 +1,18 @@
 /**
  * Post scorer: buffers app.bsky.feed.post events from the shared Jetstream connection,
- * batch-scores them via the toxic-cicd API, and uploads JSONL to GCS.
+ * batch-scores them via the toxic-cicd API, and uploads rolled, gzipped JSONL to GCS.
  *
  * Called from jetstream-activity.ts:
  *   bufferPost()      — called per post create event in the message handler
  *   flushScorer()     — called from the async flush cycle (scores live buffer + drains DLQ)
- *   scorerShutdown()  — called on SIGINT/SIGTERM to persist unscored posts to DLQ
+ *   scorerShutdown()  — called on SIGINT/SIGTERM to upload the open roll and persist unscored posts to DLQ
  *
  * Env vars:
  *   TOXIC_API_URL      Scorer API base URL
- *   GCS_SCORED_BUCKET  GCS bucket (default: bsky-labeled-posts)
- *   GCS_SCORED_PREFIX  Object prefix (default: posts/)
+ *   GCS_SCORED_BUCKET  GCS bucket (default: tox-labeled-data)
+ *   GCS_ROLLED_PREFIX  Object prefix for rolled parts (default: scored/). Deliberately not
+ *                      GCS_SCORED_PREFIX: .env points that at the legacy posts/ layout, which
+ *                      has to stay frozen for the BigQuery backfill.
  *
  * CLI args:
  *   --min-toxicity <float>   only upload posts where toxicity >= value (default: 0, store all)
@@ -18,7 +20,11 @@
  */
 
 import { Storage } from "@google-cloud/storage";
+import { promisify } from "util";
+import { gzip } from "zlib";
 import sql from "../db/pg";
+
+const gzipAsync = promisify(gzip);
 
 export type BufferedPost = {
   uri: string;
@@ -31,7 +37,25 @@ export type BufferedPost = {
   created_at_us: number;
 };
 
-type ScoredPost = BufferedPost & {
+export type ScoredPost = BufferedPost & {
+  scored_at: string;
+  model_version: string;
+  label: number;
+  scores: Record<string, number>;
+  details: Record<string, string[]>;
+};
+
+// One row as written to GCS, already in toxic_cicd.scored_posts shape so loads need no
+// transform. uri is dropped: it is always at://{did}/app.bsky.feed.post/{rkey}, and the
+// BigQuery view rebuilds it.
+export type StoredPost = {
+  did: string;
+  rkey: string;
+  text: string;
+  langs: string[];
+  reply_to: string | null;
+  quote_of: string | null;
+  created_at: string;
   scored_at: string;
   model_version: string;
   label: number;
@@ -40,9 +64,9 @@ type ScoredPost = BufferedPost & {
 };
 
 // Config
-const TOXIC_API_URL    = process.env.TOXIC_API_URL    ?? "http://15.204.11.179:8080";
-const GCS_SCORED_BUCKET = process.env.GCS_SCORED_BUCKET ?? "bsky-labeled-posts";
-const GCS_SCORED_PREFIX = process.env.GCS_SCORED_PREFIX ?? "posts/";
+const TOXIC_API_URL     = process.env.TOXIC_API_URL     ?? "http://15.204.11.179:8080";
+const GCS_SCORED_BUCKET = process.env.GCS_SCORED_BUCKET ?? "tox-labeled-data";
+const GCS_ROLLED_PREFIX = process.env.GCS_ROLLED_PREFIX ?? "scored/";
 
 const _args = process.argv.slice(2);
 const _minToxIdx = _args.indexOf("--min-toxicity");
@@ -60,7 +84,15 @@ const SCORE_CONCURRENCY = 4;
 const DLQ_SCORE_TIMEOUT_MS  = 50_000;
 const LIVE_SCORE_TIMEOUT_MS = 30_000;
 
-// Max buffer size to prevent blowup of scoring input:output 
+// Rolled uploads: one GCS object per ~25k scored posts (~15 MB raw, ~5 MB gz) instead of
+// one per 50-post chunk (~64k objects/day). Cut on size or age, whichever comes first;
+// a flush runs 80–100 min, so cutting only at flush end would hold ~210k posts in memory
+// and send all of them back through the DLQ if that one upload failed.
+const UPLOAD_ROLL_POSTS  = 25_000;
+const UPLOAD_ROLL_MS     = 10 * 60_000;
+const UPLOAD_RETRY_DELAYS_MS = [2_000, 8_000];
+
+// Max buffer size to prevent blowup of scoring input:output
 const _maxBufIdx = _args.indexOf("--scorer-max-buffer");
 const SCORER_MAX_BUFFER = _maxBufIdx >= 0 ? parseInt(_args[_maxBufIdx + 1], 10) : 250_000;
 
@@ -77,12 +109,23 @@ type LatencySample = {
   ok: boolean;
 };
 
+// id is a JS bigint at runtime (pg.ts maps bigint columns to postgres.BigInt).
+type DlqRef = { id: bigint; attempts: number };
+
+// Scored rows waiting for the next cut, plus what to fall back to if that upload fails:
+// live posts go back to the DLQ unscored, DLQ rows are only deleted once the part is saved.
+type Roll = { rows: StoredPost[]; posts: number; live: BufferedPost[]; dlq: DlqRef[]; openedAt: number };
+const _newRoll = (): Roll => ({ rows: [], posts: 0, live: [], dlq: [], openedAt: 0 });
+
 let scorerBuffer: BufferedPost[] = [];
 let _droppedSinceFlush = 0;
 let _storage: Storage | null = null;
 let _flushing = false;
 let _latencySamples: LatencySample[] = [];
 let _lastPruneAt = 0;
+let _roll: Roll = _newRoll();
+let _partSeq = 0;
+let _uploadFailedSinceFlush = 0;
 
 function getStorage(): Storage {
   if (!_storage) _storage = new Storage();
@@ -113,6 +156,48 @@ async function _runPool<T>(
   await Promise.all(runners);
 }
 
+export function toStoredPost(p: ScoredPost): StoredPost {
+  return {
+    did:           p.did,
+    rkey:          p.rkey,
+    text:          p.text,
+    langs:         p.langs,
+    reply_to:      p.reply_to,
+    quote_of:      p.quote_of,
+    // created_at_us is Jetstream's event time_us, not client data, so it always converts.
+    created_at:    new Date(p.created_at_us / 1000).toISOString(),
+    scored_at:     p.scored_at,
+    model_version: p.model_version,
+    label:         p.label,
+    scores:        p.scores,
+    details:       p.details,
+  };
+}
+
+/**
+ * Gzip and upload one part to {prefix}dt={scored date}/{name}.jsonl.gz. dt is the scored
+ * date because that's the unit the nightly BigQuery load picks up; the table partitions on
+ * created_at, so recovered posts still land on their own day. Retries in memory first:
+ * the rows are already scored, and the fallback (re-scoring via the DLQ) costs far more.
+ *
+ * No Content-Encoding: gzip on purpose. With it GCS decompresses on download, so readers
+ * get plain JSON from a .gz name; BigQuery detects gzip from the bytes either way.
+ */
+export async function uploadScoredPart(rows: StoredPost[], name: string): Promise<void> {
+  const dt   = new Date().toISOString().slice(0, 10);
+  const file = getStorage().bucket(GCS_SCORED_BUCKET).file(`${GCS_ROLLED_PREFIX}dt=${dt}/${name}.jsonl.gz`);
+  const body = await gzipAsync(rows.map(r => JSON.stringify(r)).join("\n"));
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await file.save(body, { contentType: "application/gzip", resumable: false });
+      return;
+    } catch (err) {
+      if (attempt >= UPLOAD_RETRY_DELAYS_MS.length) throw err;
+      await new Promise(r => setTimeout(r, UPLOAD_RETRY_DELAYS_MS[attempt]));
+    }
+  }
+}
+
 export function bufferPost(post: BufferedPost): void {
   if (!SCORER_ENABLED) return;
   if (scorerBuffer.length >= SCORER_MAX_BUFFER) {
@@ -122,9 +207,13 @@ export function bufferPost(post: BufferedPost): void {
   scorerBuffer.push(post);
 }
 
-// On shutdown: save the live buffer to DLQ so nothing is lost.
+// On shutdown: upload whatever is already scored, then save the live buffer to DLQ so
+// nothing is lost. Chunks still in flight at the API when the process exits are not
+// covered (same as before rolled uploads).
 export async function scorerShutdown(): Promise<void> {
-  if (!SCORER_ENABLED || scorerBuffer.length === 0) return;
+  if (!SCORER_ENABLED) return;
+  await _cutRoll();
+  if (scorerBuffer.length === 0) return;
   const posts = scorerBuffer;
   scorerBuffer = [];
   await _enqueueDlq(posts, "process shutdown", 0);
@@ -152,15 +241,34 @@ async function _enqueueDlq(posts: BufferedPost[], error: string, attempts: numbe
   }
 }
 
-async function _scoreAndUpload(
+// A DLQ row that failed again (scoring or its part's upload): back off, or drop it once
+// it has used up its attempts.
+async function _deferDlqRow(row: DlqRef, postCount: number | null, err: unknown): Promise<void> {
+  const newAttempts = row.attempts + 1;
+  if (newAttempts >= DLQ_MAX_ATTEMPTS) {
+    await sql`DELETE FROM activity.score_dlq WHERE id = ${row.id}`;
+    console.warn(`[scorer] DLQ batch ${row.id} exhausted ${DLQ_MAX_ATTEMPTS} retries, dropping ${postCount ?? "its"} posts`);
+    return;
+  }
+  const backoffMs  = Math.min(Math.pow(newAttempts, 2) * 5 * 60_000, 8 * 60 * 60_000);
+  const nextRetry  = new Date(Date.now() + backoffMs).toISOString();
+  const backoffMin = Math.round(backoffMs / 60_000);
+  await sql`
+    UPDATE activity.score_dlq
+    SET attempts = ${newAttempts}, last_error = ${String(err)}, next_retry_at = ${nextRetry}
+    WHERE id = ${row.id}
+  `;
+  console.warn(`[scorer] DLQ batch ${row.id} retry ${newAttempts} failed (next in ${backoffMin}m): ${err}`);
+}
+
+async function _score(
   posts: BufferedPost[],
   timeoutMs = LIVE_SCORE_TIMEOUT_MS,
   source = "live",
-): Promise<void> {
+): Promise<ScoredPost[]> {
   // Score via API
   const t0 = Date.now();
   let apiMs: number | null = null;
-  let uploadMs: number | null = null;
   let ok = false;
   try {
     const res = await fetch(`${TOXIC_API_URL}/score`, {
@@ -182,7 +290,8 @@ async function _scoreAndUpload(
     console.log(`[scorer] API: ${posts.length} posts scored in ${apiMs}ms`);
 
     const scoredAt = new Date().toISOString();
-    const scored: ScoredPost[] = posts.map((post, i) => ({
+    ok = true;
+    return posts.map((post, i) => ({
       ...post,
       scored_at:     scoredAt,
       model_version: data.model_version,
@@ -190,37 +299,84 @@ async function _scoreAndUpload(
       scores:        data.results[i]?.scores ?? {},
       details:       data.results[i]?.details ?? {},
     }));
-
-    const toUpload = MIN_TOXICITY > 0
-      ? scored.filter(p => (p.scores["toxicity"] ?? 0) >= MIN_TOXICITY)
-      : scored;
-
-    if (toUpload.length > 0) {
-      // Write Hive-partitioned JSONL: posts/dt=YYYY-MM-DD/hr=HH/batch-{ms}.jsonl
-      const now    = new Date();
-      const dt     = now.toISOString().slice(0, 10);
-      const hr     = String(now.getUTCHours()).padStart(2, "0");
-      const blob   = `${GCS_SCORED_PREFIX}dt=${dt}/hr=${hr}/batch-${Date.now()}.jsonl`;
-      const jsonl  = toUpload.map(p => JSON.stringify(p)).join("\n");
-
-      const tUpload = Date.now();
-      await getStorage().bucket(GCS_SCORED_BUCKET).file(blob).save(jsonl, {
-        contentType: "application/x-ndjson",
-      });
-      uploadMs = Date.now() - tUpload;
-    }
-    ok = true;
   } finally {
-      // store latency sample for monitoring
+      // store latency sample for monitoring (uploads get their own "upload" samples per cut)
       _latencySamples.push({
       ts:        new Date(t0).toISOString(),
       source,
       posts:     posts.length,
       api_ms:    apiMs,
-      upload_ms: uploadMs,
+      upload_ms: null,
       total_ms:  Date.now() - t0,
       ok,
     });
+  }
+}
+
+function _addToRoll(scored: ScoredPost[], live: BufferedPost[], dlq: DlqRef[]): void {
+  if (_roll.openedAt === 0) _roll.openedAt = Date.now();
+  for (const p of scored) {
+    if (MIN_TOXICITY > 0 && (p.scores["toxicity"] ?? 0) < MIN_TOXICITY) continue;
+    _roll.rows.push(toStoredPost(p));
+  }
+  _roll.posts += scored.length;
+  for (const p of live) _roll.live.push(p);
+  for (const r of dlq) _roll.dlq.push(r);
+}
+
+async function _maybeCut(): Promise<void> {
+  if (_roll.posts >= UPLOAD_ROLL_POSTS ||
+      (_roll.openedAt > 0 && Date.now() - _roll.openedAt >= UPLOAD_ROLL_MS)) {
+    await _cutRoll();
+  }
+}
+
+/**
+ * Upload the open roll as one part. Never throws: on failure the live posts go back to the
+ * DLQ (to be re-scored) and the roll's DLQ rows get their retry bumped instead of deleted.
+ * The roll is swapped out synchronously, so concurrent pool workers can't cut it twice.
+ */
+async function _cutRoll(): Promise<void> {
+  const roll = _roll;
+  if (roll.posts === 0) return;
+  _roll = _newRoll();
+
+  const t0 = Date.now();
+  let ok = false;
+  try {
+    if (roll.rows.length > 0) await uploadScoredPart(roll.rows, `part-${t0}-${_partSeq++}`);
+    ok = true;
+  } catch (err) {
+    console.warn(`[scorer] Upload of ${roll.posts} scored posts failed after retries; re-queueing: ${err}`);
+    _uploadFailedSinceFlush += roll.live.length;
+    try {
+      await _enqueueDlq(roll.live, `upload failed: ${err}`, 0);
+      for (const r of roll.dlq) await _deferDlqRow(r, null, `upload failed: ${err}`);
+    } catch (dlqErr) {
+      console.error(`[scorer] Could not re-queue ${roll.live.length} posts after failed upload; they are lost: ${dlqErr}`);
+    }
+  } finally {
+    _latencySamples.push({
+      ts:        new Date(t0).toISOString(),
+      source:    "upload",
+      posts:     roll.posts,
+      api_ms:    null,
+      upload_ms: Date.now() - t0,
+      total_ms:  Date.now() - t0,
+      ok,
+    });
+  }
+
+  // Only now is it safe to drop the DLQ rows: their posts are durably in GCS. If this
+  // DELETE fails they get scored again later, which the BigQuery dedupe view absorbs.
+  if (ok && roll.dlq.length > 0) {
+    try {
+      // postgres.js can't serialize a bigint[] parameter, so pass strings and cast.
+      await sql`DELETE FROM activity.score_dlq WHERE id = ANY(${roll.dlq.map(r => String(r.id))}::bigint[])`;
+      console.log(`[scorer] DLQ: ${roll.dlq.length} batches recovered`);
+    } catch (err) {
+      console.warn(`[scorer] Uploaded ${roll.dlq.length} DLQ batches but could not delete them (will re-score): ${err}`);
+    }
   }
 }
 
@@ -228,7 +384,7 @@ async function _drainDlq(): Promise<void> {
   if (DLQ_DRAIN_LIMIT <= 0) return;
   const now = new Date().toISOString();
 
-  const rows = await sql<{ id: number; posts_json: string; attempts: number }[]>`
+  const rows = await sql<{ id: bigint; posts_json: string; attempts: number }[]>`
     SELECT id, posts_json, attempts
     FROM activity.score_dlq
     WHERE next_retry_at <= ${now} AND attempts < ${DLQ_MAX_ATTEMPTS}
@@ -238,51 +394,27 @@ async function _drainDlq(): Promise<void> {
 
   if (rows.length === 0) return;
 
-  // Drained through the same worker pool as live scoring. 
+  // Drained through the same worker pool as live scoring. A row is scored whole before it
+  // joins the roll, so it never straddles two parts and is deleted exactly once (_cutRoll).
   await _runPool(rows, SCORE_CONCURRENCY, async row => {
     const posts = JSON.parse(row.posts_json) as BufferedPost[];
-
     try {
-      let scored = 0;
-      try {
-        for (let i = 0; i < posts.length; i += SCORE_BATCH_SIZE) {
-          await _scoreAndUpload(posts.slice(i, i + SCORE_BATCH_SIZE), DLQ_SCORE_TIMEOUT_MS, "dlq");
-          scored = Math.min(i + SCORE_BATCH_SIZE, posts.length);
+      const scored: ScoredPost[] = [];
+      for (let i = 0; i < posts.length; i += SCORE_BATCH_SIZE) {
+        for (const p of await _score(posts.slice(i, i + SCORE_BATCH_SIZE), DLQ_SCORE_TIMEOUT_MS, "dlq")) {
+          scored.push(p);
         }
-      } catch (err) {
-        // re-queue only what is still unscored
-        if (scored > 0) {
-          await sql`DELETE FROM activity.score_dlq WHERE id = ${row.id}`;
-          await _enqueueDlq(posts.slice(scored), String(err), row.attempts + 1);
-          console.warn(`[scorer] DLQ batch ${row.id} partial: ${scored}/${posts.length} scored, ${posts.length - scored} re-queued: ${err}`);
-          return;
-        }
-        throw err;
       }
-      await sql`DELETE FROM activity.score_dlq WHERE id = ${row.id}`;
-      console.log(`[scorer] DLQ batch ${row.id} retry succeeded (${posts.length} posts)`);
+      _addToRoll(scored, [], [{ id: row.id, attempts: row.attempts }]);
+      await _maybeCut();
     } catch (err) {
-      const newAttempts = row.attempts + 1;
-      if (newAttempts >= DLQ_MAX_ATTEMPTS) {
-        await sql`DELETE FROM activity.score_dlq WHERE id = ${row.id}`;
-        console.warn(`[scorer] DLQ batch ${row.id} exhausted ${DLQ_MAX_ATTEMPTS} retries, dropping ${posts.length} posts`);
-      } else {
-        const backoffMs  = Math.min(Math.pow(newAttempts, 2) * 5 * 60_000, 8 * 60 * 60_000);
-        const nextRetry  = new Date(Date.now() + backoffMs).toISOString();
-        const backoffMin = Math.round(backoffMs / 60_000);
-        await sql`
-          UPDATE activity.score_dlq
-          SET attempts = ${newAttempts}, last_error = ${String(err)}, next_retry_at = ${nextRetry}
-          WHERE id = ${row.id}
-        `;
-        console.warn(`[scorer] DLQ batch ${row.id} retry ${newAttempts} failed (next in ${backoffMin}m): ${err}`);
-      }
+      await _deferDlqRow(row, posts.length, err);
     }
   });
 }
 
 /**
-* store metrics in pg 
+* store metrics in pg
 */
 async function _writeMetrics(row: {
   ts: string; buffered: number; succeeded: number; failed: number;
@@ -324,6 +456,7 @@ async function _writeMetrics(row: {
 export async function flushScorer(): Promise<void> {
   if (!SCORER_ENABLED || _flushing) return;
   _flushing = true;
+  _uploadFailedSinceFlush = 0;
   const startedAt = Date.now();
   let buffered = 0;
   let succeeded = 0;
@@ -338,7 +471,6 @@ export async function flushScorer(): Promise<void> {
     dropped = _droppedSinceFlush;
     _droppedSinceFlush = 0;
     buffered = posts.length;
-    if (posts.length === 0) return;
 
     const chunks: BufferedPost[][] = [];
     for (let i = 0; i < posts.length; i += SCORE_BATCH_SIZE) {
@@ -347,20 +479,34 @@ export async function flushScorer(): Promise<void> {
     batches = chunks.length;
 
     await _runPool(chunks, SCORE_CONCURRENCY, async chunk => {
+      let scored: ScoredPost[];
       try {
-        await _scoreAndUpload(chunk);
-        succeeded += chunk.length;
+        scored = await _score(chunk);
       } catch (err) {
         await _enqueueDlq(chunk, String(err), 0);
         failed += chunk.length;
         console.warn(`[scorer] Chunk failed, queued ${chunk.length} posts to DLQ: ${err}`);
+        return;
       }
+      succeeded += chunk.length;
+      _addToRoll(scored, chunk, []);
+      await _maybeCut();
     });
 
-    const filtered = MIN_TOXICITY > 0 ? ` (min-toxicity=${MIN_TOXICITY})` : "";
-    const failedNote = failed > 0 ? `, ${failed} to DLQ` : "";
-    const dropNote = dropped > 0 ? `, dropped ${dropped} over cap ${SCORER_MAX_BUFFER}` : "";
-    console.log(`[scorer] Flushed ${succeeded} posts${filtered}${failedNote}${dropNote} (${chunks.length} batches)`);
+    // Every flush ends on a cut, so DLQ rows claimed by this flush are settled (uploaded and
+    // deleted, or deferred) before the next flush's _drainDlq can select them again.
+    await _cutRoll();
+
+    // Scored but lost their upload: they're back in the DLQ, so count them as failed.
+    succeeded -= _uploadFailedSinceFlush;
+    failed    += _uploadFailedSinceFlush;
+
+    if (posts.length > 0) {
+      const filtered = MIN_TOXICITY > 0 ? ` (min-toxicity=${MIN_TOXICITY})` : "";
+      const failedNote = failed > 0 ? `, ${failed} to DLQ` : "";
+      const dropNote = dropped > 0 ? `, dropped ${dropped} over cap ${SCORER_MAX_BUFFER}` : "";
+      console.log(`[scorer] Flushed ${succeeded} posts${filtered}${failedNote}${dropNote} (${chunks.length} batches)`);
+    }
 
   } finally {
     // catch the DLQ drain speed too

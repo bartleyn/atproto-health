@@ -43,8 +43,13 @@
 
 import WebSocket from "ws";
 import { createHash } from "crypto";
+import type { Sql, TransactionSql } from "postgres";
 import sql from "../db/pg";
+
 import { bufferPost, flushScorer, scorerShutdown } from "./post-scorer";
+
+// Transaction handle carrying the pool's custom types (bigint), so ${BigInt(...)} still typechecks.
+type Tx = TransactionSql<typeof sql extends Sql<infer T> ? T : never>;
 
 // Bitmask assignments for activity_types column.
 // Bits 13+ are synthetic — derived from record content, not the collection name alone.
@@ -342,9 +347,15 @@ function blobCid(blob: unknown): string | null {
   return typeof link === "string" && link.length > 0 ? link : null;
 }
 
+// Postgres TEXT can't hold U+0000 ("invalid byte sequence for encoding UTF8: 0x00"), and one
+// such value fails the whole flush transaction. Records are user-controlled, so strip it.
+function stripNul(s: string): string {
+  return s.includes("\u0000") ? s.replace(/\u0000/g, "") : s;
+}
+
 function asString(v: unknown, maxLen: number): string | null {
   if (typeof v !== "string") return null;
-  const t = v.trim();
+  const t = stripNul(v).trim();
   return t.length > 0 ? t.slice(0, maxLen) : null;
 }
 
@@ -356,7 +367,7 @@ function recordProfile(did: string, record: Record<string, unknown> | undefined,
 
   const labels = record.labels as { values?: { val?: unknown }[] } | undefined;
   const selfLabels = Array.isArray(labels?.values)
-    ? labels.values.map(v => v?.val).filter((v): v is string => typeof v === "string")
+    ? labels.values.map(v => v?.val).filter((v): v is string => typeof v === "string").map(stripNul)
     : [];
   const createdAt = asString(record.createdAt, 64);
   const parsedCreatedAt = createdAt ? new Date(createdAt) : null;
@@ -440,6 +451,48 @@ function snapshotBuffers() {
   return snapshot;
 }
 
+// Put a failed flush's snapshot back into the live buffers so the next flush retries it.
+// Without this a failed write silently dropped the window: the next successful flush saved
+// a later cursor, so the events were never replayed (hours lost during PG outages).
+// The live buffers hold events NEWER than the snapshot, so merge per buffer semantics:
+// counters add, bitmasks OR, and for last-write-wins state the live entry is kept.
+type Snapshot = ReturnType<typeof snapshotBuffers>;
+function addInto(buf: Map<string, number>, rows: [string, number][]) {
+  for (const [k, n] of rows) buf.set(k, (buf.get(k) ?? 0) + n);
+}
+function restoreSnapshot(s: Snapshot) {
+  for (const [k, bits] of s.activityRows) activityBuffer.set(k, (activityBuffer.get(k) ?? 0) | bits);
+  addInto(deleteBuffer, s.deleteRows);
+  addInto(postDeleteBuffer, s.postDeleteRows);
+  addInto(starterpackBuffer, s.starterpackRows);
+  addInto(langBuffer, s.langRows);
+  addInto(collectionBuffer, s.collectionRows);
+  addInto(feedLikeBuffer, s.feedLikeRows);
+  for (const [date, v] of s.langStatsRows) {
+    const cur = langStatsBuffer.get(date) ?? { total: 0, tagged: 0 };
+    langStatsBuffer.set(date, { total: cur.total + v.total, tagged: cur.tagged + v.tagged });
+  }
+  // Append-only versions: older ones go back in front to keep observation order. Pushed in
+  // a loop, not spread: after a long outage the arrays can exceed the call-argument limit.
+  const newerProfiles = profileBuffer.splice(0, profileBuffer.length);
+  for (const r of s.profileRows) profileBuffer.push(r);
+  for (const r of newerProfiles) profileBuffer.push(r);
+  for (const [uri, meta] of s.feedGenRows) if (!feedGenBuffer.has(uri)) feedGenBuffer.set(uri, meta);
+  for (const uri of s.feedGenDeletes) feedGenDeleteBuffer.add(uri);
+  // A later like or unlike of the same edge supersedes the snapshot's.
+  for (const [k, v] of s.feedLikeEdges) {
+    if (!feedLikeEdgeBuffer.has(k) && !feedUnlikeBuffer.has(k)) feedLikeEdgeBuffer.set(k, v);
+  }
+  for (const k of s.feedUnlikes) if (!feedLikeEdgeBuffer.has(k)) feedUnlikeBuffer.add(k);
+}
+
+// Errors that will fail identically on every retry (bad value, constraint violation).
+// Restoring those would wedge the collector on one poison row, so they're dropped instead.
+function isDataError(err: unknown): boolean {
+  const code = (err as { code?: unknown })?.code;
+  return typeof code === "string" && /^2[23]/.test(code);
+}
+
 function logFlush(snapshot: ReturnType<typeof snapshotBuffers>) {
   const { activityRows, deleteRows, postDeleteRows, starterpackRows, langRows, langStatsRows, collectionRows, profileRows, feedGenRows, feedLikeRows, feedUnlikes } = snapshot;
   const postsThisFlush  = langStatsRows.reduce((s, [, v]) => s + v.total, 0);
@@ -492,6 +545,23 @@ async function flush() {
   }
 
   const snapshot = snapshotBuffers();
+  try {
+    // One transaction per flush: a failure mid-way rolls back every chunk, so restoring the
+    // snapshot and retrying can't double-count the additive tables.
+    await sql.begin(tx => writeSnapshot(tx, snapshot));
+  } catch (err) {
+    if (isDataError(err)) {
+      console.error(`[activity] flush rejected by PG (${(err as { code?: string }).code}); dropping this window's snapshot`);
+    } else {
+      restoreSnapshot(snapshot);
+    }
+    throw err;
+  }
+
+  logFlush(snapshot);
+}
+
+async function writeSnapshot(tx: Tx, snapshot: Snapshot) {
   const { activityRows, deleteRows, postDeleteRows, starterpackRows, langRows, langStatsRows, collectionRows, profileRows, feedGenRows, feedGenDeletes, feedLikeRows, feedLikeEdges, feedUnlikes, cursorToSave } = snapshot;
 
   // did_activity_daily — chunked upsert with bitwise OR merge.
@@ -500,8 +570,8 @@ async function flush() {
       const pipe = entry.indexOf("|");
       return { did: entry.slice(0, pipe), date: entry.slice(pipe + 1), activity_types: bits };
     });
-    await sql`
-      INSERT INTO activity.did_activity_daily ${sql(chunk, "did", "date", "activity_types")}
+    await tx`
+      INSERT INTO activity.did_activity_daily ${tx(chunk, "did", "date", "activity_types")}
       ON CONFLICT (did, date) DO UPDATE SET
         activity_types = did_activity_daily.activity_types | EXCLUDED.activity_types
     `;
@@ -517,8 +587,8 @@ async function flush() {
       const pipe = key.indexOf("|");
       return { did: key.slice(0, pipe), lang: key.slice(pipe + 1), post_count: count, last_seen: now };
     });
-    await sql`
-      INSERT INTO activity.did_langs ${sql(chunk, "did", "lang", "post_count", "last_seen")}
+    await tx`
+      INSERT INTO activity.did_langs ${tx(chunk, "did", "lang", "post_count", "last_seen")}
       ON CONFLICT (did, lang) DO UPDATE SET
         post_count = did_langs.post_count + EXCLUDED.post_count,
         last_seen  = EXCLUDED.last_seen
@@ -535,8 +605,8 @@ async function flush() {
       const pipe = entry.indexOf("|");
       return { did: entry.slice(0, pipe), date: entry.slice(pipe + 1), count };
     });
-    await sql`
-      INSERT INTO activity.post_deletes_daily ${sql(chunk, "did", "date", "count")}
+    await tx`
+      INSERT INTO activity.post_deletes_daily ${tx(chunk, "did", "date", "count")}
       ON CONFLICT (did, date) DO UPDATE SET count = post_deletes_daily.count + EXCLUDED.count
     `;
     if (i + ACTIVITY_CHUNK_SIZE < postDeleteRows.length) {
@@ -549,8 +619,8 @@ async function flush() {
   // chunk is smaller than ACTIVITY_CHUNK_SIZE to stay under the 65,534-parameter limit.
   for (let i = 0; i < profileRows.length; i += PROFILE_CHUNK_SIZE) {
     const chunk = profileRows.slice(i, i + PROFILE_CHUNK_SIZE);
-    await sql`
-      INSERT INTO activity.profile_records ${sql(chunk,
+    await tx`
+      INSERT INTO activity.profile_records ${tx(chunk,
         "did", "observed_at", "operation", "source", "display_name", "description",
         "avatar_cid", "banner_cid", "joined_via_starterpack_uri", "pinned_post_uri",
         "self_labels", "record_created_at", "content_hash")}
@@ -568,8 +638,8 @@ async function flush() {
       const [collection, did, date] = key.split("|");
       return { collection, did, date, event_count: count };
     });
-    await sql`
-      INSERT INTO activity.collection_activity ${sql(chunk, "collection", "did", "date", "event_count")}
+    await tx`
+      INSERT INTO activity.collection_activity ${tx(chunk, "collection", "did", "date", "event_count")}
       ON CONFLICT (collection, did, date) DO UPDATE SET
         event_count = collection_activity.event_count + EXCLUDED.event_count
     `;
@@ -579,23 +649,23 @@ async function flush() {
       const pipe = key.indexOf("|");
       return { starterpack_uri: key.slice(0, pipe), date: key.slice(pipe + 1), count };
     });
-    await sql`
-      INSERT INTO activity.starterpack_joins_daily ${sql(chunk, "starterpack_uri", "date", "count")}
+    await tx`
+      INSERT INTO activity.starterpack_joins_daily ${tx(chunk, "starterpack_uri", "date", "count")}
       ON CONFLICT (starterpack_uri, date) DO UPDATE SET count = starterpack_joins_daily.count + EXCLUDED.count
     `;
   }
 
   // Small tables (bounded by event-type / distinct-feed / date cardinality) — fire in parallel.
   await Promise.all([
-    deleteRows.length > 0 && sql`
-      INSERT INTO activity.delete_events_daily ${sql(deleteRows.map(([key, count]) => {
+    deleteRows.length > 0 && tx`
+      INSERT INTO activity.delete_events_daily ${tx(deleteRows.map(([key, count]) => {
         const pipe = key.indexOf("|");
         return { date: key.slice(0, pipe), event_type: key.slice(pipe + 1), count };
       }), "date", "event_type", "count")}
       ON CONFLICT (date, event_type) DO UPDATE SET count = delete_events_daily.count + EXCLUDED.count
     `,
-    feedGenRows.length > 0 && sql`
-      INSERT INTO activity.feed_generators ${sql(feedGenRows.map(([uri, meta]) => ({
+    feedGenRows.length > 0 && tx`
+      INSERT INTO activity.feed_generators ${tx(feedGenRows.map(([uri, meta]) => ({
         uri, creator_did: meta.creatorDid, display_name: meta.displayName,
         description: meta.description, service_did: meta.serviceDid, first_seen: meta.firstSeen,
       })), "uri", "creator_did", "display_name", "description", "service_did", "first_seen")}
@@ -605,19 +675,19 @@ async function flush() {
         service_did  = COALESCE(EXCLUDED.service_did,  feed_generators.service_did),
         deleted_at   = NULL
     `,
-    feedGenDeletes.length > 0 && sql`
+    feedGenDeletes.length > 0 && tx`
       UPDATE activity.feed_generators SET deleted_at = NOW()
       WHERE uri = ANY(${feedGenDeletes})
     `,
-    feedLikeRows.length > 0 && sql`
-      INSERT INTO activity.feed_generator_likes_daily ${sql(feedLikeRows.map(([key, count]) => {
+    feedLikeRows.length > 0 && tx`
+      INSERT INTO activity.feed_generator_likes_daily ${tx(feedLikeRows.map(([key, count]) => {
         const pipe = key.lastIndexOf("|");
         return { feed_uri: key.slice(0, pipe), date: key.slice(pipe + 1), likes: count };
       }), "feed_uri", "date", "likes")}
       ON CONFLICT (feed_uri, date) DO UPDATE SET likes = feed_generator_likes_daily.likes + EXCLUDED.likes
     `,
-    feedLikeEdges.length > 0 && sql`
-      INSERT INTO feeds.feed_likes ${sql(feedLikeEdges.map(([key, { createdAt, rkey }]) => {
+    feedLikeEdges.length > 0 && tx`
+      INSERT INTO feeds.feed_likes ${tx(feedLikeEdges.map(([key, { createdAt, rkey }]) => {
         const pipe = key.lastIndexOf("|");
         return {
           feed_uri:   key.slice(0, pipe),
@@ -629,14 +699,14 @@ async function flush() {
       }), "feed_uri", "liker_did", "created_at", "source", "like_rkey")}
       ON CONFLICT (feed_uri, liker_did) DO UPDATE SET like_rkey = EXCLUDED.like_rkey
     `,
-    feedUnlikes.length > 0 && sql`
+    feedUnlikes.length > 0 && tx`
       DELETE FROM feeds.feed_likes f
       USING unnest(${feedUnlikes.map(k => k.slice(0, k.lastIndexOf("|")))}::text[],
                    ${feedUnlikes.map(k => k.slice(k.lastIndexOf("|") + 1))}::text[]) AS u(feed_uri, liker_did)
       WHERE f.feed_uri = u.feed_uri AND f.liker_did = u.liker_did
     `,
-    langStatsRows.filter(([, v]) => v.total > 0).length > 0 && sql`
-      INSERT INTO activity.lang_stats ${sql(langStatsRows.filter(([, v]) => v.total > 0).map(([date, { total, tagged }]) => ({
+    langStatsRows.filter(([, v]) => v.total > 0).length > 0 && tx`
+      INSERT INTO activity.lang_stats ${tx(langStatsRows.filter(([, v]) => v.total > 0).map(([date, { total, tagged }]) => ({
         date, total_posts: total, tagged_posts: tagged, updated_at: now,
       })), "date", "total_posts", "tagged_posts", "updated_at")}
       ON CONFLICT (date) DO UPDATE SET
@@ -646,16 +716,14 @@ async function flush() {
     `,
   ].filter(Boolean));
 
-  // Save cursor only after all data writes succeed — ensures we can replay safely on failure.
+  // Cursor commits in the same transaction as the data, so it never gets ahead of what was written.
   if (cursorToSave > 0) {
-    await sql`
+    await tx`
       INSERT INTO activity.jetstream_cursor (id, cursor, updated_at)
       VALUES (1, ${BigInt(cursorToSave)}, NOW())
       ON CONFLICT (id) DO UPDATE SET cursor = EXCLUDED.cursor, updated_at = EXCLUDED.updated_at
     `;
   }
-
-  logFlush(snapshot);
 }
 
 // Serialize all flushes. flush() is fired from four places (timer, pressure-flush,
@@ -829,8 +897,8 @@ function connect() {
             const uri = `at://${evt.did}/app.bsky.feed.generator/${evt.commit.rkey}`;
             feedGenBuffer.set(uri, {
               creatorDid:  evt.did,
-              displayName: evt.commit.record?.displayName ?? null,
-              description: evt.commit.record?.description ?? null,
+              displayName: typeof evt.commit.record?.displayName === "string" ? stripNul(evt.commit.record.displayName) : null,
+              description: typeof evt.commit.record?.description === "string" ? stripNul(evt.commit.record.description) : null,
               serviceDid:  typeof evt.commit.record?.did === "string" ? evt.commit.record.did : null,
               firstSeen:   date,
             });

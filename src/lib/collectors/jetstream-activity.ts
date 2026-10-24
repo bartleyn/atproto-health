@@ -29,8 +29,8 @@
  *
  * Env vars for post scorer:
  *   TOXIC_API_URL      Fly.io API base URL (default: https://toxic-cicd.fly.dev)
- *   GCS_SCORED_BUCKET  GCS bucket (default: bsky-labeled-posts)
- *   GCS_SCORED_PREFIX  Object prefix (default: posts/)
+ *   GCS_SCORED_BUCKET  GCS bucket (default: tox-labeled-data)
+ *   GCS_ROLLED_PREFIX  Object prefix for rolled .jsonl.gz parts (default: scored/)
  *
  * Usage:
  *   npm run collect:activity

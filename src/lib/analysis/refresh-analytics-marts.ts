@@ -21,6 +21,10 @@ function addDays(dateStr: string, n: number): string {
   return d.toISOString().slice(0, 10);
 }
 
+// Today (UTC) is still being collected, so every mart stops at yesterday —
+// otherwise a morning run publishes a half-day DAU as the headline number.
+const LAST_FULL_DAY = addDays(new Date().toISOString().slice(0, 10), -1);
+
 async function refreshWauByCohort() {
   const [{ max_week }] = await sql<{ max_week: string | null }[]>`
     SELECT MAX(week_start)::text AS max_week FROM analysis.wau_by_cohort
@@ -67,7 +71,7 @@ async function refreshWauByCohort() {
       JOIN analysis.cohort_base p ON d.did = p.did
       LEFT JOIN analysis.excluded_dids ex ON d.did = ex.did
       WHERE ex.did IS NULL
-        AND d.date >= ${since}
+        AND d.date BETWEEN ${since} AND ${LAST_FULL_DAY}
       GROUP BY week_start, age_bucket
     `;
     console.log(`  insert: ${ins.count} rows`);
@@ -115,7 +119,7 @@ async function refreshDauMauDaily() {
         FROM activity.did_activity_daily d
         LEFT JOIN analysis.excluded_dids ex ON d.did = ex.did
         WHERE ex.did IS NULL
-          AND d.date >= ${since}
+          AND d.date BETWEEN ${since} AND ${LAST_FULL_DAY}
         GROUP BY d.date
       ) dau
       CROSS JOIN LATERAL (
@@ -147,12 +151,12 @@ async function refreshRetentionCohorts() {
   const [{ max_creation }] = await sql<{ max_creation: string | null }[]>`
     SELECT MAX(creation_date)::text AS max_creation FROM analysis.retention_cohorts
   `;
-  const [{ min_date, max_date }] = await sql<{ min_date: string; max_date: string }[]>`
-    SELECT MIN(date) AS min_date, MAX(date) AS max_date FROM activity.did_activity_daily
+  const [{ min_date }] = await sql<{ min_date: string }[]>`
+    SELECT MIN(date) AS min_date FROM activity.did_activity_daily
   `;
-  // D7 requires 7 days of activity data past creation, so the last eligible
-  // creation_date is max_date - 7.
-  const boundEnd = addDays(max_date, -7);
+  // D7 requires 7 full days of activity data past creation, so the last
+  // eligible creation_date is LAST_FULL_DAY - 7.
+  const boundEnd = addDays(LAST_FULL_DAY, -7);
   const since = max_creation ? addDays(max_creation, -RETENTION_REFRESH_DAYS) : min_date;
 
   console.log(`retention_cohorts: recomputing creation dates since ${max_creation ?? "(full history — first run)"} (from ${since} through ${boundEnd})`);

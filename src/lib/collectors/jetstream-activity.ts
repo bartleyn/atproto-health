@@ -239,7 +239,7 @@ let olderProfileHash = new Map<string, string>();
 const LAST_PROFILE_HASH_MAX = 200_000;
 
 // Feed generator buffer: uri → { creatorDid, displayName, description, serviceDid, firstSeen }
-const feedGenBuffer = new Map<string, { creatorDid: string; displayName: string | null; description: string | null; serviceDid: string | null; firstSeen: string }>();
+const feedGenBuffer = new Map<string, { creatorDid: string; displayName: string | null; description: string | null; serviceDid: string | null; firstSeen: string; skyfeedBuilder: unknown }>();
 // Feed generator deletes: set of URIs that received a delete event this flush window
 const feedGenDeleteBuffer = new Set<string>();
 // Feed like buffer: "feed_uri|date" → count (only likes targeting a feed generator)
@@ -351,6 +351,30 @@ function blobCid(blob: unknown): string | null {
 // such value fails the whole flush transaction. Records are user-controlled, so strip it.
 function stripNul(s: string): string {
   return s.includes("\u0000") ? s.replace(/\u0000/g, "") : s;
+}
+
+// Drop U+0000 from every string in a JSON value (jsonb rejects it) without touching escapes.
+function stripNulDeep(v: unknown): unknown {
+  if (typeof v === "string") return stripNul(v);
+  if (Array.isArray(v)) return v.map(stripNulDeep);
+  if (v && typeof v === "object") {
+    return Object.fromEntries(Object.entries(v).map(([k, x]) => [stripNul(k), stripNulDeep(x)]));
+  }
+  return v;
+}
+
+// Buffer one feed generator record (create or update).
+function recordFeedGen(did: string, rkey: string, record: Record<string, unknown> | undefined, date: string) {
+  const str = (v: unknown) => (typeof v === "string" ? stripNul(v) : null);
+  const builder = record?.skyfeedBuilder;
+  feedGenBuffer.set(`at://${did}/app.bsky.feed.generator/${rkey}`, {
+    creatorDid:     did,
+    displayName:    str(record?.displayName),
+    description:    str(record?.description),
+    serviceDid:     typeof record?.did === "string" ? record.did : null,
+    firstSeen:      date,
+    skyfeedBuilder: builder && typeof builder === "object" ? stripNulDeep(builder) : null,
+  });
 }
 
 function asString(v: unknown, maxLen: number): string | null {
@@ -665,15 +689,17 @@ async function writeSnapshot(tx: Tx, snapshot: Snapshot) {
       ON CONFLICT (date, event_type) DO UPDATE SET count = delete_events_daily.count + EXCLUDED.count
     `,
     feedGenRows.length > 0 && tx`
-      INSERT INTO activity.feed_generators ${tx(feedGenRows.map(([uri, meta]) => ({
+      INSERT INTO activity.feed_generators ${tx([...feedGenRows].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([uri, meta]) => ({   // uri order: same lock order as the backfills
         uri, creator_did: meta.creatorDid, display_name: meta.displayName,
         description: meta.description, service_did: meta.serviceDid, first_seen: meta.firstSeen,
-      })), "uri", "creator_did", "display_name", "description", "service_did", "first_seen")}
+        skyfeed_builder: tx.json(meta.skyfeedBuilder as never),
+      })), "uri", "creator_did", "display_name", "description", "service_did", "first_seen", "skyfeed_builder")}
       ON CONFLICT (uri) DO UPDATE SET
-        display_name = COALESCE(EXCLUDED.display_name, feed_generators.display_name),
-        description  = COALESCE(EXCLUDED.description,  feed_generators.description),
-        service_did  = COALESCE(EXCLUDED.service_did,  feed_generators.service_did),
-        deleted_at   = NULL
+        display_name    = COALESCE(EXCLUDED.display_name, feed_generators.display_name),
+        description     = COALESCE(EXCLUDED.description,  feed_generators.description),
+        service_did     = COALESCE(EXCLUDED.service_did,  feed_generators.service_did),
+        skyfeed_builder = EXCLUDED.skyfeed_builder,   -- every event carries the whole record
+        deleted_at      = NULL
     `,
     feedGenDeletes.length > 0 && tx`
       UPDATE activity.feed_generators SET deleted_at = NOW()
@@ -893,16 +919,7 @@ function connect() {
           }
 
           // Feed generator creates
-          if (collection === "app.bsky.feed.generator") {
-            const uri = `at://${evt.did}/app.bsky.feed.generator/${evt.commit.rkey}`;
-            feedGenBuffer.set(uri, {
-              creatorDid:  evt.did,
-              displayName: typeof evt.commit.record?.displayName === "string" ? stripNul(evt.commit.record.displayName) : null,
-              description: typeof evt.commit.record?.description === "string" ? stripNul(evt.commit.record.description) : null,
-              serviceDid:  typeof evt.commit.record?.did === "string" ? evt.commit.record.did : null,
-              firstSeen:   date,
-            });
-          }
+          if (collection === "app.bsky.feed.generator") recordFeedGen(evt.did, evt.commit.rkey, evt.commit.record, date);
 
           // Feed likes: only count likes whose subject is a feed generator
           if (collection === "app.bsky.feed.like") {
@@ -924,6 +941,10 @@ function connect() {
         } else if (evt.commit.operation === "update") {
           if (evt.commit.collection === "app.bsky.actor.profile") {
             recordProfile(evt.did, evt.commit.record, "update");
+          }
+          // an edited feed (new name, description or SkyFeed recipe)
+          if (evt.commit.collection === "app.bsky.feed.generator") {
+            recordFeedGen(evt.did, evt.commit.rkey, evt.commit.record, date);
           }
         } else if (evt.commit.operation === "delete") {
           // Record-level delete by collection

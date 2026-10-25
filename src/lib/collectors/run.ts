@@ -12,6 +12,7 @@ import sql, { withDbRetry } from "../db/pg";
 import { fetchPdsDirectory, type PdsDirectoryEntry } from "./pds-directory";
 import { geolocatePdses, type GeoIpResult } from "./geo-ip";
 import { fetchAllPdsDetails, type PdsDetails, type RepoInfo } from "./pds-details";
+import { recordRepoStatuses } from "./repo-status";
 
 const args = new Set(process.argv.slice(2));
 const geoOnly   = args.has("--geo");
@@ -214,20 +215,8 @@ async function main() {
             is_online = EXCLUDED.is_online, in_directory = 1
         `, "pds_repo_status_snapshots");
 
-        if (details.nonActive && details.nonActive.length > 0) {
-          // Batched to stay under Postgres's 65,534-parameter limit (4 cols/row).
-          for (let i = 0; i < details.nonActive.length; i += DID_BATCH_SIZE) {
-            const batch = details.nonActive.slice(i, i + DID_BATCH_SIZE);
-            await withDbRetry(() => sql`
-              INSERT INTO plc.did_repo_status ${sql(
-                batch.map(r => ({ did: r.did, status: r.status, pds_url: pdsUrl, scanned_at: scannedAt })),
-                "did", "status", "pds_url", "scanned_at"
-              )}
-              ON CONFLICT (did) DO UPDATE SET
-                status = EXCLUDED.status, pds_url = EXCLUDED.pds_url, scanned_at = EXCLUDED.scanned_at
-            `, "did_repo_status");
-          }
-        }
+        // a PDS whose listing failed outright has no statusCounts: nothing to record or clear
+        if (c) await recordRepoStatuses(pdsUrl, details.nonActive ?? [], scannedAt, !details.partial);
       };
 
       detailResults = await fetchAllPdsDetails(toScan, { onRepo, onPdsDone });

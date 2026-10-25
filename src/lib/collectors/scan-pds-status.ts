@@ -19,6 +19,7 @@ import sql, { withDbRetry } from "../db/pg";
 import { junkPdsFilter } from "../db/plc-queries";
 import { scanPdsRepos, type RepoInfo, type StatusCounts, type NonActiveRepo } from "./pds-repos";
 import { describeServer } from "./pds-details";
+import { recordRepoStatuses } from "./repo-status";
 
 const DEFAULT_CONCURRENCY = 5;
 
@@ -280,21 +281,8 @@ async function main() {
         version = COALESCE(EXCLUDED.version, plc.pds_repo_status_snapshots.version)
     `, "pds_repo_status_snapshots");
 
-    if (nonActive.length > 0) {
-      // Batched to stay under Postgres's 65,534-parameter limit (4 cols/row).
-      for (let i = 0; i < nonActive.length; i += DID_BATCH_SIZE) {
-        const batch = nonActive.slice(i, i + DID_BATCH_SIZE);
-        await withDbRetry(() => sql`
-          INSERT INTO plc.did_repo_status ${sql(
-            batch.map(r => ({ did: r.did, status: r.status, pds_url: pdsUrl, scanned_at: scannedAt })),
-            "did", "status", "pds_url", "scanned_at"
-          )}
-          ON CONFLICT (did) DO UPDATE SET
-            status = EXCLUDED.status, pds_url = EXCLUDED.pds_url, scanned_at = EXCLUDED.scanned_at
-        `, "did_repo_status");
-      }
-      totalNonActive += nonActive.length;
-    }
+    await recordRepoStatuses(pdsUrl, nonActive, scannedAt, !partial);
+    totalNonActive += nonActive.length;
 
     if (counts) {
       totalActive  += counts.active;

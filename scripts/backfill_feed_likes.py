@@ -29,7 +29,9 @@ Usage:
   python3 scripts/backfill_feed_likes.py --min-likes 100     # high-mass feeds only
 """
 
-from __future__ import annotations   # system python3 here is 3.9 — PEP 604 unions in annotations
+from __future__ import (
+    annotations,  # system python3 here is 3.9 — PEP 604 unions in annotations
+)
 
 import argparse
 import json
@@ -41,7 +43,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime
 
 import psycopg2
 import psycopg2.extras
@@ -99,6 +101,65 @@ def load_pool(feeds_dir: str, min_likes: int, liveness: str | None):
     ]
     pool.sort(key=lambda t: -t[1])       # high-mass feeds first: fail early on the ones that matter
     return pool
+
+
+def get_counts(uris: list, timeout: int) -> dict:
+    """AppView likeCount for up to 25 feed URIs; unresolvable feeds are omitted."""
+    url = (f"{APPVIEW}/xrpc/app.bsky.feed.getFeedGenerators?"
+           + urllib.parse.urlencode([("feeds", u) for u in uris]))
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = json.load(resp)
+    return {f["uri"]: f.get("likeCount", 0) for f in data.get("feeds", [])}
+
+
+def load_registry_pool(conn, min_likes: int, rps: float, timeout: int, limit: int | None):
+    """Return [(uri, like_count)] for live feeds in activity.feed_generators, biggest first."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT uri FROM activity.feed_generators WHERE deleted_at IS NULL ORDER BY uri")
+        uris = [r[0] for r in cur.fetchall()]
+    if limit:
+        uris = uris[:limit]
+    interval = 1.0 / rps if rps > 0 else 0.0
+    counts: dict[str, int] = {}
+    t_start = time.monotonic()
+    for i in range(0, len(uris), 25):
+        if _stop:
+            break
+        t0 = time.monotonic()
+        for attempt in range(5):
+            try:
+                counts.update(get_counts(uris[i:i + 25], timeout))
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code != 429 and exc.code < 500:
+                    print(f"  counts HTTP {exc.code} at batch {i // 25}; skipping batch", flush=True)
+                    break
+                time.sleep(5 * 2 ** attempt)
+            except Exception as exc:
+                print(f"  counts {type(exc).__name__} at batch {i // 25}; retrying", flush=True)
+                time.sleep(5 * 2 ** attempt)
+        if (i // 25) % 400 == 0:
+            done = i + 25
+            print(f"  counts: {min(done, len(uris)):,}/{len(uris):,} feeds "
+                  f"({time.monotonic() - t_start:.0f}s)", flush=True)
+        elapsed = time.monotonic() - t0
+        if interval > elapsed:
+            time.sleep(interval - elapsed)
+    print(f"[backfill] registry: {len(uris):,} live feeds, {len(counts):,} resolved, "
+          f"{sum(1 for c in counts.values() if c > 0):,} with likes")
+    pool = [(u, c) for u, c in counts.items() if c >= min_likes]
+    pool.sort(key=lambda t: -t[1])
+    return pool
+
+
+def worklist_gap(conn, pool) -> tuple[int, int, int]:
+    """(feeds never backfilled, their expected likes, pages to fetch) for a pool."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT feed_uri FROM feeds.feed_likes_backfill WHERE status = 'done'")
+        done = {r[0] for r in cur.fetchall()}
+    todo = [(u, c) for u, c in pool if u not in done]
+    return len(todo), sum(c for _, c in todo), sum(max(1, math.ceil(c / PAGE_LIMIT)) for _, c in todo)
 
 
 def seed_worklist(conn, pool) -> int:
@@ -230,6 +291,10 @@ def drain_feed(conn, feed_uri, start_cursor, pages, seen, args) -> tuple[str, st
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--source", choices=("registry", "sidecar"), default="registry",
+                    help="feed pool: live feeds in activity.feed_generators with AppView counts "
+                         "(default), or the feed-explorer jsonl sidecar")
+    ap.add_argument("--limit-registry", type=int, help="only count the first N registry feeds (smoke test)")
     ap.add_argument("--min-likes", type=int, default=1,
                     help="skip feeds below this like_count (default 1; 0-like feeds yield no edges)")
     ap.add_argument("--liveness", default="LIVE",
@@ -250,21 +315,29 @@ def main():
     if not db:
         sys.exit("DATABASE_URL not set (source .env)")
 
-    pool = load_pool(args.feeds_dir, args.min_likes, args.liveness or None)
+    conn = psycopg2.connect(db)
+    signal.signal(signal.SIGINT, _handle_sigint)
+
+    if args.source == "registry":
+        pool = load_registry_pool(conn, args.min_likes, args.rps, args.timeout, args.limit_registry)
+        if _stop:
+            sys.exit("[backfill] interrupted while counting; nothing written")
+    else:
+        pool = load_pool(args.feeds_dir, args.min_likes, args.liveness or None)
     est_pages = sum(max(1, math.ceil(c / PAGE_LIMIT)) for _, c in pool)
     est_edges = sum(c for _, c in pool)
     print(f"[backfill] pool: {len(pool):,} feeds | ~{est_edges:,} edges | ~{est_pages:,} pages")
+    n_new, new_edges, new_pages = worklist_gap(conn, pool)
+    print(f"[backfill] not yet backfilled: {n_new:,} feeds | ~{new_edges:,} edges | ~{new_pages:,} pages")
     if args.rps > 0:
-        print(f"[backfill] est. {est_pages / args.rps / 3600:.1f} h at {args.rps} req/s")
+        print(f"[backfill] est. {new_pages / args.rps / 3600:.1f} h at {args.rps} req/s")
 
     if args.dry_run:
         for uri, c in pool[:10]:
             print(f"  {c:>8,}  {uri}")
         print(f"  ... ({len(pool):,} total)")
+        conn.close()
         return
-
-    conn = psycopg2.connect(db)
-    signal.signal(signal.SIGINT, _handle_sigint)
 
     n = seed_worklist(conn, pool)
     print(f"[backfill] worklist seeded ({n:,} rows)")

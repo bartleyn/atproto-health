@@ -7,10 +7,11 @@
  * Idempotent: upserts on (did, label) primary key.
  *
  * Usage:
- *   npm run collect:skywatch              # Skywatch labeler (default)
+ *   npm run collect:skywatch              # Skywatch labeler (default; subscribeLabels stream)
  *   npm run collect:skywatch -- --reset
- *   npm run collect:bsky-mod             # Bluesky moderation labeler
+ *   npm run collect:bsky-mod             # Bluesky moderation labeler (subscribeLabels stream)
  *   npm run collect:bsky-mod -- --reset
+ *   npm run collect:bsky-mod -- --stream-from 0   # replay the stream from a given seq
  *
  *   # Backfill mode — recover labels the normal scan skips.
  *   # The labeler's queryLabels?uriPatterns=* pagination occasionally returns a
@@ -25,18 +26,25 @@
  *   npm run collect:skywatch -- --backfill --step 100         # smaller step (safer/slower)
  */
 
+import WebSocket from "ws";
 import sql from "../db/pg";
 
 const LABELERS: Record<string, {
   endpoint: string; did: string;
   table: string; cursorTable: string;
   labelFilter?: string[];
+  // "stream" = incremental runs read subscribeLabels instead of queryLabels?uriPatterns=*
+  mode?: "query" | "stream";
+  // current-state table for MOD_ACTIONS; negations delete rows
+  actionTable?: string;
 }> = {
   skywatch: {
     endpoint:    "https://ozone.skywatch.blue",
     did:         "did:plc:e4elbtctnfqocyfcml6h2lf7",
     table:       "plc.skywatch_labels",
     cursorTable: "plc.skywatch_labels_cursor",
+    // wildcard queryLabels returns 400 "temporarily disabled" since ~2026-10-16
+    mode:        "stream",
   },
   "bsky-mod": {
     endpoint:    "https://mod.bsky.app",
@@ -44,6 +52,9 @@ const LABELERS: Record<string, {
     table:       "plc.bsky_mod_labels",
     cursorTable: "plc.bsky_mod_labels_cursor",
     labelFilter: ["spam", "impersonation", "inauthentic", "security", "engagement-farming"],
+    // wildcard queryLabels returns 400 "temporarily disabled" since 2026-10-08
+    mode:        "stream",
+    actionTable: "plc.bsky_mod_actions",
   },
   // Behavioral/activity labeler: 25 "inform"-severity activity labels (post/reply volume, 24/7
   // posting gaps, follow/unfollow churn, profile-metadata churn, same-URL spam). No labelFilter =
@@ -60,6 +71,10 @@ const LABELERS: Record<string, {
 const PAGE_SIZE = 50;
 const REQUEST_TIMEOUT_MS = 30_000;
 const COURTESY_DELAY_MS = 100;
+const STREAM_FLUSH_FRAMES = 1000;
+const STREAM_IDLE_MS = 15_000;
+const STREAM_CAUGHT_UP_MS = 60_000;
+const MOD_ACTIONS = ["!takedown", "!suspend", "!hide"];
 
 const args = process.argv.slice(2);
 const labelerName = args.includes("--labeler")
@@ -77,6 +92,7 @@ interface RawLabel {
   uri: string;
   val: string;
   cts: string;
+  exp?: string;
   neg?: boolean;
 }
 
@@ -90,7 +106,7 @@ async function fetchPage(cursor?: string, limit = PAGE_SIZE): Promise<QueryLabel
   if (cursor) params.set("cursor", cursor);
   const url = `${config.endpoint}/xrpc/com.atproto.label.queryLabels?${params}`;
   const res = await fetch(url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
-  if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}: ${(await res.text()).slice(0, 300)}`);
   return res.json() as Promise<QueryLabelsResponse>;
 }
 
@@ -118,14 +134,17 @@ async function fetchPageResilient(cursor: string | undefined, maxLimit: number):
 
 /** Filter a raw page to the labels we store and upsert them. Returns # inserted. */
 async function ingestLabels(labels: RawLabel[]): Promise<number> {
-  const batch: { did: string; label: string; labeled_at: string }[] = [];
+  await ingestActions(labels);
+  // latest occurrence per (did, label); ON CONFLICT can't touch a row twice in one INSERT
+  const byKey = new Map<string, { did: string; label: string; labeled_at: string }>();
   for (const label of labels) {
     if (!label.uri.startsWith("did:")) continue;
     if (label.val.startsWith("!") || label.neg) continue;
     if (label.src !== config.did) continue;
     if (config.labelFilter && !config.labelFilter.includes(label.val)) continue;
-    batch.push({ did: label.uri, label: label.val, labeled_at: label.cts });
+    byKey.set(`${label.uri}|${label.val}`, { did: label.uri, label: label.val, labeled_at: label.cts });
   }
+  const batch = [...byKey.values()];
   if (batch.length > 0) {
     const values = batch.map((_, i) => `($${i * 3 + 1}, $${i * 3 + 2}, $${i * 3 + 3})`).join(", ");
     const params = batch.flatMap(r => [r.did, r.label, r.labeled_at]);
@@ -136,6 +155,34 @@ async function ingestLabels(labels: RawLabel[]): Promise<number> {
     );
   }
   return batch.length;
+}
+
+/** Apply account MOD_ACTIONS to actionTable in order: a label upserts its row, a negation deletes it. */
+async function ingestActions(labels: RawLabel[]) {
+  if (!config.actionTable) return;
+  const latest = new Map<string, RawLabel>();
+  for (const label of labels) {
+    if (!label.uri.startsWith("did:") || label.src !== config.did || !MOD_ACTIONS.includes(label.val)) continue;
+    latest.set(`${label.uri}|${label.val}`, label);
+  }
+  const all = [...latest.values()];
+  const applied = all.filter(l => !l.neg), negated = all.filter(l => l.neg);
+  if (applied.length > 0) {
+    const values = applied.map((_, i) => `($${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}, $${i * 4 + 4}::timestamptz)`).join(", ");
+    await sql.unsafe(
+      `INSERT INTO ${config.actionTable} (did, action, labeled_at, expires_at) VALUES ${values}
+       ON CONFLICT (did, action) DO UPDATE SET labeled_at = EXCLUDED.labeled_at, expires_at = EXCLUDED.expires_at`,
+      applied.flatMap(l => [l.uri, l.val, l.cts, l.exp ?? null])
+    );
+  }
+  if (negated.length > 0) {
+    const values = negated.map((_, i) => `($${i * 2 + 1}, $${i * 2 + 2})`).join(", ");
+    await sql.unsafe(
+      `DELETE FROM ${config.actionTable} t USING (VALUES ${values}) AS v(did, action)
+       WHERE t.did = v.did AND t.action = v.action`,
+      negated.flatMap(l => [l.uri, l.val])
+    );
+  }
 }
 
 /**
@@ -274,6 +321,100 @@ async function subjectSweep(opts: { before: string; after: string; concurrency: 
   console.log(`  Upserted: ${inserted.toLocaleString()}`);
 }
 
+async function saveCursor(cursor: string) {
+  await sql.unsafe(
+    `INSERT INTO ${config.cursorTable} (id, cursor, updated_at) VALUES (1, $1, NOW())
+     ON CONFLICT (id) DO UPDATE SET cursor = EXCLUDED.cursor, updated_at = NOW()`,
+    [cursor]
+  );
+}
+
+/**
+ * Replay subscribeLabels from `cursor` until caught up to now (or idle), then close.
+ * Stream seq shares the queryLabels cursor space, so the stored cursor resumes exactly.
+ */
+async function streamLabels(cursor: string | undefined): Promise<{ fetched: number; inserted: number; caughtUp: boolean }> {
+  // cborg is ESM-only; tsx runs this file as CJS
+  const { decode, decodeFirst } = await import("cborg");
+  const url = `${config.endpoint.replace(/^http/, "ws")}/xrpc/com.atproto.label.subscribeLabels` +
+    (cursor ? `?cursor=${cursor}` : "");
+  const startedAt = Date.now();
+  let fetched = 0, inserted = 0, frames = 0, caughtUp = false;
+  let pending: RawLabel[] = [];
+  let lastSeq: number | undefined;
+  let chain: Promise<void> = Promise.resolve();
+
+  const ws = new WebSocket(url);
+
+  // serialised ingest + cursor save; the stream pauses until it lands
+  function flush(): Promise<void> {
+    const labels = pending, seq = lastSeq;
+    pending = [];
+    chain = chain.then(async () => {
+      inserted += await ingestLabels(labels);
+      if (seq !== undefined) await saveCursor(String(seq));
+    });
+    return chain;
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    let idle: ReturnType<typeof setTimeout> | undefined;
+    let done = false;
+    const finish = (err?: Error) => {
+      if (done) return;
+      done = true;
+      clearTimeout(idle);
+      ws.terminate();
+      flush().then(() => (err ? reject(err) : resolve()), reject);
+    };
+    const armIdle = () => {
+      clearTimeout(idle);
+      idle = setTimeout(() => finish(), STREAM_IDLE_MS);
+    };
+
+    ws.on("open", armIdle);
+    ws.on("error", (err) => finish(err));
+    ws.on("close", () => finish());
+    ws.on("message", (data: Buffer) => {
+      if (done) return;
+      armIdle();
+      const [header, rest] = decodeFirst(data);
+      const body = decode(rest);
+
+      if (header.op === -1) return finish(new Error(`subscribeLabels error ${body.error}: ${body.message}`));
+      if (header.t === "#info") {
+        if (body.name === "OutdatedCursor") {
+          return finish(new Error(`cursor ${cursor} is older than the labeler retains; labels were missed. ` +
+            `Run with --reset to rebuild. (${body.message ?? ""})`));
+        }
+        console.log(`  info: ${body.name} ${body.message ?? ""}`);
+        return;
+      }
+      if (header.t !== "#labels") return;
+
+      frames++;
+      lastSeq = body.seq;
+      for (const label of body.labels as RawLabel[]) {
+        fetched++;
+        pending.push(label);
+        if (Date.parse(label.cts) >= startedAt - STREAM_CAUGHT_UP_MS) caughtUp = true;
+      }
+
+      if (caughtUp) return finish();
+      if (frames % STREAM_FLUSH_FRAMES === 0) {
+        ws.pause();
+        flush().then(() => ws.resume(), (err) => finish(err));
+      }
+      if (frames % 50_000 === 0) {
+        console.log(`  Frames: ${frames.toLocaleString()} | Fetched: ${fetched.toLocaleString()} | ` +
+          `Inserted: ${inserted.toLocaleString()} | Seq: ${lastSeq}`);
+      }
+    });
+  });
+
+  return { fetched, inserted, caughtUp };
+}
+
 function getArg(name: string): string | undefined {
   const i = args.indexOf(name);
   return i >= 0 ? args[i + 1] : undefined;
@@ -312,20 +453,29 @@ async function main() {
   if (reset) {
     await sql.unsafe(`DELETE FROM ${config.table}`);
     await sql.unsafe(`DELETE FROM ${config.cursorTable}`);
+    if (config.actionTable) await sql.unsafe(`DELETE FROM ${config.actionTable}`);
     console.log(`Reset: cleared existing labels and cursor.\n`);
   }
 
   const cursorRows = await sql.unsafe<{ cursor: string }[]>(
     `SELECT cursor FROM ${config.cursorTable} WHERE id = 1`
   );
-  let cursor: string | undefined = cursorRows[0]?.cursor;
+  let cursor: string | undefined = getArg("--stream-from") ?? cursorRows[0]?.cursor;
   console.log(cursor ? `Resuming from cursor: ${cursor}` : `Starting from beginning`);
 
   let totalFetched = 0;
   let totalInserted = 0;
   let pages = 0;
 
-  while (true) {
+  if (config.mode === "stream") {
+    console.log(`Mode:     subscribeLabels stream`);
+    const r = await streamLabels(cursor);
+    totalFetched = r.fetched;
+    totalInserted = r.inserted;
+    if (!r.caughtUp) console.log(`  Stream went idle before reaching now; next run resumes from the saved cursor.`);
+  }
+
+  while (config.mode !== "stream") {
     const page = await fetchPage(cursor);
     pages++;
 

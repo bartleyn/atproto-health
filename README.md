@@ -6,7 +6,11 @@ All rendering is server-side. Data lives in a local Postgres database populated 
 
 ## Pages
 
-**/** — PDS infrastructure overview. World map of server locations, breakdown by hosting provider, software version distribution, user count concentration, and a Jetstream firehose sample showing federation activity (real cross-party federation vs. Bluesky-internal cross-shard traffic).
+**/** — Landing page linking to the analysis charts and a decentralization explainer.
+
+**/overview** — PDS infrastructure overview. World map of server locations, breakdown by hosting provider, software version distribution, user count concentration, and a Jetstream firehose sample showing federation activity (real cross-party federation vs. Bluesky-internal cross-shard traffic).
+
+**/decentralization** — Short explainer on what AT Protocol decentralization means in practice (PDS, DIDs, portability).
 
 **/longevity** — PDS and account age. When each PDS launched, account cohort distribution over time, weekly account creation trends. Useful for understanding how old the indie PDS ecosystem actually is.
 

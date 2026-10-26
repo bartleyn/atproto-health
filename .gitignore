@@ -41,3 +41,12 @@ next-env.d.ts
 *.csv.zip
 /logs/
 /analysis-output/
+
+# python
+__pycache__/
+*.pyc
+
+# compiled jetstream extractor (go build -o scripts/jetstream/extract ./scripts/jetstream)
+scripts/jetstream/extract
+scripts/jetstream/extract-linux-amd64
+scripts/jetstream/nohup.out

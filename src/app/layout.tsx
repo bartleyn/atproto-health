@@ -18,6 +18,9 @@ export default function RootLayout({
         <nav className="px-8 py-3">
           <div className="max-w-6xl mx-auto flex justify-center gap-8 text-sm">
             <Link href="/" className="text-gray-400 underline hover:text-gray-100 transition-colors">
+              Home
+            </Link>
+            <Link href="/overview" className="text-gray-400 underline hover:text-gray-100 transition-colors">
               PDS Geography
             </Link>
             <Link href="/migrations" className="text-gray-400 underline hover:text-gray-100 transition-colors">
@@ -28,6 +31,9 @@ export default function RootLayout({
             </Link>
             <Link href="/analytics" className="text-gray-400 underline hover:text-gray-100 transition-colors">
               Analytics
+            </Link>
+            <Link href="/decentralization" className="text-gray-400 underline hover:text-gray-100 transition-colors">
+              Decentralization
             </Link>
           </div>
         </nav>

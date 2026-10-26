@@ -98,6 +98,12 @@ function dayDiff(start: string, end: string): number {
 }
 
 // L-plot ("active_days_histogram") window. By default it's the rolling
+// [today − daysBack, today) window used elsewhere. --window-end (and optionally
+// --window-start) pin it to a fixed time-range so the window can sit entirely
+// AFTER a cohort's creation — then every such cohort has had the full window
+// available to accumulate active days, instead of newer cohorts being
+// mechanically capped at a partial window. Half-open [start, end): a length of
+// `daysBack` days gives exactly `daysBack` possible active days.
 const winEndIdx = args.indexOf("--window-end");
 const histWindowEnd = winEndIdx >= 0 ? args[winEndIdx + 1] : RUN_DATE;
 const winStartIdx = args.indexOf("--window-start");
@@ -139,6 +145,10 @@ function report(title: string, filename: string, rows: Record<string, unknown>[]
 }
 
 // ── Shared SQL fragments ──────────────────────────────────────────────────────
+// AGE_BUCKET/COHORT_TABLE/ACTIVITY_COLS are raw SQL text spliced into query
+// strings below (not postgres.js tagged-template params) — all values come
+// from trusted, JS-computed scalars, never user input, matching the trust
+// model of the original SQLite version this was ported from.
 
 const newAcctCutoff = daysAgoStr(14);  // accounts created in the last 14 days
 
@@ -154,6 +164,8 @@ const AGE_BUCKET = `CASE
   ELSE                                         '8. 2026 Q2 (Apr-Jun)'
 END`;
 
+// Postgres requires boolean operands in CASE WHEN / WHERE — SQLite let the raw
+// bitwise-AND integer stand in for a boolean. `!= 0` makes it explicit.
 const ACTIVITY_COLS = `
   COUNT(*)::int                                                       AS total,
   SUM((activity_types & 1 != 0)::int)::int                            AS posted,
@@ -167,11 +179,14 @@ if (bskyOnly) console.log(`Cohort filter: bsky.network origin or current`);
 if (cohortEnd) console.log(`Cohort end:    created_at < ${cohortEnd}`);
 
 async function main() {
-  // Reserve a single connection for the whole run
+  // Reserve a single connection for the whole run: temp tables (and the
+  // explicit BEGIN/COMMIT below) are connection-scoped in Postgres, unlike
+  // SQLite's single implicit connection, so every query here must run on
+  // this same reserved connection rather than the pooled `sql` client.
   const db = await sql.reserve();
   try {
 
-// Pre-materialise the active-user window so each query doesn't re-scan 100M rows.
+// Pre-materialise the active-user window so each query doesn't re-scan 89M rows.
 // active_window_clean: unique (did, activity_types) pairs for the window, spam/bots excluded.
 // active_window_all: same but no exclusion filter (for label-analysis queries).
 console.log(`Pre-materialising active-user window…`);
@@ -194,6 +209,7 @@ console.log(`  done.\n`);
 
 // When --bsky-only: pre-materialise a filtered cohort (currently on bsky.network OR
 // originally created there, covering accounts that have since migrated away).
+// plc.plc_account_creations holds the creation-time PDS; cohort_base holds the current PDS.
 let COHORT_TABLE = "analysis.cohort_base";
 if (bskyOnly) {
   console.log(`Pre-materialising bsky_cohort…`);
@@ -385,6 +401,16 @@ report(`Active Days Distribution x Age Bucket`, `active_days_by_age_${daysBack}d
 }
 
 // ── 5b. Active-days histogram ("L plot") × cohort ────────────────────────────
+// Exact (not bucketed) count of users for each integer active-day count
+// 1..histWindowDays in the window, split by age cohort. Plotting users vs.
+// active_days typically yields an L-shaped curve: most users active very few
+// days, a long thin tail of highly active users. Long format (one row per
+// age_bucket × active_days) so each cohort is its own series; a '~ all cohorts'
+// series reproduces the un-split curve. Joins COHORT_TABLE for the bucket, so
+// (like the other cohort queries) this is scoped to activated accounts and
+// honours --bsky-only / --cohort-end. The window is pinnable to a fixed
+// time-range via --window-end/--window-start (see histWindow* above) so every
+// cohort gets the full window rather than newer cohorts being partial-capped.
 
 if (shouldRun("active_days_histogram")) {
 console.log(`L-plot window: ${histWindowStart} – ${histWindowEnd} (${histWindowDays} days, half-open)`);
@@ -507,6 +533,8 @@ report(`Action Rates by Cohort`, `action_rates_by_cohort_${daysBack}d.csv`, acti
 
 // ── 8. Non-active account status by cohort ───────────────────────────────────
 
+// Query 8 runs against the plc schema directly (no activity join needed), so it
+// uses inline CASE expressions — but they must stay in sync with AGE_BUCKET above.
 const AGE_BUCKET_PLC = AGE_BUCKET;  // same expression, same `p` alias
 
 if (shouldRun("non_active")) {
@@ -944,6 +972,8 @@ report(
 // ── 19. User recency distribution ─────────────────────────────────────────────
 // Days since each user's last active day in the 90-day window, by cohort.
 // Shows which cohorts are staying engaged vs going dormant.
+// Users with no activity in 90d are not in activity_90d and are excluded —
+// this measures active-user recency, not churn (see cohort_activation for churn).
 
 if (shouldRun("recency")) {
 const recencyDist = await db.unsafe(`
@@ -977,6 +1007,8 @@ report(
 // ── 20. New-user follow/like funnel ─────────────────────────────────────────
 // For each day in the window, counts new-account DIDs (created within the
 // window) whose per-day activity_types show: follow-only vs follow+like.
+// A user can appear in different buckets on different days as their behavior
+// evolves, which makes this useful as a daily funnel progression view.
 
 if (shouldRun("new_user_follow_like")) {
 const newUserFollowLike = await db.unsafe(`
@@ -1035,6 +1067,8 @@ const dauMauSeries = await db.unsafe(`
       COUNT(DISTINCT d.did)::int AS mau
     FROM trend_dates td
     JOIN activity.did_activity_daily d
+      -- compare in text space (not d.date::date) so the btree index on the
+      -- raw text date column can be used for the range scan
       ON d.date BETWEEN (td.date::date - 27)::text AND td.date
     LEFT JOIN analysis.excluded_dids ex ON d.did = ex.did
     WHERE ex.did IS NULL
@@ -1054,7 +1088,9 @@ report(`DAU / MAU Time Series (last ${historyDays} days)`, `dau_mau_${historyDay
 }
 
 // ── 21b. DAU/MAU snapshot ─────────────────────────────────────────────────────
-// Point-in-time health check: DAU on the most recent collected day, and MAU as 28d rolling
+// Point-in-time health check: DAU on the most recent collected day, and MAU as
+// the trailing 28-day window ending that day. Anchored to MAX(date) rather than
+// CURRENT_DATE so it's still meaningful if the collector has fallen behind.
 
 if (shouldRun("dau_mau_snapshot")) {
 const [dauMauSnapshot] = await db.unsafe(`
@@ -1091,6 +1127,10 @@ report("DAU/MAU Snapshot", "dau_mau_snapshot.csv", [dauMauSnapshot]);
 
 // ── 22. WAU by cohort ─────────────────────────────────────────────────────────
 // Weekly active users per age cohort — distinct DIDs active in each week.
+// Uses historyDays lookback; groups by the legacy Monday-anchored week start
+// (one week behind the ISO week — preserved as-is from the original SQLite
+// `date(d.date, 'weekday 1', '-7 days')` formula; see query 25 for the
+// non-shifted version used elsewhere).
 
 if (shouldRun("wau_by_cohort")) {
 const wauByCohort = await db.unsafe(`
@@ -1116,6 +1156,8 @@ report(
 
 // ── 23. MAU by cohort ─────────────────────────────────────────────────────────
 // Monthly active users per age cohort — distinct DIDs active in each calendar month.
+// Trailing 28-day rolling windows would be too expensive across 89M rows;
+// calendar month is fast and interpretable for charting.
 
 if (shouldRun("mau_by_cohort")) {
 const mauByCohort = await db.unsafe(`
@@ -1143,6 +1185,7 @@ report(
 // For each creation week in the lookback window, what % of new accounts showed
 // any activity within their first 28 days?
 // Only includes creation weeks where 28 days have elapsed (complete windows).
+// Uses historyDays + 28 as the scan start for warmup.
 
 if (shouldRun("new_user_activation_28d")) {
 const activationStart = daysAgoStr(historyDays + 28);

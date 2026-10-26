@@ -61,10 +61,14 @@ function report(title: string, filename: string, rows: Record<string, unknown>[]
 }
 
 async function main() {
+  // Earliest and latest dates with activity data — used to bound the cohort window.
+  // did_activity_daily.date is a text 'YYYY-MM-DD' column, so MIN/MAX sort lexically
+  // (identical to date order for ISO strings).
   const [{ min_date, max_date }] = await sql<{ min_date: string; max_date: string }[]>`
     SELECT MIN(date) AS min_date, MAX(date) AS max_date FROM activity.did_activity_daily
   `;
 
+  // D7 requires data 7 days out, so the last valid cohort day is max_date - 7.
   const lastValidCohortDay = new Date(max_date);
   lastValidCohortDay.setDate(lastValidCohortDay.getDate() - 7);
   const END_DATE = lastValidCohortDay.toISOString().slice(0, 10);
@@ -78,6 +82,10 @@ async function main() {
   }
 
   // ── 1. D1/D3/D7 retention by cohort day × PDS type ───────────────────────────
+  // SQLite date()/'+N day' arithmetic ported to Postgres date math: created_at::date
+  // gives a date, (date + N) stays a date, and ::text compares against the text
+  // activity.did_activity_daily.date column. Both UNION branches cast to identical
+  // types (::int / ::float8) — Postgres UNION requires matching column types.
 
   const retentionByDay = await sql<Record<string, unknown>[]>`
     WITH cohorts AS (

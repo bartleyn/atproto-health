@@ -11,6 +11,12 @@
  *   cohort_base    — pre-joined activated accounts with pds_type precomputed
  *                    (replaces the repeated plc_account_creations × did_in_repo × filters CTE)
  *
+ * Unlike the original SQLite version there is no cross-DB ATTACH: plc, activity
+ * and analysis are all schemas in the same Postgres database, so the build is a
+ * single in-database query rather than the old two-step (join then DELETE) dance.
+ * New tables are built under *_new names and atomically swapped in inside one
+ * transaction, so live readers (dashboard, analysis scripts) never observe a
+ * half-built or missing table.
  */
 
 import sql from "../db/pg";
@@ -42,6 +48,8 @@ examples:
 const cohortEndIdx = args.indexOf("--cohort-end");
 const cohortEnd = cohortEndIdx >= 0 ? args[cohortEndIdx + 1] : null;
 
+// cohortEnd is a JS-computed/CLI scalar spliced into raw SQL, never user input
+// from a request — matches the trust model of activity-crosstabs.ts.
 const cohortEndFilter = cohortEnd ? `AND p.created_at < '${cohortEnd}'` : "";
 
 async function main() {
@@ -51,6 +59,14 @@ async function main() {
   await sql.unsafe(`CREATE SCHEMA IF NOT EXISTS analysis`);
 
   // ── excluded_dids ───────────────────────────────────────────────────────────
+  // Takendown/deactivated repos (did_repo_status) plus spam/farm/inauthenticity
+  // labels from both Skywatch and bsky moderation.
+  //   - Original set was Skywatch 'spam'/'impersonation' only.
+  //   - Expanded 2026-06-17 to catch account-farm accounts that hold an active
+  //     repo status (so did_repo_status misses them) but are flagged by labelers.
+  //   - Deliberately omits the broad/noisier 'suspect-inauthentic' and
+  //     'bulk-following' (higher false-positive rate). Add them here to widen.
+  // UNION (not UNION ALL) dedupes, so the PRIMARY KEY add is safe.
   console.log("Building excluded_dids...");
   await sql.unsafe(`
     DROP TABLE IF EXISTS analysis.excluded_dids_new;
@@ -73,7 +89,9 @@ async function main() {
 
   // ── cohort_base ─────────────────────────────────────────────────────────────
   // Activated accounts: created (plc_account_creations) and present in a repo
-  // (did_in_repo), with spam/suspended DIDs anti-joined out.
+  // (did_in_repo), with spam/suspended DIDs anti-joined out. pds_type is
+  // precomputed so query-time filters don't re-run the LIKE classification.
+  // PRIMARY KEY (did) doubles as the lookup index analysis scripts join on.
   console.log("Building cohort_base...");
   await sql.unsafe(`
     DROP TABLE IF EXISTS analysis.cohort_base_new;
@@ -101,6 +119,9 @@ async function main() {
   console.log(`  cohort_base: ${cohortCount.toLocaleString()} rows`);
 
   // ── Atomic swap ───────────────────────────────────────────────────────────────
+  // Drop old tables (frees their index/constraint names) then rename the freshly
+  // built tables and their indexes onto the canonical names, all in one
+  // transaction so readers see either the old or new tables, never neither.
   console.log("Swapping new tables into place...");
   await sql.begin(async (tx) => {
     await tx.unsafe(`

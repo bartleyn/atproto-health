@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>local.atproto-health.collect-labels-bottags</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/node</string>
+        <string>/Users/nathanbartley/srv/atproto-health/node_modules/.bin/tsx</string>
+        <string>--env-file</string>
+        <string>/Users/nathanbartley/srv/atproto-health/.env</string>
+        <string>/Users/nathanbartley/srv/atproto-health/src/lib/collectors/skywatch-labels.ts</string>
+        <string>bottags</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/nathanbartley/srv/atproto-health</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <!-- Hourly at :00; feedmoreseemore_moderation syncs at :20 -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/nathanbartley/Library/Logs/atproto-health/collect-labels-bottags.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/nathanbartley/Library/Logs/atproto-health/collect-labels-bottags.log</string>
+</dict>
+</plist>

@@ -2,7 +2,8 @@
  * Fetches account labels from a labeler and stores them in the DB.
  *
  * Filters to did: URIs only (skips post/record labels).
- * Skips negated labels (val starting with "!") — stores current positive labels only.
+ * Skips negated labels (val starting with "!") — stores current positive labels only,
+ * unless retractOnNegation is set, in which case a negation deletes the row.
  * Resumable: stores cursor so re-runs continue from where they left off.
  * Idempotent: upserts on (did, label) primary key.
  *
@@ -12,6 +13,7 @@
  *   npm run collect:bsky-mod             # Bluesky moderation labeler (subscribeLabels stream)
  *   npm run collect:bsky-mod -- --reset
  *   npm run collect:bsky-mod -- --stream-from 0   # replay the stream from a given seq
+ *   npm run collect:bottags              # gracekind bottags labeler (undisclosed-bot/-human)
  *
  *   # Backfill mode — recover labels the normal scan skips.
  *   # The labeler's queryLabels?uriPatterns=* pagination occasionally returns a
@@ -37,6 +39,10 @@ const LABELERS: Record<string, {
   mode?: "query" | "stream";
   // current-state table for MOD_ACTIONS; negations delete rows
   actionTable?: string;
+  // queryLabels uriPatterns (default "*"); "did:*" skips post labels server-side
+  uriPattern?: string;
+  // negations delete the (did, label) row instead of being skipped
+  retractOnNegation?: boolean;
 }> = {
   skywatch: {
     endpoint:    "https://ozone.skywatch.blue",
@@ -65,6 +71,17 @@ const LABELERS: Record<string, {
     did:         "did:plc:oubsyca6hhgqhmbbk27lvs7c",
     table:       "plc.stechlab_labels",
     cursorTable: "plc.stechlab_labels_cursor",
+  },
+  // gracekind's bottags labeler: curated, report-driven account labels. Post labels (bot-tag
+  // replies) dominate its stream, so query did:* only. Labels get retracted, so negations delete.
+  bottags: {
+    endpoint:          "https://bot-tag-labeler.gracekind.net",
+    did:               "did:plc:cdkysjo2taj2jpy3qoostthu",
+    table:             "plc.bottags_labels",
+    cursorTable:       "plc.bottags_labels_cursor",
+    labelFilter:       ["undisclosed-bot", "undisclosed-human"],
+    uriPattern:        "did:*",
+    retractOnNegation: true,
   },
 };
 
@@ -102,7 +119,7 @@ interface QueryLabelsResponse {
 }
 
 async function fetchPage(cursor?: string, limit = PAGE_SIZE): Promise<QueryLabelsResponse> {
-  const params = new URLSearchParams({ uriPatterns: "*", limit: String(limit) });
+  const params = new URLSearchParams({ uriPatterns: config.uriPattern ?? "*", limit: String(limit) });
   if (cursor) params.set("cursor", cursor);
   const url = `${config.endpoint}/xrpc/com.atproto.label.queryLabels?${params}`;
   const res = await fetch(url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
@@ -136,15 +153,26 @@ async function fetchPageResilient(cursor: string | undefined, maxLimit: number):
 async function ingestLabels(labels: RawLabel[]): Promise<number> {
   await ingestActions(labels);
   // latest occurrence per (did, label); ON CONFLICT can't touch a row twice in one INSERT
-  const byKey = new Map<string, { did: string; label: string; labeled_at: string }>();
+  const byKey = new Map<string, RawLabel>();
   for (const label of labels) {
     if (!label.uri.startsWith("did:")) continue;
-    if (label.val.startsWith("!") || label.neg) continue;
+    if (label.val.startsWith("!")) continue;
+    if (label.neg && !config.retractOnNegation) continue;
     if (label.src !== config.did) continue;
     if (config.labelFilter && !config.labelFilter.includes(label.val)) continue;
-    byKey.set(`${label.uri}|${label.val}`, { did: label.uri, label: label.val, labeled_at: label.cts });
+    byKey.set(`${label.uri}|${label.val}`, label);
   }
-  const batch = [...byKey.values()];
+  const latest = [...byKey.values()];
+  const retracted = latest.filter(l => l.neg);
+  if (retracted.length > 0) {
+    const values = retracted.map((_, i) => `($${i * 2 + 1}, $${i * 2 + 2})`).join(", ");
+    await sql.unsafe(
+      `DELETE FROM ${config.table} t USING (VALUES ${values}) AS v(did, label)
+       WHERE t.did = v.did AND t.label = v.label`,
+      retracted.flatMap(l => [l.uri, l.val])
+    );
+  }
+  const batch = latest.filter(l => !l.neg).map(l => ({ did: l.uri, label: l.val, labeled_at: l.cts }));
   if (batch.length > 0) {
     const values = batch.map((_, i) => `($${i * 3 + 1}, $${i * 3 + 2}, $${i * 3 + 3})`).join(", ");
     const params = batch.flatMap(r => [r.did, r.label, r.labeled_at]);
@@ -478,34 +506,11 @@ async function main() {
   while (config.mode !== "stream") {
     const page = await fetchPage(cursor);
     pages++;
-
-    const batch: { did: string; label: string; labeled_at: string }[] = [];
-    for (const label of page.labels) {
-      totalFetched++;
-      if (!label.uri.startsWith("did:")) continue;
-      if (label.val.startsWith("!") || label.neg) continue;
-      if (label.src !== config.did) continue;
-      if (config.labelFilter && !config.labelFilter.includes(label.val)) continue;
-      batch.push({ did: label.uri, label: label.val, labeled_at: label.cts });
-    }
-
-    if (batch.length > 0) {
-      const values = batch.map((_, i) => `($${i * 3 + 1}, $${i * 3 + 2}, $${i * 3 + 3})`).join(", ");
-      const params = batch.flatMap(r => [r.did, r.label, r.labeled_at]);
-      await sql.unsafe(
-        `INSERT INTO ${config.table} (did, label, labeled_at) VALUES ${values}
-         ON CONFLICT (did, label) DO UPDATE SET labeled_at = EXCLUDED.labeled_at`,
-        params
-      );
-      totalInserted += batch.length;
-    }
+    totalFetched += page.labels.length;
+    totalInserted += await ingestLabels(page.labels);
 
     if (page.cursor) {
-      await sql.unsafe(
-        `INSERT INTO ${config.cursorTable} (id, cursor, updated_at) VALUES (1, $1, NOW())
-         ON CONFLICT (id) DO UPDATE SET cursor = EXCLUDED.cursor, updated_at = NOW()`,
-        [page.cursor]
-      );
+      await saveCursor(page.cursor);
       cursor = page.cursor;
     }
 

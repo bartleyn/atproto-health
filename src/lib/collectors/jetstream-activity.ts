@@ -147,6 +147,7 @@ const THIRD_PARTY_PREFIXES = [
 const EXTRA_BSKY_COLLECTIONS = [
   "app.bsky.labeler.service",         // Labeler declarations
   "app.bsky.actor.status",            // Live-now status
+  "app.bsky.actor.link",              // Profile links (referenced from profile.links[])
 ];
 
 const WANTED_COLLECTIONS = [

@@ -3,6 +3,8 @@
  *   1. Daily account activity (did_activity_daily) — one row per (did, date), bitmask of collections used
  *   2. Delete events (delete_events_daily) — daily counts by event type
  *   2b. Per-DID post deletes (post_deletes_daily) — app.bsky.feed.post deletes per (did, date)
+ *   2c. Post delete events (post_delete_events) — one row per post delete with the post's
+ *       TID creation time, for age-at-deletion. Disable with CAPTURE_POST_DELETE_EVENTS=0.
  *   3. Starter pack joins (starterpack_joins_daily)
  *   4. Per-DID language usage (did_langs)
  *   5. Non-bsky collection activity (collection_activity) — event counts per (collection, DID)
@@ -49,6 +51,7 @@ import sql from "../db/pg";
 import { bufferPost, flushScorer, scorerShutdown } from "./post-scorer";
 import { edgesFromEvent, type EdgeRow, type CommitEvent } from "./edge-capture";
 import { ParquetPartsSink } from "./edge-sinks";
+import { tidToDate } from "./tid";
 import { existsSync } from "node:fs";
 import path from "node:path";
 
@@ -208,6 +211,11 @@ const deleteBuffer = new Map<string, number>();
 // delete_events_daily only keeps aggregate-by-collection counts; this attributes
 // post deletes to the account doing them so we can see who deletes posts.
 const postDeleteBuffer = new Map<string, number>();
+
+// Per-event post deletes for post_delete_events; append-only. On by default (~200K rows/day).
+const CAPTURE_POST_DELETE_EVENTS = process.env.CAPTURE_POST_DELETE_EVENTS !== "0";
+type PostDeleteEvent = { did: string; rkey: string; post_created_at: Date | null; deleted_at: Date };
+const postDeleteEventBuffer: PostDeleteEvent[] = [];
 
 // Starter pack join buffer: "starterpack_uri|date" → count
 const starterpackBuffer = new Map<string, number>();
@@ -466,6 +474,7 @@ function snapshotBuffers() {
     activityRows:    [...activityBuffer.entries()],
     deleteRows:      [...deleteBuffer.entries()],
     postDeleteRows:  [...postDeleteBuffer.entries()],
+    postDeleteEvents: postDeleteEventBuffer.splice(0),
     starterpackRows: [...starterpackBuffer.entries()],
     langRows:        [...langBuffer.entries()],
     langStatsRows:   [...langStatsBuffer.entries()],
@@ -523,6 +532,9 @@ function restoreSnapshot(s: Snapshot) {
   const newerEdges = edgeRowBuffer.splice(0, edgeRowBuffer.length);
   for (const r of s.edgeRows) edgeRowBuffer.push(r);
   for (const r of newerEdges) edgeRowBuffer.push(r);
+  const newerPostDeletes = postDeleteEventBuffer.splice(0, postDeleteEventBuffer.length);
+  for (const r of s.postDeleteEvents) postDeleteEventBuffer.push(r);
+  for (const r of newerPostDeletes) postDeleteEventBuffer.push(r);
   for (const [uri, meta] of s.feedGenRows) if (!feedGenBuffer.has(uri)) feedGenBuffer.set(uri, meta);
   for (const uri of s.feedGenDeletes) feedGenDeleteBuffer.add(uri);
   // A later like or unlike of the same edge supersedes the snapshot's.
@@ -578,7 +590,7 @@ async function flush() {
     starterpackBuffer.size === 0 && langBuffer.size === 0 && langStatsBuffer.size === 0 &&
     collectionBuffer.size === 0 && feedGenBuffer.size === 0 && feedGenDeleteBuffer.size === 0 &&
     feedLikeBuffer.size === 0 && profileBuffer.length === 0 &&
-    edgeRowBuffer.length === 0;
+    edgeRowBuffer.length === 0 && postDeleteEventBuffer.length === 0;
   if (nothingBuffered) return;
 
   // Async collection row-count check before snapshotting buffers.
@@ -627,7 +639,7 @@ async function flush() {
 }
 
 async function writeSnapshot(tx: Tx, snapshot: Snapshot) {
-  const { activityRows, deleteRows, postDeleteRows, starterpackRows, langRows, langStatsRows, collectionRows, profileRows, feedGenRows, feedGenDeletes, feedLikeRows, feedLikeEdges, feedUnlikes, cursorToSave } = snapshot;
+  const { activityRows, deleteRows, postDeleteRows, postDeleteEvents, starterpackRows, langRows, langStatsRows, collectionRows, profileRows, feedGenRows, feedGenDeletes, feedLikeRows, feedLikeEdges, feedUnlikes, cursorToSave } = snapshot;
 
   // did_activity_daily — chunked upsert with bitwise OR merge.
   for (let i = 0; i < activityRows.length; i += ACTIVITY_CHUNK_SIZE) {
@@ -675,6 +687,17 @@ async function writeSnapshot(tx: Tx, snapshot: Snapshot) {
       ON CONFLICT (did, date) DO UPDATE SET count = post_deletes_daily.count + EXCLUDED.count
     `;
     if (i + ACTIVITY_CHUNK_SIZE < postDeleteRows.length) {
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
+  }
+
+  // post_delete_events — append-only, 4 cols.
+  for (let i = 0; i < postDeleteEvents.length; i += ACTIVITY_CHUNK_SIZE) {
+    const chunk = postDeleteEvents.slice(i, i + ACTIVITY_CHUNK_SIZE);
+    await tx`
+      INSERT INTO activity.post_delete_events ${tx(chunk, "did", "rkey", "post_created_at", "deleted_at")}
+    `;
+    if (i + ACTIVITY_CHUNK_SIZE < postDeleteEvents.length) {
       await new Promise<void>(resolve => setImmediate(resolve));
     }
   }
@@ -823,6 +846,7 @@ async function pruneOldRows() {
     sql`DELETE FROM activity.did_activity_daily WHERE date < ${cutoff}`,
     sql`DELETE FROM activity.delete_events_daily WHERE date < ${cutoff}`,
     sql`DELETE FROM activity.post_deletes_daily WHERE date < ${cutoff}`,
+    sql`DELETE FROM activity.post_delete_events WHERE deleted_at < ${cutoff}`,
     sql`DELETE FROM activity.lang_stats WHERE date < ${cutoff}`,
     sql`DELETE FROM activity.collection_activity WHERE date < ${cutoff}`,
   ]);
@@ -1001,6 +1025,12 @@ function connect() {
           if (evt.commit.collection === "app.bsky.feed.post") {
             const pkey = `${evt.did}|${date}`;
             postDeleteBuffer.set(pkey, (postDeleteBuffer.get(pkey) ?? 0) + 1);
+            if (CAPTURE_POST_DELETE_EVENTS) {
+              postDeleteEventBuffer.push({
+                did: evt.did, rkey: evt.commit.rkey,
+                post_created_at: tidToDate(evt.commit.rkey), deleted_at: new Date(evt.time_us / 1000),
+              });
+            }
           }
 
           // Unlikes: remove the edge if this like record was one of our feed likes

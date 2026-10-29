@@ -1,7 +1,8 @@
 /**
  * Fetches account labels from a labeler and stores them in the DB.
  *
- * Filters to did: URIs only (skips post/record labels).
+ * Filters to did: URIs only (skips post/record labels); bsky-mod also keeps feed-generator labels
+ * in plc.bsky_mod_feed_labels.
  * Skips negated labels (val starting with "!") — stores current positive labels only,
  * unless retractOnNegation is set, in which case a negation deletes the row.
  * Resumable: stores cursor so re-runs continue from where they left off.
@@ -14,6 +15,7 @@
  *   npm run collect:bsky-mod -- --reset
  *   npm run collect:bsky-mod -- --stream-from 0   # replay the stream from a given seq
  *   npm run collect:bottags              # gracekind bottags labeler (undisclosed-bot/-human)
+ *   npm run collect:bsky-mod -- --subjects --feeds   # backfill labels on every live feed generator
  *
  *   # Backfill mode — recover labels the normal scan skips.
  *   # The labeler's queryLabels?uriPatterns=* pagination occasionally returns a
@@ -43,6 +45,8 @@ const LABELERS: Record<string, {
   uriPattern?: string;
   // negations delete the (did, label) row instead of being skipped
   retractOnNegation?: boolean;
+  // current-state table for this labeler's labels on feed generators; negations delete rows
+  feedLabelTable?: string;
 }> = {
   skywatch: {
     endpoint:    "https://ozone.skywatch.blue",
@@ -61,6 +65,7 @@ const LABELERS: Record<string, {
     // wildcard queryLabels returns 400 "temporarily disabled" since 2026-10-08
     mode:        "stream",
     actionTable: "plc.bsky_mod_actions",
+    feedLabelTable: "plc.bsky_mod_feed_labels",
   },
   // Behavioral/activity labeler: 25 "inform"-severity activity labels (post/reply volume, 24/7
   // posting gaps, follow/unfollow churn, profile-metadata churn, same-URL spam). No labelFilter =
@@ -152,6 +157,7 @@ async function fetchPageResilient(cursor: string | undefined, maxLimit: number):
 /** Filter a raw page to the labels we store and upsert them. Returns # inserted. */
 async function ingestLabels(labels: RawLabel[]): Promise<number> {
   await ingestActions(labels);
+  await ingestFeedLabels(labels);
   // latest occurrence per (did, label); ON CONFLICT can't touch a row twice in one INSERT
   const byKey = new Map<string, RawLabel>();
   for (const label of labels) {
@@ -185,32 +191,44 @@ async function ingestLabels(labels: RawLabel[]): Promise<number> {
   return batch.length;
 }
 
-/** Apply account MOD_ACTIONS to actionTable in order: a label upserts its row, a negation deletes it. */
-async function ingestActions(labels: RawLabel[]) {
-  if (!config.actionTable) return;
+/** Keep `table` as current state, in order: the latest label per (subject, value) upserts its row, a negation deletes it. */
+async function applyCurrentState(table: string, [subject, value]: [string, string], labels: RawLabel[]) {
   const latest = new Map<string, RawLabel>();
-  for (const label of labels) {
-    if (!label.uri.startsWith("did:") || label.src !== config.did || !MOD_ACTIONS.includes(label.val)) continue;
-    latest.set(`${label.uri}|${label.val}`, label);
-  }
+  for (const label of labels) latest.set(`${label.uri}|${label.val}`, label);
   const all = [...latest.values()];
   const applied = all.filter(l => !l.neg), negated = all.filter(l => l.neg);
   if (applied.length > 0) {
     const values = applied.map((_, i) => `($${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}, $${i * 4 + 4}::timestamptz)`).join(", ");
     await sql.unsafe(
-      `INSERT INTO ${config.actionTable} (did, action, labeled_at, expires_at) VALUES ${values}
-       ON CONFLICT (did, action) DO UPDATE SET labeled_at = EXCLUDED.labeled_at, expires_at = EXCLUDED.expires_at`,
+      `INSERT INTO ${table} (${subject}, ${value}, labeled_at, expires_at) VALUES ${values}
+       ON CONFLICT (${subject}, ${value}) DO UPDATE SET labeled_at = EXCLUDED.labeled_at, expires_at = EXCLUDED.expires_at`,
       applied.flatMap(l => [l.uri, l.val, l.cts, l.exp ?? null])
     );
   }
   if (negated.length > 0) {
     const values = negated.map((_, i) => `($${i * 2 + 1}, $${i * 2 + 2})`).join(", ");
     await sql.unsafe(
-      `DELETE FROM ${config.actionTable} t USING (VALUES ${values}) AS v(did, action)
-       WHERE t.did = v.did AND t.action = v.action`,
+      `DELETE FROM ${table} t USING (VALUES ${values}) AS v(${subject}, ${value})
+       WHERE t.${subject} = v.${subject} AND t.${value} = v.${value}`,
       negated.flatMap(l => [l.uri, l.val])
     );
   }
+}
+
+/** Account MOD_ACTIONS -> actionTable. */
+async function ingestActions(labels: RawLabel[]) {
+  if (!config.actionTable) return;
+  await applyCurrentState(config.actionTable, ["did", "action"], labels.filter(l =>
+    l.uri.startsWith("did:") && l.src === config.did && MOD_ACTIONS.includes(l.val)));
+}
+
+const FEED_URI = /^at:\/\/[^/]+\/app\.bsky\.feed\.generator\/[^/]+$/;
+
+/** This labeler's labels on feed generators (porn, sexual, !takedown, ...) -> feedLabelTable. */
+async function ingestFeedLabels(labels: RawLabel[]) {
+  if (!config.feedLabelTable) return;
+  await applyCurrentState(config.feedLabelTable, ["uri", "label"], labels.filter(l =>
+    l.src === config.did && FEED_URI.test(l.uri)));
 }
 
 /**
@@ -283,9 +301,9 @@ async function backfill(opts: { from?: string; to?: number; step: number }) {
  */
 const SUBJECT_BATCH = 20;
 
-async function fetchSubjectLabels(dids: string[]): Promise<RawLabel[]> {
+async function fetchSubjectLabels(subjects: string[]): Promise<RawLabel[]> {
   const params = new URLSearchParams({ limit: "250" });
-  for (const did of dids) params.append("uriPatterns", did);
+  for (const s of subjects) params.append("uriPatterns", s);
   const url = `${config.endpoint}/xrpc/com.atproto.label.queryLabels?${params}`;
   let lastErr: unknown;
   for (let attempt = 1; attempt <= 3; attempt++) {
@@ -306,22 +324,25 @@ async function fetchSubjectLabels(dids: string[]): Promise<RawLabel[]> {
  * Subject sweep: pull a candidate cohort of DIDs from plc.plc_account_creations and
  * query the labeler per-subject in batches. Designed for label values the firehose
  * doesn't surface in bulk (e.g. bluesky-elder lives on accounts created before ~2023-09).
+ * With feeds, the cohort is every live feed generator in activity.feed_generators instead.
  */
-async function subjectSweep(opts: { before: string; after: string; concurrency: number }) {
-  console.log(`\nSubject-sweep mode: created_at in [${opts.after}, ${opts.before}), ` +
+async function subjectSweep(opts: { before: string; after: string; concurrency: number; feeds: boolean }) {
+  console.log(`\nSubject-sweep mode: ${opts.feeds ? "live feed generators" : `created_at in [${opts.after}, ${opts.before})`}, ` +
     `batch=${SUBJECT_BATCH}, concurrency=${opts.concurrency}`);
 
-  const candidates = await sql.unsafe<{ did: string }[]>(
-    `SELECT did FROM plc.plc_account_creations
-     WHERE created_at >= $1 AND created_at < $2 ORDER BY created_at`,
-    [opts.after, opts.before]
-  );
-  console.log(`Candidates: ${candidates.length.toLocaleString()} accounts`);
+  const candidates = opts.feeds
+    ? await sql.unsafe<{ subject: string }[]>(
+        `SELECT uri AS subject FROM activity.feed_generators WHERE deleted_at IS NULL ORDER BY uri`)
+    : await sql.unsafe<{ subject: string }[]>(
+        `SELECT did AS subject FROM plc.plc_account_creations
+         WHERE created_at >= $1 AND created_at < $2 ORDER BY created_at`,
+        [opts.after, opts.before]);
+  console.log(`Candidates: ${candidates.length.toLocaleString()} ${opts.feeds ? "feeds" : "accounts"}`);
   if (candidates.length === 0) return;
 
   const batches: string[][] = [];
   for (let i = 0; i < candidates.length; i += SUBJECT_BATCH) {
-    batches.push(candidates.slice(i, i + SUBJECT_BATCH).map(r => r.did));
+    batches.push(candidates.slice(i, i + SUBJECT_BATCH).map(r => r.subject));
   }
 
   let done = 0, inserted = 0;
@@ -473,6 +494,7 @@ async function main() {
       before:      getArg("--created-before") ?? "2023-10-01",
       after:       getArg("--created-after") ?? "1970-01-01",
       concurrency: getArg("--concurrency") ? Number(getArg("--concurrency")) : 6,
+      feeds:       args.includes("--feeds"),
     });
     await sql.end();
     return;
@@ -482,6 +504,7 @@ async function main() {
     await sql.unsafe(`DELETE FROM ${config.table}`);
     await sql.unsafe(`DELETE FROM ${config.cursorTable}`);
     if (config.actionTable) await sql.unsafe(`DELETE FROM ${config.actionTable}`);
+    if (config.feedLabelTable) await sql.unsafe(`DELETE FROM ${config.feedLabelTable}`);
     console.log(`Reset: cleared existing labels and cursor.\n`);
   }
 

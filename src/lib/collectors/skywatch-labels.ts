@@ -96,7 +96,7 @@ const MOD_ACTIONS = ["!takedown", "!suspend", "!hide"];
 const args = process.argv.slice(2);
 const labelerName = args.includes("--labeler")
   ? args[args.indexOf("--labeler") + 1]
-  : args.find(a => LABELERS[a]) ?? "skywatch";
+  : args[0] && !args[0].startsWith("--") ? args[0] : "skywatch";
 
 const config = LABELERS[labelerName];
 if (!config) {
@@ -509,7 +509,8 @@ async function main() {
     totalFetched += page.labels.length;
     totalInserted += await ingestLabels(page.labels);
 
-    if (page.cursor) {
+    // empty pages return cursor "0"; saving it would rewind to the start
+    if (page.cursor && page.labels.length > 0) {
       await saveCursor(page.cursor);
       cursor = page.cursor;
     }

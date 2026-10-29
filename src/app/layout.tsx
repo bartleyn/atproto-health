@@ -32,9 +32,6 @@ export default function RootLayout({
             <Link href="/analytics" className="text-gray-400 underline hover:text-gray-100 transition-colors">
               Analytics
             </Link>
-            <Link href="/decentralization" className="text-gray-400 underline hover:text-gray-100 transition-colors">
-              Decentralization
-            </Link>
           </div>
         </nav>
         {children}

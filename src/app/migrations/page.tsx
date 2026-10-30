@@ -68,11 +68,11 @@ export default async function MigrationsPage() {
             <StatCard
               label="Total repos"
               value={fmt(scanStats.totalUsers)}
-              sub={`Across ${scanStats.total.toLocaleString()} PDSes ever seen · from listRepos · approximate, likely undercounting`}
+              sub="Summed from listRepos scans · approximate, likely undercounting"
             />
           </div>
           {/* Row 2: migration details */}
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <StatCard
               label="Accounts that migrated"
               value={fmt(stats.unique_migrating_dids)}
@@ -84,9 +84,14 @@ export default async function MigrationsPage() {
               sub="Independent PDS transfers only · excludes bsky.social and internal bsky.network resharding"
             />
             <StatCard
-              label="PDSes ever seen"
-              value={fmt(scanStats.total)}
-              sub="From directory scans, PLC discovery, and did:web"
+              label="did:plc PDSes"
+              value={fmt(scanStats.didPlc)}
+              sub="PDSes ever hosting did:plc repos · 15 relays' host lists and our listRepos scans"
+            />
+            <StatCard
+              label="did:web PDSes"
+              value={fmt(scanStats.didWeb)}
+              sub={`PDSes ever hosting did:web repos · ${fmt(scanStats.didWebOnly)} never hosted did:plc`}
             />
           </div>
         </CollapsibleSection>

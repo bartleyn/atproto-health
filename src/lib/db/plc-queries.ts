@@ -92,6 +92,7 @@ export function junkPdsFilter(col = "pds_url") {
     AND ${col} NOT LIKE '%.home/%'
     AND ${col} NOT LIKE '%.home:%'
     AND ${col} NOT LIKE '%//bsky.network%'
+    AND ${col} !~ '://knot[0-9]*\\.'
     AND length(${col}) <= 200
   `;
 }
@@ -846,6 +847,9 @@ export interface OverviewStats {
   offline: number;
   openReg: number;
   inviteOnly: number;
+  didPlc: number;
+  didWeb: number;
+  didWebOnly: number;
   countries: number;
   totalUsers: number;
   activeUsers: number;
@@ -854,7 +858,7 @@ export interface OverviewStats {
 export async function getOverviewStats(hideBsky = false): Promise<OverviewStats> {
   const bskyFilter = hideBsky ? `AND ${BSKY_SNAP_FILTER}` : "";
 
-  const [dirStatsRows, repoStatsRows] = await Promise.all([
+  const [dirStatsRows, repoStatsRows, didMethodRows] = await Promise.all([
     sql.unsafe<{ total: number; online: number; offline: number; openReg: number; inviteOnly: number }[]>(`
       SELECT
         COUNT(*)::int as total,
@@ -901,6 +905,29 @@ export async function getOverviewStats(hideBsky = false): Promise<OverviewStats>
         COALESCE(SUM(active), 0)::bigint as "activeUsers"
       FROM backend_deduped
     `),
+    // PDSes that ever hosted each DID method: any listRepos scan, plus relay hosts with accounts
+    // (relay counts don't split by DID method, so a relay host counts as did:plc unless scans show did:web only)
+    sql.unsafe<{ didPlc: number; didWeb: number; didWebOnly: number }[]>(`
+      SELECT
+        COUNT(*) FILTER (WHERE plc)::int as "didPlc",
+        COUNT(*) FILTER (WHERE web)::int as "didWeb",
+        COUNT(*) FILTER (WHERE web AND NOT plc)::int as "didWebOnly"
+      FROM (
+        SELECT host, BOOL_OR(scan_plc) OR (BOOL_OR(relay) AND NOT BOOL_OR(scan_web)) AS plc, BOOL_OR(scan_web) AS web
+        FROM (
+          SELECT LOWER(REGEXP_REPLACE(RTRIM(pds_url, '/'), '^https?://', '')) AS host,
+                 did_plc_count > 0 AS scan_plc, did_web_count > 0 AS scan_web, false AS relay
+          FROM plc.pds_repo_status_snapshots
+          WHERE ${JUNK_PDS_FILTER} ${bskyFilter}
+          UNION ALL
+          SELECT hostname, false, false, true
+          FROM health.relay_hosts
+          WHERE account_count > 0 AND hostname !~ '^knot[0-9]*\\.'
+            ${hideBsky ? "AND hostname NOT LIKE '%host.bsky.network'" : ""}
+        ) sources
+        GROUP BY host
+      ) per_pds
+    `),
   ]);
 
   const dirStats = dirStatsRows[0];
@@ -912,6 +939,7 @@ export async function getOverviewStats(hideBsky = false): Promise<OverviewStats>
     offline: dirStats.offline,
     openReg: dirStats.openReg,
     inviteOnly: dirStats.inviteOnly,
+    ...didMethodRows[0],
     countries: repoStats.countries,
     totalUsers: Number(repoStats.totalUsers),
     activeUsers: Number(repoStats.activeUsers),

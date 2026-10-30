@@ -1,8 +1,8 @@
 /**
  * Relay host collector.
  *
- * Reads the full host list the AT Protocol relay advertises via
- * com.atproto.sync.listHosts and upserts it into health.relay_hosts.
+ * Reads the full host list each public relay advertises via
+ * com.atproto.sync.listHosts and upserts their union into health.relay_hosts.
  *
  * This is a different population from health.pds_instances: that table is the
  * union of everything we've *ever* discovered (mary-ext's directory scrape, PLC
@@ -15,7 +15,24 @@
  */
 import sql from "../db/pg";
 
-const RELAY = process.env.RELAY_URL ?? "https://bsky.network";
+// Bluesky's relays plus the community relays taproot.at tracks
+const RELAYS = process.env.RELAY_URLS?.split(",") ?? [
+  "https://bsky.network",
+  "https://relay1.us-east.bsky.network",
+  "https://relay1.us-west.bsky.network",
+  "https://europe.firehose.network",
+  "https://northamerica.firehose.network",
+  "https://asia.firehose.network",
+  "https://relay.fire.hose.cam",
+  "https://relay3.fr.hose.cam",
+  "https://atproto.africa",
+  "https://relay.xero.systems",
+  "https://relay.upcloud.world",
+  "https://relay.waow.tech",
+  "https://zlay.waow.tech",
+  "https://relay.feeds.blue",
+  "https://relay1.eurosky.network",
+];
 const PAGE_LIMIT = 1000;
 // listHosts pages at 1000; ~6K hosts today. The cap is a runaway guard against a
 // relay returning a non-advancing cursor, not an expected limit.
@@ -28,13 +45,13 @@ interface RelayHost {
   status?: string;
 }
 
-async function fetchAllHosts(): Promise<RelayHost[]> {
+async function fetchAllHosts(relay: string): Promise<RelayHost[]> {
   const hosts: RelayHost[] = [];
   let cursor: string | undefined;
   let pages = 0;
 
   do {
-    const url = new URL(`${RELAY}/xrpc/com.atproto.sync.listHosts`);
+    const url = new URL(`${relay}/xrpc/com.atproto.sync.listHosts`);
     url.searchParams.set("limit", String(PAGE_LIMIT));
     if (cursor) url.searchParams.set("cursor", cursor);
 
@@ -59,19 +76,24 @@ async function fetchAllHosts(): Promise<RelayHost[]> {
 
 async function main() {
   console.log(`=== Relay Host Collector ===`);
-  console.log(`Relay: ${RELAY}`);
-
-  const hosts = await fetchAllHosts();
-  if (hosts.length === 0) {
-    console.error("No hosts returned — leaving existing rows untouched.");
-    await sql.end();
-    process.exit(1);
+  const hosts: RelayHost[] = [];
+  for (const relay of RELAYS) {
+    console.log(`Relay: ${relay}`);
+    // one relay being down shouldn't block the weekly PDS collection that runs after this
+    const batch = await fetchAllHosts(relay).catch(err => (console.warn(`  ! ${relay}: ${err.message}`), []));
+    if (batch.length === 0) console.warn(`  ! ${relay} returned no hosts`);
+    hosts.push(...batch);
   }
+  if (hosts.length === 0) throw new Error("No relay returned hosts — leaving existing rows untouched");
 
-  // Dedupe on hostname: ON CONFLICT cannot fire twice for the same key inside a
-  // single INSERT, so a duplicate in one page would abort the statement.
+  // One row per hostname across relays, keeping the relay that reports the most accounts
   const byHost = new Map<string, RelayHost>();
-  for (const h of hosts) if (h.hostname) byHost.set(h.hostname, h);
+  for (const h of hosts) {
+    if (!h.hostname) continue;
+    const key = h.hostname.toLowerCase();
+    const seen = byHost.get(key);
+    if (!seen || (h.accountCount ?? 0) > (seen.accountCount ?? 0)) byHost.set(key, { ...h, hostname: key });
+  }
 
   const rows = [...byHost.values()].map(h => ({
     hostname: h.hostname,

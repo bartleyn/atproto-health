@@ -49,7 +49,7 @@ def npm_run(script: str, extra_args: str = "") -> None:
 # ---------------------------------------------------------------------------
 with DAG(
     "atproto_pds_collection",
-    description="Collect PDS directory, geo, and user counts",
+    description="Collect relay hosts, PDS directory, geo, and user counts",
     start_date=datetime(2026, 1, 1),
     schedule="0 3 * * 0",  # weekly, Sunday 3am
     catchup=False,
@@ -57,6 +57,10 @@ with DAG(
     tags=["atproto", "collection"],
 ) as pds_dag:
     
+    @task()
+    def relay_hosts():
+        npm_run("collect:relay")
+
     @task()
     def collect():
         npm_run("collect")
@@ -74,7 +78,7 @@ with DAG(
         npm_run("scan:pds-status", "--include-bsky --concurrency 15")
 
     # Run in parallel — both write independent fields to pds_snapshots
-    collect() >> collect_geo() >> collect_users() >> pds_scan_status()
+    relay_hosts() >> collect() >> collect_geo() >> collect_users() >> pds_scan_status()
 
 
 

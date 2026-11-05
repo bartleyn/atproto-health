@@ -118,6 +118,9 @@ type Roll = { rows: StoredPost[]; posts: number; live: BufferedPost[]; dlq: DlqR
 const _newRoll = (): Roll => ({ rows: [], posts: 0, live: [], dlq: [], openedAt: 0 });
 
 let scorerBuffer: BufferedPost[] = [];
+// Posts that arrived while the buffer was full, waiting to be spilled to the DLQ.
+let _overflow: BufferedPost[] = [];
+let _spilledSinceFlush = 0;
 let _droppedSinceFlush = 0;
 let _storage: Storage | null = null;
 let _flushing = false;
@@ -201,10 +204,24 @@ export async function uploadScoredPart(rows: StoredPost[], name: string): Promis
 export function bufferPost(post: BufferedPost): void {
   if (!SCORER_ENABLED) return;
   if (scorerBuffer.length >= SCORER_MAX_BUFFER) {
-    _droppedSinceFlush++;
+    _overflow.push(post);
     return;
   }
   scorerBuffer.push(post);
+}
+
+// Move overflow to the DLQ; posts are only lost if that write fails.
+async function _spillOverflow(): Promise<void> {
+  if (_overflow.length === 0) return;
+  const posts = _overflow;
+  _overflow = [];
+  try {
+    await _enqueueDlq(posts, "buffer overflow", 0);
+    _spilledSinceFlush += posts.length;
+  } catch (err) {
+    _droppedSinceFlush += posts.length;
+    console.warn(`[scorer] Overflow spill failed, dropped ${posts.length} posts: ${err}`);
+  }
 }
 
 // On shutdown: upload whatever is already scored, then save the live buffer to DLQ so
@@ -213,6 +230,7 @@ export function bufferPost(post: BufferedPost): void {
 export async function scorerShutdown(): Promise<void> {
   if (!SCORER_ENABLED) return;
   await _cutRoll();
+  await _spillOverflow();
   if (scorerBuffer.length === 0) return;
   const posts = scorerBuffer;
   scorerBuffer = [];
@@ -454,7 +472,9 @@ async function _writeMetrics(row: {
 }
 
 export async function flushScorer(): Promise<void> {
-  if (!SCORER_ENABLED || _flushing) return;
+  if (!SCORER_ENABLED) return;
+  // A flush can run for hours; keep spilling overflow on each tick meanwhile.
+  if (_flushing) return _spillOverflow();
   _flushing = true;
   _uploadFailedSinceFlush = 0;
   const startedAt = Date.now();
@@ -468,6 +488,10 @@ export async function flushScorer(): Promise<void> {
 
     const posts = scorerBuffer;
     scorerBuffer = [];
+    await _spillOverflow();
+    const spilled = _spilledSinceFlush;
+    _spilledSinceFlush = 0;
+    failed = spilled;
     dropped = _droppedSinceFlush;
     _droppedSinceFlush = 0;
     buffered = posts.length;
@@ -504,8 +528,9 @@ export async function flushScorer(): Promise<void> {
     if (posts.length > 0) {
       const filtered = MIN_TOXICITY > 0 ? ` (min-toxicity=${MIN_TOXICITY})` : "";
       const failedNote = failed > 0 ? `, ${failed} to DLQ` : "";
-      const dropNote = dropped > 0 ? `, dropped ${dropped} over cap ${SCORER_MAX_BUFFER}` : "";
-      console.log(`[scorer] Flushed ${succeeded} posts${filtered}${failedNote}${dropNote} (${chunks.length} batches)`);
+      const spillNote = spilled > 0 ? ` (${spilled} over cap ${SCORER_MAX_BUFFER})` : "";
+      const dropNote = dropped > 0 ? `, dropped ${dropped} (DLQ spill failed)` : "";
+      console.log(`[scorer] Flushed ${succeeded} posts${filtered}${failedNote}${spillNote}${dropNote} (${chunks.length} batches)`);
     }
 
   } finally {

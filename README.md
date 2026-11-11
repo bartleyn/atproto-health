@@ -64,7 +64,7 @@ npm run collect:activity     # Jetstream activity metrics
 
 ## Architecture
 
-Two separate pipelines that share a SQLite database:
+Two separate pipelines that share a Postgres database:
 
 **Collector pipeline** — TypeScript scripts under `src/lib/collectors/`, run via `npx tsx`. Each writes snapshot rows to the DB. Designed to run independently on different schedules; the dashboard always shows the freshest available data per field.
 
@@ -73,8 +73,6 @@ Two separate pipelines that share a SQLite database:
 **Merged view pattern** — The `pds_latest` view in `queries.ts` composites the freshest directory snapshot, geo snapshot, and user-count snapshot per PDS. Running `collect:geo` and `collect:users` on different schedules still gives you a coherent view.
 
 **Snapshot-based storage** — Collection runs insert new rows, never update. History is preserved; the merged view picks the most recent completed run per field category.
-
-**Federation classification** — The Jetstream sampler distinguishes true cross-party federation from Bluesky-internal cross-shard traffic between `*.host.bsky.network` shards and `bsky.social`. See `isBskyHosted()` in `jetstream-sample.ts`.
 
 
 ## Stack

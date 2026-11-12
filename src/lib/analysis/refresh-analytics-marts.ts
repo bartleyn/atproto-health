@@ -2,7 +2,7 @@
  * Incrementally refreshes the /analytics page marts (migrations/010_analysis_marts.sql):
  *   analysis.wau_by_cohort, analysis.dau_mau_daily, analysis.retention_cohorts.
  *
- * Run weekly (see the refresh-analytics-marts launchd job), then
+ * Run weekly by the atproto_analytics_marts Airflow DAG, then
  * `npm run analysis:cache` to publish the results:
  *
  *   npm run analysis:marts

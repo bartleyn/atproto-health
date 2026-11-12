@@ -133,3 +133,31 @@ with DAG(
         npm_run("analysis:dashboard-cache")
 
     dashboard_cache()
+
+
+# ---------------------------------------------------------------------------
+# DAG 4: Analytics marts — weekly, after plc_pipeline (plc tables feed cohort_base)
+# ---------------------------------------------------------------------------
+with DAG(
+    "atproto_analytics_marts",
+    description="Rebuild analysis cohorts, refresh /analytics marts, publish analytics.json",
+    start_date=datetime(2026, 1, 1),
+    schedule="0 10 * * 0",  # weekly, Sunday 10:00 UTC (plc_pipeline done by ~08:00)
+    catchup=False,
+    default_args=default_args,
+    tags=["atproto", "analysis"],
+) as marts_dag:
+
+    @task()
+    def build_analysis_db():
+        npm_run("analysis:build")
+
+    @task()
+    def refresh_marts():
+        npm_run("analysis:marts")
+
+    @task()
+    def publish_analytics_cache():
+        npm_run("analysis:cache")
+
+    build_analysis_db() >> refresh_marts() >> publish_analytics_cache()

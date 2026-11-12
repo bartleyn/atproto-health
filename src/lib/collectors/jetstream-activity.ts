@@ -1,7 +1,7 @@
 /**
  * Long-running Jetstream collector that tracks:
  *   1. Daily account activity (did_activity_daily) — one row per (did, date), bitmask of collections used
- *   2. Delete events (delete_events_daily) — daily counts by event type
+ *   2. Delete events (delete_events_daily) — daily counts by event type (incl. identity events)
  *   2b. Per-DID post deletes (post_deletes_daily) — app.bsky.feed.post deletes per (did, date)
  *   2c. Post delete events (post_delete_events) — one row per post delete with the post's
  *       TID creation time, for age-at-deletion. Disable with CAPTURE_POST_DELETE_EVENTS=0.
@@ -141,6 +141,11 @@ const THIRD_PARTY_PREFIXES = [
   "net.atmowx.*",                     // Atmowx weather observations
   "at.adsb.*",                        // ADS-B flight records
   "cc.lefht.*",                       // lefht mesh sightings
+  "com.atproto.*",                    // atproto core records (lexicon.schema, repo.registration)
+  "com.germnetwork.*",                // Germ E2EE messaging declarations
+  "social.pinksky.*",                 // Pinksky
+  "so.sprk.*",                        // Spark short video
+  "org.hypercerts.*",                 // Hypercerts
 ];
 
 // app.bsky collections subscribed without a bitmask bit
@@ -1056,6 +1061,8 @@ function connect() {
           ? (evt.account.status ?? "deleted")
           : "reactivated";
         recordDelete(`${date}|account:${status}`);
+      } else if (evt.kind === "identity") {
+        recordDelete(`${date}|identity`);
       } else if (evt.kind === "tombstone") {
         recordDelete(`${date}|tombstone`);
       }

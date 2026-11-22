@@ -80,6 +80,8 @@ const DLQ_MAX_ATTEMPTS = 10;
 const _dlqLimitIdx = _args.indexOf("--dlq-drain-limit");
 const DLQ_DRAIN_LIMIT = _dlqLimitIdx >= 0 ? parseInt(_args[_dlqLimitIdx + 1], 10) : 50;
 const SCORE_BATCH_SIZE  = 50;
+// Posts per DLQ INSERT: 500 rows × 6 params, well under PG's 65,534-parameter cap.
+const DLQ_INSERT_POSTS  = 25_000;
 const SCORE_CONCURRENCY = 4;
 const DLQ_SCORE_TIMEOUT_MS  = 50_000;
 const LIVE_SCORE_TIMEOUT_MS = 30_000;
@@ -242,21 +244,24 @@ async function _enqueueDlq(posts: BufferedPost[], error: string, attempts: numbe
   const backoffMs = Math.min(Math.pow(attempts + 1, 2) * 5 * 60_000, 8 * 60 * 60_000);
   const nextRetry = new Date(Date.now() + backoffMs).toISOString();
   const failedAt = new Date().toISOString();
-  const rows = [];
-  for (let i = 0; i < posts.length; i += SCORE_BATCH_SIZE) {
-    const slice = posts.slice(i, i + SCORE_BATCH_SIZE);
-    rows.push({
+  for (let start = 0; start < posts.length; start += DLQ_INSERT_POSTS) {
+    const slices = toBatches(posts.slice(start, start + DLQ_INSERT_POSTS), SCORE_BATCH_SIZE);
+    const rows = slices.map(slice => ({
       posts_json: JSON.stringify(slice),
       failed_at: failedAt,
       attempts,
       last_error: error,
       next_retry_at: nextRetry,
       post_count: slice.length,
-    });
-  }
-  if (rows.length > 0) {
+    }));
     await sql`INSERT INTO activity.score_dlq ${sql(rows, "posts_json", "failed_at", "attempts", "last_error", "next_retry_at", "post_count")}`;
   }
+}
+
+export function toBatches<T>(items: T[], size: number): T[][] {
+  const batches: T[][] = [];
+  for (let i = 0; i < items.length; i += size) batches.push(items.slice(i, i + size));
+  return batches;
 }
 
 // A DLQ row that failed again (scoring or its part's upload): back off, or drop it once
@@ -496,10 +501,7 @@ export async function flushScorer(): Promise<void> {
     _droppedSinceFlush = 0;
     buffered = posts.length;
 
-    const chunks: BufferedPost[][] = [];
-    for (let i = 0; i < posts.length; i += SCORE_BATCH_SIZE) {
-      chunks.push(posts.slice(i, i + SCORE_BATCH_SIZE));
-    }
+    const chunks = toBatches(posts, SCORE_BATCH_SIZE);
     batches = chunks.length;
 
     await _runPool(chunks, SCORE_CONCURRENCY, async chunk => {

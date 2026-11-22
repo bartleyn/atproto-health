@@ -85,7 +85,7 @@ const THIRD_PARTY_PREFIXES = [
   "chat.bsky.*",                      // Bluesky DMs (non-declaration events)
   "com.whtwnd.*",                     // WhiteWind blog
   "fyi.unravel.*",                    // Frontpage link aggregator
-  "sh.tangled.*",                     // Tangled git forge
+  "org.tangled.*",                    // Tangled git forge
   "xyz.opnshelf.*",                   // OpenShelf media tracking
   "xyz.statusphere.*",                // Statusphere status updates
   "social.kibun.*",                   // Kibun status

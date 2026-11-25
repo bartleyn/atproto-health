@@ -55,13 +55,13 @@ modal volume get gnn-data /fraud_clusters.json cache/fraud_clusters.json`}
     <main className="min-h-screen bg-black text-gray-200 p-8">
       <h1 className="text-2xl font-bold text-white">Inauthenticity cluster discovery</h1>
       <p className="mt-2 text-sm text-gray-500">
-        GraphSAGE follow-graph embeddings, clustered into {data.k.toLocaleString()} groups.
+        Embeddings from a heterogeneous GNN (follows, blocks, replies, etc), clustered into {data.k.toLocaleString()} groups.
         This is meant to group users together based on how they look in the follower-graph. Generated{" "}
         {new Date(data.generated_at).toLocaleString()}.
       </p>
 
       <div className="mt-4 rounded-lg border border-amber-600/40 bg-amber-950/30 p-3 text-sm text-amber-200/90">
-        <strong>Exploratory.</strong> These clusters come from a follow-graph model -- its purpose here is to surface coordinated structure for{" "}
+        <strong>Exploratory.</strong> These clusters come from a graph model -- its purpose here is to surface coordinated structure for{" "}
         <em>human review</em>, not to label anyone. The per-account scores are model guesses and{" "}
         <strong>can be wrong</strong>; nothing here is a determination of wrongdoing.
       </div>
@@ -78,8 +78,7 @@ modal volume get gnn-data /fraud_clusters.json cache/fraud_clusters.json`}
       </div>
 
       <p className="mt-6 text-xs text-gray-600">
-        Note: this is surfacing coordinated structure the labelers and per-node models miss. High-enrichment, high-density clusters with many unlabeled members are
-        the candidates worth a manual look.
+        Note: this is surfacing coordinated structure the labelers and per-node models miss. High-enrichment, high-density clusters with many unlabeled members are worth investigation.
       </p>
     </main>
   );
